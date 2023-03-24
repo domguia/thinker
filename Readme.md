@@ -1,21 +1,19 @@
 # Th1nker model
 
-Why?
+Why?  
 Because AI today is not smart enough, for lazy guys like me
 
-What?
+What?  
 Train a model to learn a thinking process steps
 
-How? by :
+How? by :  
 giving steps in the process
 2. splitting knowledge than think process
 3. by giving process mechanism to build/access knowledge
 
--- ideas : rewrite a text in the format "question? answer. question? answer. " and use that text to teach a model to follow instructions with just LLMM standard AR and avoid complex RL
-
 ## In details
-the thinker can be a transformer base model, made with building blocks responsible for each task in the process
-[detailed visual architecture](https://www.figma.com/file/MNe376umkTm5iCpg9kSmcq/thinking-transformer?node-id=328-196&t=fIFQ60I3hcz39A4t-0)
+the thinker can be a transformer base model, made with building blocks responsible for each task in the process. Here the [visual explanation](visual-explanation.svg).  
+[figma latest visual](https://www.figma.com/file/MNe376umkTm5iCpg9kSmcq/thinking-transformer?node-id=328-196&t=fIFQ60I3hcz39A4t-0)
 
 ### Blocks
 Here are the proposed building blocks:
@@ -30,14 +28,12 @@ Here are the proposed building blocks:
     3. Ouput : is the expected output, optionally autoregressively (output probe)
 3. medium-term memory component
     1. LatentStore : we store latent at each processing step, they will be read at inference with ReadLatentLayer
-    2. 
 4. long-term memory : is also built with latent but of the past run of the model
     1. it will be probably very large and need an indexer to get the useful one
     2. ReadLatentLayer here will be associated with a learned Indexer
-    3. 
 
 ### Inference
-
+Ability to vary computation budget and block call sequence depending on task. Consider using RL to find a better sequence of block calls.
 
 ### Training
 1. learn how to do step:  
