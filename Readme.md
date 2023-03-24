@@ -7,9 +7,10 @@ What?
 Train a model to learn a thinking process steps
 
 How? by :  
-giving steps in the process
-2. splitting knowledge than think process
-3. by giving process mechanism to build/access knowledge
+1. separate reasoning and knowledge in LLM
+2. allow variable computation budget via re-usable computations blocks (step-by-step inference)
+3. allow differentiable out-of-model memory/knowledge mechanism (long-term trained indexer/retrieval)
+
 
 ## In details
 the thinker can be a transformer base model, made with building blocks responsible for each task in the process. Here the [visual explanation](visual-explanation.svg).  
@@ -18,7 +19,7 @@ the thinker can be a transformer base model, made with building blocks responsib
 ### Blocks
 Here are the proposed building blocks:
 1. the step process is given by calling during inference:
-    1. ReadLayer : read any kind of information
+    1. ReadLayer : read any kind of information [1](https://arxiv.org/abs/2202.05826)
     2. ProcessLayer : process information, always the same
     3. OutputLayer : get output from
     4. Probe (optional) : predicting the block that will be used in the next thinking step
@@ -118,4 +119,11 @@ with the following particularities:
 2. use object orient programming to avoid rewriting the same code eg. inheritance InputLayer -> TextInputLayer
 3. Focus on simplicity to edit, since we are doing research we try a lot of things using too much/rigid software design should be avoided
 
-Why not ask existing LLM : "Now propose me a software design with pytorch"
+Why not ask existing LLM : "Now propose me a software design with pytorch"  
+
+  
+  
+Some good ideas from:
+1. [End-to-end Algorithm Synthesis with Recurrent Networks: Logical Extrapolation Without Overthinking, Arpit Bansal al.](https://arxiv.org/abs/2202.05826) 
+2. [Perceiver: General Perception with Iterative Attention, Andrew Jaegle al.](https://arxiv.org/abs/2103.03206)
+3. 
