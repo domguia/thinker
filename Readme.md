@@ -28,7 +28,7 @@ Here are the proposed building blocks:
     2. ProcessLayer : process information, always the same
     3. OutputLayer : get output from
     4. Probe (optional) : predicting the block that will be used in the next thinking step
-2. processing memory (or short-term memory)
+2. processing memory (or short-term memory) [3](https://arxiv.org/abs/2301.04589)
     1. Latent : is as input in all layers mentioned before, it also the initial input of the model
     2. Input : is the input data we want to process, we may have TextInput, ImageInput ... , InputText + Latent -> ReadTextInputLayer
     3. Ouput : is the expected output, optionally autoregressively (output probe)
@@ -131,3 +131,4 @@ rewrite a text in the format "question? answer. question? answer. " and use that
 Some good ideas from:
 1. [End-to-end Algorithm Synthesis with Recurrent Networks: Logical Extrapolation Without Overthinking, Arpit Bansal al.](https://arxiv.org/abs/2202.05826) 
 2. [Perceiver: General Perception with Iterative Attention, Andrew Jaegle al.](https://arxiv.org/abs/2103.03206)
+3. [Memory Augmented Large Language Models are Computationally Universal, Dale Schuurmans](https://arxiv.org/abs/2301.04589)
