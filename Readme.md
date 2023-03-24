@@ -7,9 +7,15 @@ What?
 Train a model to learn a thinking process steps
 
 How? by :  
-1. separate reasoning and knowledge in LLM
-2. allow variable computation budget via re-usable computations blocks (step-by-step inference)
-3. allow differentiable out-of-model memory/knowledge mechanism (long-term trained indexer/retrieval)
+1. Separate reasoning and knowledge in LLM.
+2. Allow variable computation budget through reusable computation blocks.
+3. Enable differentiable out-of-model memory/knowledge mechanism via long-term trained indexer/retrieval.
+
+How to do that:
+1. Have a latent process for main computation that uses re-usable blocks similar to those in Perceiver architecture.
+2. Use cross-attention for input/output by re-attending to the input in the process and generating output progressively.
+3. Use past latent as thinking memory by cross-attending on the past latent while ensuring that everything is differentiable.
+4. Implement a long-term memory mechanism by cross-attending on all relevant content types (optionally, a rigid memory learned during training).
 
 ## In details
 the thinker can be a transformer base model, made with building blocks responsible for each task in the process. Here the [visual explanation](visual-explanation.svg).  
