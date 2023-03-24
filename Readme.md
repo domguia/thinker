@@ -132,3 +132,4 @@ Some good ideas from:
 1. [End-to-end Algorithm Synthesis with Recurrent Networks: Logical Extrapolation Without Overthinking, Arpit Bansal al.](https://arxiv.org/abs/2202.05826) 
 2. [Perceiver: General Perception with Iterative Attention, Andrew Jaegle al.](https://arxiv.org/abs/2103.03206)
 3. [Memory Augmented Large Language Models are Computationally Universal, Dale Schuurmans](https://arxiv.org/abs/2301.04589)
+4. [Looped Transformers as Programmable Computers, Angeliki Giannou al.](https://arxiv.org/abs/2301.13196)
