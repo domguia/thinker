@@ -127,9 +127,150 @@ with the following particularities:
 **idea** : 
 Why not ask existing LLM : "Now propose me a software design with pytorch"  
 rewrite a text in the format "question? answer. question? answer. " and use that text to teach a model to follow instructions with just LLM standard AR and avoid complex RL  
-  
+
+
+# important update : 1 Layers to rules them all
+with more general flexibility we can do more
+
+### flex projection layer
+adaptative projection layer, with random input/output dimensions
+eg. `
+x1 = tensor(16,2), x2 = tensor(16,10)
+proj = nn.FlexLayer(in=6,out=4)
+
+proj(x1) == x1 @ proj.matrix[0:2,:] # x1.shape[0] == 2
+proj(x1).shape == 16,4
+
+proj(x2) == x2[:6] @ proj.matrix # proj.matrix.shape[0] == 6
+proj(x2).shape == 16,4
+
+proj(x2, in=2) == x2[:2] @ proj.matrix[0:2,:]
+proj(x2).shape == 16,4
+
+proj(x2, out=3) == x2[:6] @ proj.matrix[:,0:3] # proj.matrix.shape[0] == 6
+proj(x2).shape == 16,3
+`
+
+### flex attention
+here we use flex project to get Q,K and V
+so the inputs can contain elements with different dimensions (text embed, image embed, memory embed, ...)
+Q,K shared dimension and V dimension can change during inference
+
+the general rule of changing dimension is:
+n current dim, m next dim
+- if n>m: we use m first component of n dim eg. vec[:m]
+- if n==m: no change
+- if n<m: we need a projection layer for that, is m is too high for the defined projection layer. raise an error
+
+we multi-head add some constrain, in the dim. to handle it we can:
+1- we can fix head dimension, and vary number of head, by adding +head_dim is like adding 1head, or remove -head_dim is like removing 1head
+2- we can fix the number of head but vary head dim, in this case for flex projection to work, we should chunk the input before flex projection
+we want to avoid head to inconsistent while varying dimension.
+
+we will use both during training for varying dim, and also after training to increase model size
+
+### flex input/output
+#### input:
+call be a list of heterogeneous dimension attend via cross attention, on input by latent
+when doing cross attention we keep still include latent so they can attend on them self
+inputs -> K_input, V_input: K_input=K_1, K_2, .. K_n same for V 
+    - input_1 -> K_1, V_1
+    - input_2 -> K_2, V_2
+    - input_n -> K_n, V_n
+latent -> K_l,Q_l,V_l
+K = K_input, K_l
+V = V_input, V_l
+after we just do standard scaled dot.
+
+ideas: when doing cross-attention we keep the latent un-projected since they already have V dimension (multi-head brings down that dimension internally) 
+thinking: I was worrying the input can be very large compared to the latent and crush the information in the latent which are the short memory of the model, a solution for that could be, just use an only subpart of latent query and value Q_l[:s], V_l[:s] while reading input, the other latent[s:] stay un-changed. So we can do standard self attn during the pure processing step. This might un-necessary complexity no need to that just keep it in mind.
+
+kind of input:
+we can use the embedding signal to differentiate inputs
+signal.input.model_output # since we give model output as input
+signal.input.token.fill_text_here
+
+more vary input:
+this allows us for the same input to work at different dimensions,
+eg. token embedding, which can be sliced embed[:,:s] during training this will the first vector component more informative and the last less informative but they add add will add a more precision this will be very useful for :
+- reduce dimension by still efficiently keeping information
+- balance memory dimension
+- during inference to balance compute
+- when we scale up the model the child model can easily learn (or init param) from the parent by just considering the child's higher dimensions as additive information.
+
+
+#### output:
+
+to get ouput we use embeding signal:
+
+signal.output.text_start # init text generation
+signal.output.memory # extract short
+signal.output.probe # predict thing about model
+signal.output.index # predict thing about model
+
+how: (is basically a transformer decoder on the latent)
+output_signal cross attend on latent (and maybe inputs)
+output_signal -> Q 
+latent -> K,V
+latent,inputs -> K,V # optionaly
+
+after we got attention
+output_signal -> output
+
+we can also make it causal, in that case
+output_signal -> Q,K_o,V_o 
+latent -> K_l,V_l
+Q=Q, K=K_l+K_o, V = V_l+V_o
+with mask so that:
+    output_signal[0], attends only on latent 
+    output_signal[1], attends on latent and output_signal[0]
+    output_signal[n], attends on latent and output_signal[0..n-1]
+that allow to do autoregressive modeling
+
+eg. for memory output  
+memory_signal = signal.output.memory
+
+we how effectively vary memory_signal: embed_dim and number_of_components
+an approach could be : memory_signal = [signal_embed, rand_embed, ..., rand_embed]
+
+memory_signal -> output = memory_value, index
+Note: index would be trained by looking at the utility of each memory component (utility could be attention map)
+signal.output.index -> index_to_find, the loss would be index_to_find[n] = index[n] for the same memory component, but index_to_find[n] != index[m] for different memory component. Problem: this is contrastive learning with only one positive example, which may not work. We can just train index_to_find,index to be close eg. mse_loss(index_to_find,index)
+
+
+
+#### why not latent
+we can make latent dimensions flexible
+
+**General note about flexibility:** it's possible that adding only 1 component doesn't help the model that much to handle information, we can make flexibility by jumping off a fixed number of components, a jump of multiple of K (jump factor). At least that's probably sure we scale up the model.
+
+### flex training
+
+1. we can only have one layer, that we call for everything: read input, process, store in memory, read memory, generate output, and predict index, ...
+2. we just change, how we run cross attention and the embedding we give to trigger behavior
+3. we latent that we have in and out attention, they act like processing memory or short-term memory
+4. the model can give output and reuse them (backprop should work) which act like medium-term memory
+5. to build long-term memory, we run the other chunk of related input and give as output memory as input to the running mode
+6. during training, we should after some layer do stop the gradient, so that model learns how to start with cold latent/memory so that at interference we can have a deeper run than during training [End-to-end Algorithm Synthesis with Recurrent Networks](1)
+7. we can flex the latent, by adding/remove some during training or remove/adding dimension
+
+### scale up model
+we create a bigger model (student) that learn from smaller (teach)
+every time when varying dimension if the dimension falls in the domain where the small model(teacher) has been trained on we use, the small model output latent as a signal with a coefficient and add it to the real output compute by the bigger parent. this will not add so much perturbation since both model run in that specific flex configuration.
+
+coefficient could high at the beginning like 0.8 and reducing while the parent start reach performance of the student
+
+coefficient = 0.8 * max(0, child_performance - parent_performance - 0.3 ) # for performance the higher the better. But we may use perplexity during expriment 
+this mean : start with 0.8 coffecient and reduce it util the parent reach 70% of the children, in the same flex configuration. sothat we let the learn completly new mechanism. it just for boot starting the model
+
+
+# Reference
+
+[More details](https://typst.app/project/rhEBD144ScLMqpuimnY7vs)  
+
 Some good ideas from:
 1. [End-to-end Algorithm Synthesis with Recurrent Networks: Logical Extrapolation Without Overthinking, Arpit Bansal al.](https://arxiv.org/abs/2202.05826) 
 2. [Perceiver: General Perception with Iterative Attention, Andrew Jaegle al.](https://arxiv.org/abs/2103.03206)
 3. [Memory Augmented Large Language Models are Computationally Universal, Dale Schuurmans](https://arxiv.org/abs/2301.04589)
 4. [Looped Transformers as Programmable Computers, Angeliki Giannou al.](https://arxiv.org/abs/2301.13196)
+5. [Reflexion: an autonomous agent with dynamic memory and self-reflection](https://arxiv.org/abs/2303.11366)
