@@ -260,8 +260,18 @@ every time when varying dimension if the dimension falls in the domain where the
 
 coefficient could high at the beginning like 0.8 and reducing while the parent start reach performance of the student
 
-coefficient = 0.8 * max(0, child_performance - parent_performance - 0.3 ) # for performance the higher the better. But we may use perplexity during expriment 
+coefficient = 0.8 * max(0, child_performance - parent_performance - 0.3 ) # for performance the higher the better. But we may use perplexity during experiment 
 this mean : start with 0.8 coffecient and reduce it util the parent reach 70% of the children, in the same flex configuration. sothat we let the learn completly new mechanism. it just for boot starting the model
+
+
+# long vs short term memory
+
+we can have specific embedding for short term and long term memory
+so that when doing inference on normal task we can ask long term memory information.
+but how do you when long term memory information will be usefull?
+
+we can add a utility probe: that try to predict the utility of a information block, base on how frequent/intense the model give attention to it.
+the utility probe should be share between short/long term memory, because it's easier to train it with compression and short term memory module. we expect the probe to generalize longterm extraction, so that it's also work during inference.
 
 
 # Reference
