@@ -284,3 +284,8 @@ Some good ideas from:
 3. [Memory Augmented Large Language Models are Computationally Universal, Dale Schuurmans](https://arxiv.org/abs/2301.04589)
 4. [Looped Transformers as Programmable Computers, Angeliki Giannou al.](https://arxiv.org/abs/2301.13196)
 5. [Reflexion: an autonomous agent with dynamic memory and self-reflection](https://arxiv.org/abs/2303.11366)
+
+
+6. Deep Implicit Layers
+http://implicit-layers-tutorial.org/
+https://youtu.be/MX1RJELWONc
