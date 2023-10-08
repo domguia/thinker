@@ -263,6 +263,9 @@ coefficient could high at the beginning like 0.8 and reducing while the parent s
 coefficient = 0.8 * max(0, child_performance - parent_performance - 0.3 ) # for performance the higher the better. But we may use perplexity during experiment 
 this mean : start with 0.8 coffecient and reduce it util the parent reach 70% of the children, in the same flex configuration. sothat we let the learn completly new mechanism. it just for boot starting the model
 
+gradient check pointing for memory efficiency  
+https://huggingface.co/docs/transformers/v4.18.0/en/performance#using-accelerate  
+https://github.com/cybertronai/gradient-checkpointing  
 
 # long vs short term memory
 
