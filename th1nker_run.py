@@ -72,10 +72,12 @@ if __name__ == '__main__':
     dataset = NumbersComputeDataset(TASK_SCHEME)
     batch_size = 27
     dataloader = DataLoader(dataset, batch_size=batch_size)
-
+    
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print("PyTorch device :", device)
     # cfg(vocab_size=NumbersComputeDataset.get_vocabulary_size())
-    model = Th1nker(cfg)
-
+    model = Th1nker(cfg).to(device)
+    
     import torchinfo
     torchinfo.summary(model)
 
@@ -83,6 +85,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.SGD(model.parameters(), lr=0.005, momentum=0.9)
     
     for idx, (inputs,targets) in enumerate(dataloader):
+        inputs,targets = inputs.to(device), targets.to(device)
         batch_size = inputs.size(0)
 
         logs = CfgNode()
