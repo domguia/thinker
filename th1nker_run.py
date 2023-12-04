@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 from thinker_model import Th1nker, compute_loss #, CfgNode
 from numbers_data import NumbersComputeDataset, TASK_SCHEME
 
+# should be defined here because of globals()
 class CfgNode:
     """ a lightweight configuration class inspired by yacs """
     def __init__(self, **kwargs):
@@ -75,7 +76,13 @@ if __name__ == '__main__':
     # cfg(vocab_size=NumbersComputeDataset.get_vocabulary_size())
     model = Th1nker(cfg)
 
-    for inputs,targets in dataloader:
+    import torchinfo
+    torchinfo.summary(model)
+
+    # Optimizers specified in the torch.optim package
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.005, momentum=0.9)
+    
+    for idx, (inputs,targets) in enumerate(dataloader):
         batch_size = inputs.size(0)
 
         logs = CfgNode()
@@ -93,6 +100,8 @@ if __name__ == '__main__':
         #     model.compute_step()
 
         #### full run with gradient
+
+        optimizer.zero_grad()
 
         latent_size = np.random.randint(cfg.min_latent_size, cfg.max_latent_size+1)
 
@@ -152,10 +161,13 @@ if __name__ == '__main__':
         _, probe_loss, pred_loss, output_losses, outputs_probe_losses = loss
 
         # loss = probe_loss + pred_loss[:,None] + outputs_probe_losses
-        loss = output_losses.mean()
-        loss.backward()
+        output_loss = output_losses.mean()
+        outputs_probe_loss = outputs_probe_losses.mean()
+        (output_loss + outputs_probe_loss*16).backward()
 
-        print(f"loss: {loss.item():.4f}, n_step: {n_step}, latent_size: {latent_size}")
+        optimizer.step()
+
+        print(f"{idx} loss: {output_loss.item():.4f} + {outputs_probe_loss.item():.4f}, n_step: {n_step}, latent_size: {latent_size}")
 
         # logs('probe_loss, pred_loss, outputs_probe_losses')
         # logs('good_pred_ratio,loss')

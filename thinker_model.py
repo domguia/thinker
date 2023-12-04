@@ -42,6 +42,18 @@ class Th1nker(nn.Module):
         ### END Block
         
         self.config = config
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.LayerNorm):
+            torch.nn.init.zeros_(module.bias)
+            torch.nn.init.ones_(module.weight)
 
     def init(self, batch_size, latent_size):
         self.latent_size = latent_size
@@ -314,7 +326,7 @@ def compute_loss(output, targets, probe_mode="number_reg", probe_aggr="mean"): #
         ## number prediction probe, just make regression on predicted word
         outputs_probe_target = outputs_probe
 
-    outputs_probe_losses = nn.functional.mse_loss(outputs_probe_target, targets, reduction="none")
+    outputs_probe_losses = nn.functional.mse_loss(outputs_probe_target, targets.float()/16, reduction="none")
 
     if probe_aggr=="mean":
         probe_target = outputs_probe_target.mean() # average of values
@@ -348,7 +360,7 @@ if __name__ == '__main__':
         bias=False,
 
         resid_pdrop = 0.1,
-        attn_pdrop=0.1,
+        attn_pdrop = 0.1,
 
         vocab_size = 256,
         
