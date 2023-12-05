@@ -1,4 +1,5 @@
 # Th1nker model
+_Note: Sorry if reading this is difficult, this text is full of typos and fuzzy ideas, I will clean it while progressing on the work. Thanks!_
 
 Why?  
 Because AI today is not smart enough, for lazy guys like me
