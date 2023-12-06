@@ -66,7 +66,7 @@ class Th1nker(nn.Module):
     def init_kv_cache(self, batch_size):
         cache_size = self.config.input_cache_size + self.config.mem_cache_size + self.config.max_latent_size
         
-        device = self.trained_latent.device
+        device = self.trained_latent.parameters().__next__().device
         self.k_cache = torch.empty((batch_size, cache_size, self.config.hdim)).to(device) #, dtype=torch.bfloat16)
         self.v_cache = torch.empty((batch_size, cache_size, self.config.hdim)).to(device) #, dtype=torch.bfloat16)
         
@@ -77,15 +77,16 @@ class Th1nker(nn.Module):
         # we can use trained latent but randomly add and removed
         if latent_size==None:
             latent_size = self.config.max_latent_size
-        self.latent = torch.randn((batch_size, latent_size, self.config.hdim))
+        # self.latent = torch.randn((batch_size, latent_size, self.config.hdim))
 
-        # fix device assignation
-        device = self.trained_latent.device
-        self.latent = self.latent.to(device)
-        zeros_tensor = torch.LongTensor([0]).to(device)
+        # # fix device assignation
+        # device = self.trained_latent.parameters().__next__().device
+        # self.latent = self.latent.to(device)
+        # zeros_tensor = torch.LongTensor([0]).to(device)
 
-        # broadcast first latent + some random
-        self.latent = self.latent + self.trained_latent(zeros_tensor)
+        # # broadcast first latent + some random
+        # self.latent = self.latent + self.trained_latent(zeros_tensor)
+        self.latent = self.trained_latent(torch.arange(0, latent_size, dtype=torch.int32)).repeat(batch_size, 1, 1)
 
     def extend_kv_from_cache(self, k=None,v=None, input_lookup=True, mem_lookup=True):
         begin_input_idx = self.config.input_cache_size - self.cache_input_length
@@ -198,8 +199,9 @@ class Th1nker(nn.Module):
 
         q, k ,v  = self.attn_sc(latent).split(self.config.hdim, dim=2)
         k_, v_ = self.extend_kv_from_cache(None, None, input_lookup, mem_lookup)
-        k = torch.concat((k_,k))
-        v = torch.concat((v_,v))
+        
+        k = torch.concat((k_,k), dim=1)
+        v = torch.concat((v_,v), dim=1)
 
         n_head = self.config.number_of_head
         q = q.view(B, q.size(1), n_head, H // n_head).transpose(1, 2) # (B, nh, T, hs)

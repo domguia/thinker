@@ -156,16 +156,23 @@ TASK_SCHEME = {
             # probability of the first element (2) is 1/10 the probability of
             # having the last element and probability should progress exponentialy
         },
-        'max_length' : 64, # input max lenght after tokenisation
+        'max_length' : 41, # input max lenght after tokenisation
         'overflow_strategy' : 'increase_base',
     },
-    'output': '[input]', # same as input
+    'output': { # input base 
+        'base':{
+            'values' : [2, 4, 10, 16],
+            'distribution' : [0.1, 0.2, 0.3, 0.4],
+        },
+        'max_length' : 22
+    },
     'tasks': {
         'add_mult_generator':{
             'task_id': ':fact',
-            'step': [2,4],
+            'step': [2,3],
             'operations': '+-*/',
-            'operation_dist':[.5,.5,.0,.0],
+            'operation_dist':[1,.0,.0,.0],
+            # 'operation_dist':[.5,.5,.0,.0],
             # 'operation_dist':[.1,.1,.4,.4],
         },
         'factorize_generator':{
@@ -262,7 +269,7 @@ class NumbersComputeDataset(IterableDataset):
 
             # Sample input and output bases
             in_base = sample_base(**self.task_scheme['input']['base'])
-            out_base = sample_base(**self.task_scheme['input']['base'])
+            out_base = sample_base(**self.task_scheme['output']['base'])
             # Here we assume output base is same as input base; replace with another sampling if different
 
             # Prepare parameters for the generator function
@@ -288,11 +295,12 @@ class NumbersComputeDataset(IterableDataset):
                 tokenized_y = token_encoder(single_y)
 
                 # Padding
-                max_length = self.task_scheme['input']['max_length']
-                padded_x = self.pad_sequence(tokenized_x, max_length, VOCABULARY_DICT['blank'])
-                padded_y = self.pad_sequence(tokenized_y, max_length, VOCABULARY_DICT['blank'], back=True)
+                input_max_length = self.task_scheme['input']['max_length']
+                output_max_length = self.task_scheme['output']['max_length']
+                padded_x = self.pad_sequence(tokenized_x, input_max_length, VOCABULARY_DICT['blank'])
+                padded_y = self.pad_sequence(tokenized_y, output_max_length, VOCABULARY_DICT['blank'], back=True)
 
-                if len(padded_x)>max_length or len(padded_y)>max_length:
+                if len(padded_x)>input_max_length or len(padded_y)>output_max_length:
                     continue # skip the sample if overflow
 
                 # Return the tokenized and padded sequences, dtype=np.int16 fail at embedding lookup
