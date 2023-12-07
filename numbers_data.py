@@ -244,6 +244,17 @@ def sample_base(values, distribution=None):
 # Update the task_scheme definition with an actual distribution
 # task_scheme['input']['base']['distribution'] = [1 / (2 ** i) for i, _ in enumerate(task_scheme['input']['base']['values'])]
 
+class NumbersCopyDataset(IterableDataset):
+    def __init__(self, start, end, sequence):
+        self.start = start
+        self.end = end
+        self.sequence = sequence
+
+    def __iter__(self):
+        while True:
+            x = torch.randint(self.start, self.end, self.sequence)
+            y = x.copy()
+            yield x, y
 
 class NumbersComputeDataset(IterableDataset):
     def __init__(self, task_scheme):
