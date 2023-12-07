@@ -151,8 +151,8 @@ def token_decoder(inputs, voc_list=VOCABULARY):
 TASK_SCHEME = {
     'input':{ # input base 
         'base':{
-            'values' : [2, 4, 10, 16], # 32, 64, 128, 256],
-            'distribution' : [0.1, 0.2, 0.3, 0.4], # sampling distribution probability
+            'values' : list(range(2,16+1)), #[2, 4, 10, 16], # 32, 64, 128, 256],
+            'distribution' : None, # [0.1, 0.2, 0.3, 0.4], # sampling distribution probability
             # probability of the first element (2) is 1/10 the probability of
             # having the last element and probability should progress exponentialy
         },
@@ -161,8 +161,8 @@ TASK_SCHEME = {
     },
     'output': { # input base 
         'base':{
-            'values' : [2, 4, 10, 16],
-            'distribution' : [0.1, 0.2, 0.3, 0.4],
+            'values' : list(range(2,16+1)), #[2, 4, 10, 16],
+            'distribution' : None, # [0.1, 0.2, 0.3, 0.4],
         },
         'max_length' : 22
     },
@@ -233,7 +233,7 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset, DataLoader
 
-def sample_base(values, distribution):
+def sample_base(values, distribution=None):
     # Normalize the distribution to sum to 1
     # distribution = np.array(distribution)
     # distribution = distribution / distribution.sum()
