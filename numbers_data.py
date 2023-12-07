@@ -284,6 +284,7 @@ class NumbersComputeDataset(IterableDataset):
 
             # Apply base conversion, tokenization, and padding
             for single_x, single_y in zip(x, y):
+                single_x = single_y # HACK: should be done differently
                 single_x = apply_to_base(single_x, in_base)
                 single_y = apply_to_base(single_y, out_base)
 
