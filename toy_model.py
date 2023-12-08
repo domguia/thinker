@@ -44,7 +44,6 @@ class TransformerModel(nn.Module):
         out_query = self.embedding(out_query.repeat(B,1))
         # x = torch.cat((src, out_query), dim=1)
         
-        print(out_query.shape, x.shape)
         output = self.transformer_encoder(out_query, x)
         output = self.linear(output)
         return output
