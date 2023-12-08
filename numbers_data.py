@@ -245,15 +245,15 @@ def sample_base(values, distribution=None):
 # task_scheme['input']['base']['distribution'] = [1 / (2 ** i) for i, _ in enumerate(task_scheme['input']['base']['values'])]
 
 class NumbersCopyDataset(IterableDataset):
-    def __init__(self, start, end, sequence):
-        self.start = start
-        self.end = end
-        self.sequence = sequence
+    def __init__(self, low, high, size):
+        self.low = low
+        self.high = high
+        self.size = size
 
     def __iter__(self):
         while True:
-            x = torch.randint(self.start, self.end, self.sequence)
-            y = x.copy()
+            x = torch.randint(self.low, self.high, self.size)
+            y = x.clone()
             yield x, y
 
 class NumbersComputeDataset(IterableDataset):
