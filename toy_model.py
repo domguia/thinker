@@ -2,7 +2,7 @@ import math
 
 import torch
 from torch import nn, Tensor
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
+from torch.nn import TransformerDecoder, TransformerDecoderLayer
 
 class TransformerModel(nn.Module):
 
@@ -11,8 +11,8 @@ class TransformerModel(nn.Module):
         super().__init__()
         self.model_type = 'Transformer'
         self.pos_encoder = PositionalEncoding(d_model, dropout)
-        encoder_layers = TransformerEncoderLayer(d_model, nhead, d_hid, dropout) # should be nn.TransformerDecoder
-        self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
+        decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout) # should be nn.TransformerDecoder
+        self.transformer_encoder = TransformerDecoder(decoder_layers, nlayers)
         self.embedding = nn.Embedding(ntoken + output_len, d_model)
         self.d_model = d_model
         self.linear = nn.Linear(d_model, ntoken)
@@ -28,24 +28,25 @@ class TransformerModel(nn.Module):
         self.linear.bias.data.zero_()
         self.linear.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, src: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         """
         Arguments:
-            src: Tensor, shape ``[seq_len, batch_size]``
+            x: Tensor, shape ``[seq_len, batch_size]``
 
         Returns:
             output Tensor of shape ``[seq_len, batch_size, ntoken]``
         """
-        B, T = src.shape
-        src = self.embedding(src) * math.sqrt(self.d_model)
-        src = self.pos_encoder(src)
+        B, T = x.shape
+        x = self.embedding(x) * math.sqrt(self.d_model)
+        x = self.pos_encoder(x)
         
-        out_query = self.ntoken + torch.arange(T, device=src.device)
+        out_query = self.ntoken + torch.arange(T, device=x.device)
         out_query = self.embedding(out_query.repeat(B,1))
-        input = torch.cat((src, out_query), dim=1)
+        # x = torch.cat((src, out_query), dim=1)
         
-        output = self.transformer_encoder(input)
-        output = self.linear(output[:,T:])
+        print(out_query.shape, x.shape)
+        output = self.transformer_encoder(out_query, x)
+        output = self.linear(output)
         return output
     
 class PositionalEncoding(nn.Module):
