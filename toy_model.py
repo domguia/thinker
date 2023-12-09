@@ -6,14 +6,15 @@ from torch.nn import TransformerDecoder, TransformerDecoderLayer
 
 class TransformerModel(nn.Module):
 
-    def __init__(self, ntoken: int, output_len: int, d_model: int, nhead: int, d_hid: int,
+    def __init__(self, ntoken: int, max_input_len: int, output_len: int, d_model: int, nhead: int, d_hid: int,
                  nlayers: int, dropout: float = 0.5):
         super().__init__()
         self.model_type = 'Transformer'
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
+        # self.pos_encoder = PositionalEncoding(d_model, dropout)
         decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout) # should be nn.TransformerDecoder
         self.transformer_encoder = TransformerDecoder(decoder_layers, nlayers)
         self.embedding = nn.Embedding(ntoken + output_len, d_model)
+        self.pos_embedding = nn.Embedding(max_input_len, d_model)
         self.d_model = d_model
         self.linear = nn.Linear(d_model, ntoken)
 
@@ -37,12 +38,12 @@ class TransformerModel(nn.Module):
             output Tensor of shape ``[seq_len, batch_size, ntoken]``
         """
         B, T = x.shape
+        pos = torch.arange(0, T, dtype=torch.long, device=x.device).unsqueeze(0) # shape (1, t) 
         x = self.embedding(x) * math.sqrt(self.d_model)
-        x = self.pos_encoder(x)
+        x = x + self.pos_embedding(pos)
+        # x = self.pos_encoder(x)
         
-        out_query = self.ntoken + torch.arange(T, device=x.device)
-        out_query = self.embedding(out_query.repeat(B,1))
-        # x = torch.cat((src, out_query), dim=1)
+        out_query = self.embedding(self.ntoken + pos.repeat(B,1))
         
         output = self.transformer_encoder(out_query, x)
         output = self.linear(output)
