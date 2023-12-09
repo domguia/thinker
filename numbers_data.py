@@ -253,8 +253,7 @@ class NumbersCopyDataset(IterableDataset):
     def __iter__(self):
         while True:
             x = torch.randint(self.low, self.high, self.size)
-            y = x.clone()
-            yield x, y
+            yield x, x.clone()
 
 class NumbersComputeDataset(IterableDataset):
     def __init__(self, task_scheme):
