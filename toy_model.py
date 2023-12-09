@@ -13,8 +13,8 @@ class TransformerModel(nn.Module):
         # self.pos_encoder = PositionalEncoding(d_model, dropout)
         decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout) # should be nn.TransformerDecoder
         self.transformer_encoder = TransformerDecoder(decoder_layers, nlayers)
-        self.embedding = nn.Embedding(ntoken + output_len, d_model)
-        self.pos_embedding = nn.Embedding(max_input_len, d_model)
+        self.embedding = nn.Embedding(ntoken, d_model)
+        self.pos_embedding = nn.Embedding(max_input_len + output_len, d_model)
         self.d_model = d_model
         self.linear = nn.Linear(d_model, ntoken)
 
@@ -26,6 +26,7 @@ class TransformerModel(nn.Module):
     def init_weights(self) -> None:
         initrange = 0.1
         self.embedding.weight.data.uniform_(-initrange, initrange)
+        self.pos_embedding.weight.data.uniform_(-initrange, initrange)
         self.linear.bias.data.zero_()
         self.linear.weight.data.uniform_(-initrange, initrange)
 
@@ -39,14 +40,16 @@ class TransformerModel(nn.Module):
         """
         B, T = x.shape
         pos = torch.arange(0, T, dtype=torch.long, device=x.device).unsqueeze(0) # shape (1, t) 
-        x = self.embedding(x) * math.sqrt(self.d_model)
-        x = x + self.pos_embedding(pos)
+        x = self.pos_embedding(pos) + self.embedding(x) 
+        
+        # x = self.embedding(x) * math.sqrt(self.d_model)
         # x = self.pos_encoder(x)
         
         out_query = self.embedding(self.ntoken + pos.repeat(B,1))
-        
+
         output = self.transformer_encoder(out_query, x)
         output = self.linear(output)
+        
         return output
     
 class PositionalEncoding(nn.Module):
