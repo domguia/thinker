@@ -1,3 +1,6 @@
+import pandas as pd
+import seaborn as sns
+sns.set_style('dark')
 
 class MatchCount:
     def __init__(self, size):
@@ -35,3 +38,45 @@ class CfgNode:
         self.__dict__.update(**{name: globals()[name] for name in args})
     def __str__(self):
         return self.__dict__.__str__()
+
+
+def plot_loss_and_accuracy(logs):
+    # Create a DataFrame from the list of dictionaries.
+    df = pd.DataFrame(logs)
+
+    # Plot the loss values on the left y-axis.
+    sns.lineplot(data=df, x=df.index, y='loss', color='orange') #, hue='step')
+    sns.lineplot(data=df, x=df.index, y='probe_loss', color='peru') #, hue='step')
+    plt.ylabel('Loss')
+    plt.yscale('log',base=2)
+
+    # Plot the accuracy values on the right y-axis.
+    plt.twinx()
+    sns.lineplot(data=df, x=df.index, y='accuracy', color='purple') #, hue='latent')
+    plt.ylabel('Accuracy')
+
+    # Set the title of the plot.
+    plt.title('Loss and Accuracy')
+    plt.xlabel('Step')
+
+
+    # Set the width of the plot.
+    plt.gcf().set_size_inches(12, 4)
+
+    # Show the plot.
+    plt.show()
+
+    use_last_n_batch = 200
+    if len(df)<use_last_n_batch: return
+
+    # Group the data by the latent and step columns.
+    df = df[-use_last_n_batch:].groupby(['latent', 'step']).mean()
+    df = df.reset_index().pivot(index="latent", columns="step", values="accuracy")
+
+    if len(df)<2: return #not interresting
+
+    # Plot a heatmap of the average loss.
+    sns.heatmap(df, annot=True)
+
+    # Show the plot.
+    plt.show()
