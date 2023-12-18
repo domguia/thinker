@@ -6,7 +6,7 @@ from torch.nn import TransformerDecoder, TransformerDecoderLayer
 
 class ToyThinker(nn.Module):
 
-    def __init__(self, ntoken: int, max_latent: int, max_input_len: int, output_len: int, d_model: int, nhead: int, d_hid: int,
+    def __init__(self, vocab_size: int, max_latent: int, max_input_len: int, output_len: int, d_model: int, nhead: int, d_hid: int,
                  nlayers: int, dropout: float = 0.1):
         super().__init__()
         # self.pos_encoder = PositionalEncoding(d_model, dropout)
@@ -16,15 +16,15 @@ class ToyThinker(nn.Module):
         decoder_layers = TransformerDecoderLayer(d_model, nhead, d_model, dropout, batch_first=True) # n_hid = d_model*2 because shoul be smaller
         self.compute_output = TransformerDecoder(decoder_layers, 1) # only one layer
 
-        self.embedding = nn.Embedding(ntoken, d_model)
+        self.embedding = nn.Embedding(vocab_size, d_model)
         self.latent_embedding = nn.Embedding(max_latent, d_model)
         self.pos_embedding_in  = nn.Embedding(max_input_len, d_model)
         self.pos_embedding_out = nn.Embedding(output_len, d_model)
         self.d_model = d_model
-        self.linear = nn.Linear(d_model, ntoken)
+        self.linear = nn.Linear(d_model, vocab_size)
         self.linear_probe = nn.Linear(d_model, 1)
 
-        self.ntoken = ntoken
+        self.vocab_size = vocab_size
         self.max_input_len = max_input_len
         self.output_len = output_len
 
@@ -45,7 +45,7 @@ class ToyThinker(nn.Module):
             x: Tensor, shape ``[seq_len, batch_size]``
 
         Returns:
-            output Tensor of shape ``[seq_len, batch_size, ntoken]``
+            output Tensor of shape ``[seq_len, batch_size, vocab_size]``
         """
         B, T = x.shape
 
@@ -97,7 +97,7 @@ class PositionalEncoding(nn.Module):
     
 
 if __name__ == '__main__':
-    model = TransformerModel(ntoken=17, d_model=32, output_len=5, nhead=4, d_hid=8,
+    model = TransformerModel(vocab_size=17, d_model=32, output_len=5, nhead=4, d_hid=8,
                  nlayers=1, dropout=0.1)
     x = torch.randint(0,16, (2,5))
     y = model(x)
