@@ -38,6 +38,14 @@ class CfgNode:
         self.__dict__.update(**{name: globals()[name] for name in args})
     def __str__(self):
         return self.__dict__.__str__()
+    
+    def sample(self, param):
+        param = self.__dict__[param]
+        if isinstance(param, range):
+            param = list(param)
+        if isinstance(param, list):
+            param = np.random.choice(param)
+        return param
 
 
 def plot_loss_and_accuracy(logs):
@@ -80,3 +88,4 @@ def plot_loss_and_accuracy(logs):
 
     # Show the plot.
     plt.show()
+
