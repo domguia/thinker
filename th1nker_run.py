@@ -24,7 +24,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 from thinker_model import Th1nker, compute_loss
-from numbers_data import NumbersComputeDataset, TASK_SCHEME
+from numbers_data import NumbersComputeDataset
 
 
 def train(r_cfg, dataset, model):
@@ -137,22 +137,10 @@ def train(r_cfg, dataset, model):
         if idx%100==0 and idx>=100:
             from IPython.display import clear_output
             clear_output()
-            # lr = learing_rate * max(np.abs(mean-mean_prev), 100/idx)
-
-            # plt.figure(figsize=(12,4))
-            # plt.plot(loss_tracker)
-            # # plt.plot(np.convolve(loss_tracker, np.ones(1000), 'valid')/1000)
-            # plt.yscale('log',base=10)
-            # # plt.savefig("loss.png")
-            # plt.show()
-            # plt.figure(figsize=(12,4))
-            # plt.plot(acc_tracker)
-            # plt.plot(np.convolve(acc_tracker, np.ones(200), 'valid')/200)
-            # plt.show()
 
             plot_loss_and_accuracy(logs)
 
-
+            # HACK: for update learning rate during training
             # with open('./train_param.txt','r') as f:
             #     lr = float(f.read())*learing_rate
 
