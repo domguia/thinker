@@ -23,210 +23,181 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader
 
-from thinker_model import Th1nker, compute_loss #, CfgNode
+from thinker_model import Th1nker, compute_loss
 from numbers_data import NumbersComputeDataset, TASK_SCHEME
 
-# should be defined here because of globals()
-class CfgNode:
-    """ a lightweight configuration class inspired by yacs """
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-    def merge_from_dict(self, d):
-        self.__dict__.update(d)
-    def __call__(self, *args, **kwargs):
-        self.__dict__.update(**kwargs)
-        args = [item.strip() for items in args for item in items.split(',')]
-        self.__dict__.update(**{name: globals()[name] for name in args})
-    def __str__(self):
-        return self.__dict__.__str__()
 
-cfg = CfgNode(
-    hdim = 512,
-    head_size = 16,
-    number_of_head= 32,
-    resid_pdrop = 0.1,
-    attn_pdrop = 0,
-    bias=False,
+def train(r_cfg, dataset, model):
 
-    vocab_size = 270,
-    
-    input_cache_size = 64,
-    mem_cache_size = 512,
+    batch_size = 1 # 1024
+    dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=4, pin_memory=True)
 
-    min_latent_size = 8,
-    max_latent_size = 32,
-    max_output_len = 32,
-    
-    min_step=2,
-    max_step=7,
+    optimizer.zero_grad()
+    model.train()
 
-    probe_mode="number_reg",
-    good_pred_loss_treshold=0.5,
-    decay_coef=4,
-)
-
-
-if __name__ == '__main__':
-
-
-    dataset = NumbersComputeDataset(TASK_SCHEME)
-    batch_size = 27
-    dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=2)
-    
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print("PyTorch device :", device)
-    # cfg(vocab_size=NumbersComputeDataset.get_vocabulary_size())
-    model = Th1nker(cfg).to(device)
-    
-    # import torchinfo
-    # torchinfo.summary(model)
-
-    # Optimizers specified in the torch.optim package
-    learing_rate=0.002
-    optimizer = torch.optim.Adam(model.parameters(), lr=learing_rate) #, momentum=0.9)
-    
-    loss_tracker = []
+    from time import time
+    start_time = time()
     for idx, (inputs,targets) in enumerate(dataloader):
-        inputs,targets = inputs.to(device), targets.to(device)
+    # for idx, (inputs,targets) in enumerate(dataset):
+        end_dataloading_time = time()
+        # targets = targets.sort(dim=1)[0][:,[0,0,-1,-1]] # predict min and max
+        # inputs,targets = inputs.to(device), targets.to(device)
+        inputs,targets = inputs[0].to(device, non_blocking=True), targets[0].to(device, non_blocking=True)
         batch_size = inputs.size(0)
 
-        logs = CfgNode()
-        logs('batch_size')
 
-        n_step = np.random.randint(cfg.min_step, cfg.max_step)
+        n_latent = 8 #np.random.randint(cfg.min_latent_size, cfg.max_latent_size+1)
+        n_step = 2 #np.random.randint(cfg.min_step, cfg.max_step+1)
         # m_step = np.random.randint(1, n_step)
-        logs('n_step')
 
-        # #### stop gradient run
-        # with torch.no_grad():
-        #     for _ in range(m_step):
+        # latent_size = np.random.randint(cfg.min_latent_size, cfg.max_latent_size+1)
+
+        # with torch.device(device):
+        #     model.init(batch_size, latent_size)
+        #     model.load_input(inputs)
+        # # logs('batch_size, n_step')
+
+        # losses = []
+        # for i in range(n_step-1):
+        #     with torch.device(device):
         #         model.compute_step()
-        # for _ in range(m_step, n_step-1):
-        #     model.compute_step()
+        #     # model.compute_step(with_output=targets.size(1))
+        #     # # output = model.compute_step(with_output=y) #causal
+        #     # output = model.get_output() #parallel
+        #     # loss = compute_loss(output, targets, cfg.probe_m1024ode)
+        #     # losses.append(loss)
 
-        #### full run with gradient
+        # with torch.device(device):
+        #     model.compute_step(with_output=targets.size(1))
+        #     output = model.get_output()
+        #     loss = compute_loss(output, targets, cfg.probe_mode)
 
-        optimizer.zero_grad()
+        #### Toy model
+        # with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        # logits = model(torch.nn.functional.one_hot(inputs, num_classes=16).float())
+        n_target = targets.size(1)
+        logits, output_probe = model(inputs, n_latent, n_target, n_step)
+        output_loss = torch.nn.functional.cross_entropy(logits.permute(0,2,1), targets.long())#, ignore_index=20)
+        probe_loss = torch.nn.functional.mse_loss(output_probe.squeeze(-1), targets.float()/2)
+        #output_loss = output_loss * (n_step*n_latent)/(cfg.max_latent_size*cfg.min_step)
+        end_forward_loss_time = time()
 
-        latent_size = np.random.randint(cfg.min_latent_size, cfg.max_latent_size+1)
+        break_i = 20
+        # for break_i in range(targets.size(1)-1,-1,-1):
+        #     if targets[:,break_i].float().mean() < 20: break
 
-        with torch.device(device):
-            model.init(batch_size, latent_size)
-            model.load_input(inputs)
-        # logs('batch_size, n_step')
-
-        losses = []
-        for i in range(n_step-1):
-            with torch.device(device):
-                model.compute_step()
-            # model.compute_step(with_output=targets.size(1))
-            # # output = model.compute_step(with_output=y) #causal
-            # output = model.get_output() #parallel
-            # loss = compute_loss(output, targets, cfg.probe_mode)
-            # losses.append(loss)
-
-        with torch.device(device):
-            model.compute_step(with_output=targets.size(1))
-            output = model.get_output()
-            loss = compute_loss(output, targets, cfg.probe_mode)
-
-        for break_i in range(targets.size(1)-1,-1,-1):
-            if targets[:,break_i].float().mean() < 20: break
-
-        if idx%10==0:
+        # probe, logits, outputs_probe = output
+        accuracy = (targets == torch.argmax(logits, dim=2)).float().mean().item()
+        match_counter.update(logits, targets)
+        if idx%20==0:
+            s = np.random.randint(targets.size(0))
+            correct = (targets[s,:] == torch.argmax(logits[s,:], dim=1)) #[:break_i]
             print()
-            probe, logits, outputs_probe = output
+            print("acc: %.3f - sample: acc:%.2f _ %d/%d" % (accuracy, correct.float().mean(), correct.sum(), break_i))
             for i in range(targets.size(1)):
-                val = targets[0,i].item()
-                print(f"{val:4d}", end=', ')
-                if val == 20: break
+                val = targets[s,i].item()
+                print(f"{val:2d}", end=', ')
+                # if val == 20: break
             print()
             for j in range(i+1):
-                val = outputs_probe[0,j].item()*16
-                print(f"{val:.2f}", end=', ')
-            print('^')
+                val = torch.argmax(logits[s,j]).item()
+                print(f"{val:2d}", end=', ')
+            print()
+            # for j in range(i+1):
+            #     val = outputs_probe[s,j].item()*16
+            #     print(f"{val:.2f}", end=', ')
+            # print()
 
-        # losses.append(loss)
+        # _, probe_loss, pred_loss, output_losses, outputs_probe_losses = loss
 
-        # n = len(losses)
-        # # losses = torch.Tensor(losses)
-        # # losses = list(map(list, zip(*losses)))
-        # # losses = [list(filter(lambda x: x, col)) for col in zip(*losses)]
-        # losses = list(map(lambda x: torch.stack(list(x)).transpose(1,0), zip(*losses)))
-        # _, probe_loss, pred_loss, _, outputs_probe_losses = losses
-        
-        # ## more weight to the good and llast loss
-        # ## without neglecting the first lower quality
-        # ## so that the model will value progress in early step
-        # ## while give more importance to last/good one
-        # good_ = pred_loss > cfg.good_pred_loss_treshold
-        # coef_ = good_.clone()
-        # good_pred_ratio = good_.sum(dim=1)/n
-        # # coef_[good_] = 0.5/good_.sum(dim=1)
-        # # coef_[~good_] = 0.5/(n-sum(good_))
-        # coef_ = torch.where(good_,0.5/good_.sum(dim=1)[:,None],0.5/(n-good_.sum(dim=1)[:,None]))
+        (output_loss + probe_loss).backward()
+        # output_loss.backward()
 
-        # ## decay coefficient followed steps
-        # coef_decay = (cfg.decay_coef*torch.arange(n)/n).softmax(dim=0)
-        # coef_ = coef_ * coef_decay
-        
-        # loss_1 = (probe_loss * coef_).mean()
-        # loss_2 = (outputs_probe_losses * coef_ * coef_decay).mean()
-        # loss_3 = (pred_loss * coef_).mean()
-        # loss = loss_1 + loss_2 + loss_3
-        
-        # probe_loss, pred_loss, outputs_probe_losses = probe_loss[:,-1].mean().item(), outputs_probe_losses[:,-1].mean().item(), pred_loss[:,-1].mean().item()
-        # logs('probe_loss, pred_loss, outputs_probe_losses')
-        # probe_loss, pred_loss, outputs_probe_losses = probe_loss.mean().item(), outputs_probe_losses.mean().item(), pred_loss.mean().item()
+        if idx%1==0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            optimizer.step()
+            optimizer.zero_grad()
+            # scheduler.step()
+        if idx%100==0:
+            # print(f"{idx} :: loss: {output_loss.item():.4f}, n_step: {n_step}, latent_size: {latent_size}")
+            print(f"{idx:3d}: loss: {output_loss.item():.3f} accuracy: {accuracy:.2f}")
 
 
-        # print(f"loss {loss:.4f}, good pred : {good_pred_ratio:.4f} = {sum(good_)} / {n} preds over 0.5 treshold")
+        # loss_tracker.append(outputs_probe_loss.item())
+        loss_tracker.append(output_loss.item())
+        acc_tracker.append(accuracy)
+        logs.append(dict(
+            loss = output_loss.item(),
+            probe_loss = probe_loss.item(),
+            accuracy = accuracy,
+            latent = n_latent,
+            step = n_step
+        ))
 
-        _, probe_loss, pred_loss, output_losses, outputs_probe_losses = loss
+        if idx%100==0 and idx>=100:
+            from IPython.display import clear_output
+            clear_output()
+            # lr = learing_rate * max(np.abs(mean-mean_prev), 100/idx)
 
-        # loss = probe_loss + pred_loss[:,None] + outputs_probe_losses
-        # targets < 20
-        output_loss = output_losses[:,:break_i].mean()
-        outputs_probe_loss = outputs_probe_losses[:,:break_i].mean()
-        (output_loss + outputs_probe_loss*16*4).backward()
+            # plt.figure(figsize=(12,4))
+            # plt.plot(loss_tracker)
+            # # plt.plot(np.convolve(loss_tracker, np.ones(1000), 'valid')/1000)
+            # plt.yscale('log',base=10)
+            # # plt.savefig("loss.png")
+            # plt.show()
+            # plt.figure(figsize=(12,4))
+            # plt.plot(acc_tracker)
+            # plt.plot(np.convolve(acc_tracker, np.ones(200), 'valid')/200)
+            # plt.show()
 
-        optimizer.step()
+            plot_loss_and_accuracy(logs)
 
-        if idx%10==0:
-            print(f"{idx} :: loss: {outputs_probe_loss.item():.4f} + {output_loss.item():.4f}, n_step: {n_step}, latent_size: {latent_size}")
 
-        # logs('probe_loss, pred_loss, outputs_probe_losses')
-        # logs('good_pred_ratio,loss')
-        # print(logs)
+            # with open('./train_param.txt','r') as f:
+            #     lr = float(f.read())*learing_rate
 
-        loss_tracker.append(outputs_probe_loss.item())
+            # print('========== learing_rate:', lr)
+            # for param_group in optimizer.param_groups:
+            #     param_group['lr'] = lr
 
-        if idx%50==0 and idx>=100:
+            print('learning_rate', optimizer.param_groups[0]['lr'])
+            print(match_counter,'\n')
+            match_counter = MatchCount(20+1+20)
+
             mean = np.mean(loss_tracker[-50:])
             mean_prev = np.mean(loss_tracker[-100:-50])
-
             print(f'averaged loss -> mean_prev:{mean_prev:.4f} mean:{mean:.4f}')
-            # lr = learing_rate * max(np.abs(mean-mean_prev), 100/idx)
-            
-            import matplotlib.pyplot as plt
-            plt.plot(loss_tracker[10:])
-            plt.savefig("loss.png")
 
-            with open('./train_param.txt','r') as f:
-                lr = float(f.read())
+        if idx%10==0 and idx>=10:
+            mean_loss = np.mean(loss_tracker[-10:])
+            if mean_loss < best_loss:
+                best_loss = mean_loss
+                torch.save(model.state_dict(), "model.pt")
+                print(f'save best model mean_loss={mean_loss:.4f}')
+            # scheduler.step()
 
-            print('========== learing_rate:', lr)
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
+        if idx%200==0 and idx>=200:
+            mean_loss = np.mean(loss_tracker[-100:])
+            if mean_loss > best_loss:
+                print('loss increase, load best model')
+                model.load_state_dict(torch.load("model.pt"))
+                scheduler.step()
 
-            # if idx%100==0:
-            #     torch.save(model, "model.pck")
+        if idx>=200 and (loss_tracker[-1]/loss_tracker[-10])>1.5:
+            print('loss peak increase, load best model')
+            model.load_state_dict(torch.load("model.pt"))
+            scheduler.step()
 
-        # if idx == 1000:
-        #     lr = learing_rate * 0.1
-        #     print('learing_rate:', lr)
-        #     # lr = float(input('Learning new rate: '))
-        #     for param_group in optimizer.param_groups:
-        #         param_group['lr'] = lr
-        # break
+        if idx%101==0:
+            print(f"Timing\n"
+                f"{end_dataloading_time-start_time:.6f} data loading\n"
+                f"{end_forward_loss_time-end_dataloading_time:.6f} forward+loss\n"
+                f"{time()-end_forward_loss_time:.6f} backward+remaining\n"
+            )
 
+        if idx>r_cfg.max_iter:
+            return logs
+        start_time = time()
+
+if __name__ == '__main__':
+    def train(r_cfg, dataset, model)
