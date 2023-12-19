@@ -103,7 +103,7 @@ dataset = NumbersComputeDataset(data_cfg)
 dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=4)
 
 # train the model (hint: here are some helpful Trainer arguments for rapid idea iteration)
-trainer = L.Trainer(limit_train_batches=100, max_epochs=1)
+trainer = L.Trainer(limit_train_batches=run_cfg.max_iter, max_epochs=1)
 trainer.fit(model=model, train_dataloaders=dataloader)
 
 
