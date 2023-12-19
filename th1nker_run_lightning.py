@@ -5,6 +5,7 @@ import lightning as L
 from torch.utils.data import DataLoader
 
 from thinker_model import Th1nker, compute_loss, CfgNode
+from toy_model import ToyThinker
 from numbers_data import NumbersComputeDataset
 
 model_cfg = CfgNode(
@@ -53,8 +54,8 @@ exp_cfg = CfgNode(
 
 # define the LightningModule
 class LitTh1nker(L.LightningModule):
-    def __init__(self, ):
-        super().__init__(model_cfg, run_cfg)
+    def __init__(self, model_cfg, run_cfg):
+        super().__init__()
         self.model = ToyThinker(**model_cfg.__dict__)
         self.cfg = run_cfg
 
@@ -70,7 +71,7 @@ class LitTh1nker(L.LightningModule):
         n_latent = self.cfg.sample('n_latent')
 
         n_target = targets.size(1)
-        logits, output_probe = model(inputs, n_latent, n_target, n_step)
+        logits, output_probe = self.model(inputs, n_latent, n_target, n_step)
 
         # compute loss
         output_loss = torch.nn.functional.cross_entropy(logits.permute(0,2,1), targets.long()) #, ignore_index=20)
@@ -91,6 +92,8 @@ class LitTh1nker(L.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=0.005)
         return optimizer
 
+    # def forward(self, x):
+    #     return self.model(x)
 
 # init the autoencoder
 model = LitTh1nker(model_cfg, run_cfg)
