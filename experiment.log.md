@@ -40,4 +40,29 @@ I move for 0,1 sequence of number to 0,1,2 .., 10 sequence wich with my with giv
 
 ## 08 Dec 2023
 
+I suspect something wrong with my model implem 
+
+## 18 Dec 2023
+I spent a lot of time debugging finally the issue was the model the batch and the sequence lenght was permutted in transformer pytiorch installation that's why my model wasn't leaning anything.
+After issue was fixed the model learn quite quickly copy task, with flip, rolled number
+Addin 2 step incresea significaly the performance on learning rolled number
+
+After I reagange the model to make it behave like thinker (memeory+step)
+I manage to reach 97 accuracy on addition of number on base 16 (max number was 1000)
+
+from a previous training I observe that changing didn't affect performance on this task so I used fix step=1 and latent=4
+With batchsize of 4096, learning_rate=0.02, 
+
+I had to implement restart with best model when loss drop and gradient clipping, especially gradient clipping is very effective
+
+I was worrying about the data loading timing, but it seem to be good
+```
+0.000336 second for data loading
+0.011631 second for forward+loss
+0.081530 second for backward+remaining
+```
+
+I manage to have 95% GPU utilisation even with 2.6Gb usage on Colab T4
+
+I manage to reach 97accuracy for addition of base 16 number between 0-1000 (base10) with bacth size1024 and lr 0.005
 
