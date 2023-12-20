@@ -6,7 +6,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 import seaborn as sns
-sns.set_style('dark')
+# sns.set_style('dark')
 
 class MatchCount:
     def __init__(self, size):
@@ -49,10 +49,10 @@ class CfgNode:
     def sample(self, param):
         if isinstance(param, str):
             param = self.__dict__[param]
-        return CfgNode.sample(param)
+        return CfgNode.sample_(param)
 
     @staticmethod
-    def sample(param):
+    def sample_(param):
         if isinstance(param, range):
             param = list(param)
         if isinstance(param, (list,set)):
@@ -63,6 +63,11 @@ class CfgNode:
 def plot_loss_and_accuracy(logs):
     # Create a DataFrame from the list of dictionaries.
     df = pd.DataFrame(logs)
+
+    # Filter current experiment
+    if 'experiment' in df.columns:
+        curr_experiment = df.iloc[-1].experiment
+        df = df[df.experiment == curr_experiment]
 
     # Plot the loss values on the left y-axis.
     sns.lineplot(data=df, x=df.index, y='loss', color='orange') #, hue='step')
