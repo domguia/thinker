@@ -45,11 +45,17 @@ class CfgNode:
     def __str__(self):
         return self.__dict__.__str__()
     
+    # sample variable parameters
     def sample(self, param):
-        param = self.__dict__[param]
+        if isinstance(param, str):
+            param = self.__dict__[param]
+        return CfgNode.sample(param)
+
+    @staticmethod
+    def sample(param):
         if isinstance(param, range):
             param = list(param)
-        if isinstance(param, list):
+        if isinstance(param, (list,set)):
             param = np.random.choice(param)
         return param
 
