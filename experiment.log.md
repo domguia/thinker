@@ -65,4 +65,29 @@ I was worrying about the data loading timing, but it seem to be good
 I manage to have 95% GPU utilisation even with 2.6Gb usage on Colab T4
 
 I manage to reach 97accuracy for addition of base 16 number between 0-1000 (base10) with bacth size1024 and lr 0.005
+![loss accuracy plot](/exp_logs/loss_acc_1addition_base16_max_number1000_hdim32_2step_8latent_lr0.005-0.0002.png)
 
+# 19 Dec
+I manage to run 3000 iteration in 2min with 95 accuracy on addition task but didn't reach 100% accuracy  
+
+I observe it took me a lot of time to find the hyperameter and training setup for fast training  
+
+To go faster I can:  
+1. run many experiment in the backgroud while doing other stuff -> move to pytorch lighting will help  
+2. find simpler problem eg. make copy just by lookig at memory
+
+Project Update:
+1. Moved to Pytorch Lighting
+2. Avoid un-necessary computation by making optionnal the self attention in nn.TransformerDecoder
+3. Update the CopyDataset for larger batch and more task
+4. Tried TPU without success du to error on sub libray `import _XLA` 
+
+Some ideas:
+For faster training improve the loss, by make it lower for likely output regarding the problem:
+1. for LLM task make, compare output distribution unregarding token location eg:
+    1. global embedding average, loss = avg(output) - avg(target)
+    2. loss on token neigborh
+    3. compare all output to all target embedding :
+        1. cluster targets embedding with in n centroid with knn, n==output embedding
+        2. push the closest each output to move closer to his closest embedding, step after step
+2. for number base task, we can make the loss to be condition on the sequence (or just use causal decoding)
