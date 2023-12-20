@@ -207,25 +207,56 @@ def sample_base(values, batch=None, distribution=None):
 # task_scheme['input']['base']['distribution'] = [1 / (2 ** i) for i, _ in enumerate(task_scheme['input']['base']['values'])]
 
 class NumbersCopyDataset(IterableDataset):
-    def __init__(self, low, high, size, flip=False, roll=False, sort=False):
+    def __init__(self, low, high, seq_len, batch, task=None):
         self.low = low
         self.high = high
-        self.size = size
-        self.flip = flip
-        self.roll = roll
-        self.sort = sort
+        self.batch = batch
+        self.seq_len = seq_len
+        # task
+        self.task = task
 
     def __iter__(self):
         while True:
-            x = torch.randint(self.low, self.high, self.size)
-            y = x #.clone()
-            if self.sort:
-                y = x.sort()[0]
-            if self.flip:
-                y = x.flip(dims=(0,))
-            if self.roll:
-                y = x.roll(x[0].item(), 0)
+            x = torch.randint(self.low, self.high, (self.batch, self.seq_len))
+            if None == self.task:
+                y = x #.clone()
+            if 'sort' == self.task:
+                y = x.sort(dim=1)[0]
+            if 'flip' == self.task:
+                y = x.flip(dims=(1,))
+            if 'roll' == self.task:
+                y = torch.Tensor(np.apply_along_axis(lambda a: np.roll(a, a[0]), 1, x))
+                # y = x.roll(x[0].item(), 0) # for non batched
+            if 'roll_num' == self.task:
+                y = (x + x[:,0]) % self.high
+            if 'jump' == self.task:
+                idx = x[:,0]
+                for i in range(16): # max 16 jumps
+                    idx += x[:, idx]
+                jump = x[:,0] # number of jump
+                y = idx[:, jump]
+            if 'cumsum' == self.task:
+                # y = x.clone()
+                # for i in range(x.size(1)):
+                #     y[:,i:] = (y[:,i:] + y[i:,i]) % self.high # faster that position base flip
+                y = torch.cumsum(x, dim=1) % self.high
             yield x, y
+
+'''
+# thinking
+
+how to compute loss?
+- at each step
+- if possible has intermediate target
+Note: end to end is great but soft end to end is faster to learn
+
+
+How do we handle the noisy property of text?
+- for text final output use autoregressive decoding, because the model should be inform about the previous token to correctly decode the coming one, but de autogressive should be keep to the smallest amount of computation eg. with 1 layers
+- intermediate decoding could be done to evaluate if the model intermediate state get closer to the solution
+- give inductive bias that will direct the model : summary, keyword, ... (inductive input tokens get optimization on expected output)
+
+'''
 
 class NumbersComputeDataset(IterableDataset):
     def __init__(self, cfg):
@@ -289,13 +320,17 @@ class NumbersComputeDataset(IterableDataset):
 
 if __name__ == '__main__':
 
-    cfg = CfgNode(batch=5, step=4, max_number=1000, operations='+-*/', operation_dist=[0.1,0.1,0.4,0.4],
-               in_bases=[2,4,8,16], in_bases_dist=None,
-               out_bases=[2,4,8,16], out_bases_dist=[.1,.2,.3,.4])
-    dataset = NumbersComputeDataset(cfg)
+    # cfg = CfgNode(batch=5, step=4, max_number=1000, operations='+-*/', operation_dist=[0.1,0.1,0.4,0.4],
+    #            in_bases=[2,4,8,16], in_bases_dist=None,
+    #            out_bases=[2,4,8,16], out_bases_dist=[.1,.2,.3,.4])
+    # dataset = NumbersComputeDataset(cfg)
 
+    dataset = NumbersCopyDataset(low=0, high=16, seq_len=7, batch=3, task='cumsum')
     x, y = next(iter(dataset))
     print(f"Batch : x={x.shape}, y={y.shape}")
+    print(x)
+    print('-'*9)
+    print(y)
     
     # dataset = NumbersComputeDataset(TASK_SCHEME)
 
