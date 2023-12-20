@@ -89,7 +89,7 @@ class ToyThinker(nn.Module):
                 output = self.compute_output(out_query, memory) # B, T, H
                 outputs.append(output)
 
-        outputs = torch.cat(outputs, dim=1) # B, S, T, H
+        outputs = torch.stack(outputs, dim=1) # B, S, T, H
         outputs = self.linear(outputs)
 
         # split outputs
