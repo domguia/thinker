@@ -91,3 +91,12 @@ For faster training improve the loss, by make it lower for likely output regardi
         1. cluster targets embedding with in n centroid with knn, n==output embedding
         2. push the closest each output to move closer to his closest embedding, step after step
 2. for number base task, we can make the loss to be condition on the sequence (or just use causal decoding)
+
+# 20 Dec
+
+model with hdim=16 and 9k parameters seam to perform the addition as well, just need more iteration to converge, number of latent and step seam not affect much the performance even the training are the all same while changing latent and step
+[heatmap](/exp_logs/heatmap_16hdim_batch1024_20dec_exp.png)
+[heatmap](/exp_logs/loss_acc_16hdim_latent8_step4_batch1024_20dec_exp.png)
+
+to go faster I should test the model with simpler task, such as copy and thier variants
+
