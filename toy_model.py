@@ -93,8 +93,8 @@ class ToyThinker(nn.Module):
         outputs = self.linear(outputs)
 
         # split outputs
-        logits = outputs[:, :, :self.vocab_size] # B, S, T, vocab_size
-        probes = outputs[:, :, -self.n_probe:]   # B, S, T, n_probe
+        logits = outputs[:, :, :, :self.vocab_size] # B, S, T, vocab_size
+        probes = outputs[:, :, :, -self.n_probe:]   # B, S, T, n_probe
 
         return logits, probes
     
