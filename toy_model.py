@@ -81,13 +81,14 @@ class ToyThinker(nn.Module):
             if len(latents) > n_memory: latents.pop(0) # first in first out
 
             # compute context : memory + input
-            memory = latents if i>read_step else latents + [x] 
+            memory = latents if i>=read_step else latents + [x] 
             memory = torch.cat(memory, dim=1)
 
             if i >= (n_step - n_keep_output):
                 # compute output at the last step
                 output = self.compute_output(out_query, memory) # B, T, H
                 outputs.append(output)
+                # out_query = output
 
         outputs = torch.stack(outputs, dim=1) # B, S, T, H
         outputs = self.linear(outputs)
