@@ -95,8 +95,25 @@ For faster training improve the loss, by make it lower for likely output regardi
 # 20 Dec
 
 model with hdim=16 and 9k parameters seam to perform the addition as well, just need more iteration to converge, number of latent and step seam not affect much the performance even the training are the all same while changing latent and step
-[heatmap](/exp_logs/heatmap_16hdim_batch1024_20dec_exp.png)
-[heatmap](/exp_logs/loss_acc_16hdim_latent8_step4_batch1024_20dec_exp.png)
+![heatmap](/exp_logs/heatmap_16hdim_batch1024_20dec_exp.png)
+![training curve](/exp_logs/loss_acc_16hdim_latent8_step4_batch1024_20dec_exp.png)
 
 to go faster I should test the model with simpler task, such as copy and thier variants
 
+```python
+model_cfg = CfgNode(
+    vocab_size = 31+1, n_probe = 1,
+    max_latent=64, max_input_len=48, output_len=40,
+    d_model=16, nhead=8, d_hid=16*4, nlayers=1, dropout=0
+)
+data_cfg = CfgNode(low=0, high=16, seq_len=20, batch=1, task=None)
+run_cfg = CfgNode(max_iter=4_000, learning_rate=0.01, batch = 1024)
+exp_cfg = CfgNode(
+    n_latent = range(4, 8+1), # hyper parameters grid search
+    n_step = range(1, 4+1),
+)
+```
+the result below
+![overview map](/exp_logs/copy_task-seq_len_20-hdim16_20dec_exp.png)
+
+Observation, the model with higher capacity step=4 perform consitenly bad, probably it need more iterations to converge
