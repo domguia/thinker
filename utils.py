@@ -60,9 +60,13 @@ class CfgNode:
         return param
 
 
-def plot_loss_and_accuracy(logs):
+import pandas as pd
+import seaborn as sns
+
+def plot_loss_and_accuracy(logs, experiment=None):
     # Create a DataFrame from the list of dictionaries.
-    df = pd.DataFrame(logs)
+    if isinstance(logs, pd.DataFrame): df = logs
+    else: df = pd.DataFrame(logs)
 
     # Filter current experiment
     if 'experiment' in df.columns:
@@ -91,18 +95,30 @@ def plot_loss_and_accuracy(logs):
     # Show the plot.
     plt.show()
 
-    use_last_n_batch = 200
+    #plot_hp_heatmap(logs)
+
+def plot_hp_heatmap(logs, use_last_n_batch=200, aggr='mean'):
+    if isinstance(logs, pd.DataFrame): df = logs
+    else: df = pd.DataFrame(logs)
+
     if len(df)<use_last_n_batch: return
 
     # Group the data by the latent and step columns.
-    df = df[-use_last_n_batch:].groupby(['latent', 'step']).mean()
+    # df = df[-use_last_n_batch:].groupby(['latent', 'step'])
+    df = df.groupby(['latent', 'step'])
+    if aggr=='mean':
+        df = df.mean()
+    elif aggr=='max':
+        df = df.max()
+    else:
+        assert f'Invalid argument aggr={aggr}'
     df = df.reset_index().pivot(index="latent", columns="step", values="accuracy")
 
-    if len(df)<2: return #not interresting
+    # if len(df)<2: return #not interresting
+    # print('i')
 
     # Plot a heatmap of the average loss.
     sns.heatmap(df, annot=True)
 
     # Show the plot.
     plt.show()
-
