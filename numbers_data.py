@@ -207,17 +207,25 @@ def sample_base(values, batch=None, distribution=None):
 # task_scheme['input']['base']['distribution'] = [1 / (2 ** i) for i, _ in enumerate(task_scheme['input']['base']['values'])]
 
 class NumbersCopyDataset(IterableDataset):
-    def __init__(self, low, high, seq_len, batch, task=None):
-        self.low = low
-        self.high = high
+    def __init__(self, vocab_size, seq_len, batch, uniform_len=False, task=None):
+        self.vocab_size = vocab_size
         self.batch = batch
         self.seq_len = seq_len
         # task
+        self.uniform_len = uniform_len
         self.task = task
 
+
     def __iter__(self):
+        seq_len, batch = self.seq_len, self.batch
+        iter = 0
         while True:
-            x = torch.randint(self.low, self.high, (self.batch, self.seq_len))
+            iter += 1
+            mask = torch.randint(0, seq_len-3, (batch,))
+            mask = torch.arange(seq_len)[None,:].expand(batch, -1) > mask[:,None]
+
+            x = torch.randint(1, self.vocab_size, (batch, seq_len))
+            x = torch.where(mask, x, 0)
             if None == self.task:
                 y = x #.clone()
             if 'sort' == self.task:
@@ -239,7 +247,7 @@ class NumbersCopyDataset(IterableDataset):
                 # y = x.clone()
                 # for i in range(x.size(1)):
                 #     y[:,i:] = (y[:,i:] + y[i:,i]) % self.high # faster that position base flip
-                y = torch.cumsum(x, dim=1) % self.high
+                y = torch.cumsum(x, dim=1) % self.vocab_size
             yield x, y
 
 '''
@@ -325,7 +333,7 @@ if __name__ == '__main__':
     #            out_bases=[2,4,8,16], out_bases_dist=[.1,.2,.3,.4])
     # dataset = NumbersComputeDataset(cfg)
 
-    dataset = NumbersCopyDataset(low=0, high=16, seq_len=7, batch=3, task='cumsum')
+    dataset = NumbersCopyDataset(vocab_size=16+1, seq_len=7, batch=3, task='cumsum')
     x, y = next(iter(dataset))
     print(f"Batch : x={x.shape}, y={y.shape}")
     print(x)
