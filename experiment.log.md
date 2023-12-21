@@ -117,3 +117,15 @@ the result below
 ![overview map](/exp_logs/copy_task-seq_len_20-hdim16_20dec_exp.png)
 
 Observation, the model with higher capacity step=4 perform consitenly bad, probably it need more iterations to converge
+
+# 21 Dec
+
+I design a basic currilum learning and it make the copy task much easier to learn, the model reach 100accuracy with that eproach but plateau 60accuracy without it.
+
+How I made the currilum, I vary the sequence lenght in the dataset following an uniform distrubtion, so that the model can easily learn from the short sequence and progressively learn how the longer one's
+
+![with uniform curriculum](/exp_logs/loss_uniform_copytask_acc_16hdim_latent8_step4_batch1024_20dec_exp.png)
+![with non uniform](/exp_logs/loss_non-uniform_copytask_acc_16hdim_latent8_step4_batch1024_20dec_exp.png)
+
+Regarding this significan improvement I made a better currilum: by make a dynamic sampling the dataset distrution. With a risk of making the problem non-stationnary, but I think even if is non stationary the loss landscape should be easier the navigate during optimisation. 
+
