@@ -207,6 +207,9 @@ def sample_base(values, batch=None, distribution=None):
 # task_scheme['input']['base']['distribution'] = [1 / (2 ** i) for i, _ in enumerate(task_scheme['input']['base']['values'])]
 
 class NumbersCopyDataset(IterableDataset):
+    count = 0
+    accuracy = 0
+    
     def __init__(self, vocab_size, seq_len, batch, uniform_len=False, task=None):
         self.vocab_size = vocab_size
         self.batch = batch
@@ -215,20 +218,48 @@ class NumbersCopyDataset(IterableDataset):
         self.uniform_len = uniform_len
         self.task = task
 
+    @classmethod
+    def update_accuracy(cls, accuracy):
+        cls.accuracy = accuracy
+
+    @classmethod
+    def reset(cls, count=0):
+        cls.count = count
+
+    @classmethod
+    def incr(cls, count=1):
+        cls.count += count
+
+    @classmethod
+    def get_dist(cls, count=0):
+        cls.count = count
 
     def __iter__(self):
         seq_len, batch = self.seq_len, self.batch
-        iter = 0
         while True:
-            iter += 1
-            mask_len = torch.randint(0, seq_len-3, (batch,))
-            mask = torch.arange(seq_len)[None,:].expand(batch, -1) > mask_len[:,None]
-
-            x = torch.randint(1, self.vocab_size, (batch, seq_len))
+            NumbersCopyDataset.incr(batch)
+            accuracy = NumbersCopyDataset.accuracy
+            target_len = accuracy*seq_len
             
-            if self.uniform_len:
+            if 'progressive_copy' == self.task:
+                mask_target_len = seq_len - target_len
+                # :-) basic implementation of prgoressive/currilum learning
+                
+                # build mask
+                # _, mu, _ -> 0, target_len, seq_len
+                s = torch.normal(0, 1, (batch,))
+                s = 1 + s / (max(s)-min(s))
+                s = s * mask_target_len
+                s = torch.clip(s, 0, seq_len)
+                mask_len = s.int() - 1
+                # mask_len = torch.randint(0, seq_len-3, (batch,)) # uniform generation
+                mask = torch.arange(seq_len)[None,:].expand(batch, -1) > mask_len[:,None]
+
+                x = torch.randint(0, self.vocab_size, (batch, seq_len))
+
                 x = torch.where(mask, x, 0)
-            # run tasks    
+                y = x # just copy
+            # run tasks
             if None == self.task:
                 y = x #.clone()
             if 'sort' == self.task:
@@ -335,8 +366,9 @@ if __name__ == '__main__':
     #            in_bases=[2,4,8,16], in_bases_dist=None,
     #            out_bases=[2,4,8,16], out_bases_dist=[.1,.2,.3,.4])
     # dataset = NumbersComputeDataset(cfg)
-
-    dataset = NumbersCopyDataset(vocab_size=16+1, seq_len=7, batch=3, task='cumsum')
+    
+    dataset = NumbersCopyDataset(vocab_size=16+1, seq_len=7, batch=3, task='progressive_copy')
+    NumbersCopyDataset.update_accuracy(.0)
     x, y = next(iter(dataset))
     print(f"Batch : x={x.shape}, y={y.shape}")
     print(x)
