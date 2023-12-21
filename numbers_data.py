@@ -221,11 +221,14 @@ class NumbersCopyDataset(IterableDataset):
         iter = 0
         while True:
             iter += 1
-            mask = torch.randint(0, seq_len-3, (batch,))
-            mask = torch.arange(seq_len)[None,:].expand(batch, -1) > mask[:,None]
+            mask_len = torch.randint(0, seq_len-3, (batch,))
+            mask = torch.arange(seq_len)[None,:].expand(batch, -1) > mask_len[:,None]
 
             x = torch.randint(1, self.vocab_size, (batch, seq_len))
-            x = torch.where(mask, x, 0)
+            
+            if self.uniform_len:
+                x = torch.where(mask, x, 0)
+            # run tasks    
             if None == self.task:
                 y = x #.clone()
             if 'sort' == self.task:
