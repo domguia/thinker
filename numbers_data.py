@@ -209,6 +209,7 @@ def sample_base(values, batch=None, distribution=None):
 class NumbersCopyDataset(IterableDataset):
     count = 0
     accuracy = 0
+    challenge_factor = 1
     
     def __init__(self, vocab_size, seq_len, batch, uniform_len=False, task=None):
         self.vocab_size = vocab_size
@@ -221,6 +222,14 @@ class NumbersCopyDataset(IterableDataset):
     @classmethod
     def update_accuracy(cls, accuracy):
         cls.accuracy = accuracy
+        
+    @classmethod
+    def update_challenge_factor(cls, challenge_factor):
+        cls.challenge_factor = challenge_factor
+    
+    @classmethod
+    def get_challenge_factor(cls):
+        return cls.challenge_factor
 
     @classmethod
     def reset(cls, count=0):
@@ -240,6 +249,8 @@ class NumbersCopyDataset(IterableDataset):
             NumbersCopyDataset.incr(batch)
             accuracy = NumbersCopyDataset.accuracy
             target_len = accuracy*seq_len
+
+            NumbersCopyDataset.update_challenge_factor(target_len/seq_len)
             
             if 'progressive_copy' == self.task:
                 mask_target_len = seq_len - target_len
