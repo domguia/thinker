@@ -112,10 +112,10 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
         position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        div_term = torch.exp(torch.arange(0, 2, d_model) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(1, max_len, d_model)
+        pe[0, :, 0::2] = torch.sin(position * div_term)
+        pe[0, :, 1::2] = torch.cos(position * div_term)
         self.register_buffer('pe', pe)
         self.max_len = max_len
 
@@ -127,13 +127,13 @@ class PositionalEncoding(nn.Module):
         # seq_len = x.size(0)
         # offset = torch.randint(self.max_len-seq_len, size=(1,)).item()
         # x = x + self.pe[offset : offset + seq_len]
-        x = x + self.pe[:x.size(0)]
+        x = x + self.pe[:, :x.size(0)]
         return self.dropout(x)
 
 
 if __name__ == '__main__':
     model = ToyThinker(
-         vocab_size=17, max_latent=4, max_input_len=7, max_output_len=5,
+         vocab_size=17, max_latent=4, max_input_len=7, max_output_len=15,
          d_model=32, nhead=4, d_hid=32*4, nlayers=1, n_probe=1, dropout=0.1)
     
     import torchinfo
