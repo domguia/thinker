@@ -130,7 +130,7 @@ How I made the currilum, I vary the sequence lenght in the dataset following an 
 Regarding this significan improvement I made a better currilum: by make a dynamic sampling the dataset distrution. With a risk of making the problem non-stationnary, but I think even if is non stationary the loss landscape should be easier the navigate during optimisation. 
 
 # 22 Dec
-I implemented a training process that progressivelly increase the difficulty level of the task
+I implemented a training process that progressivelly increase the difficulty level of the task, wich seem to give better result
 ![curriculum based](/exp_logs/loss_curriculum_copytask_acc_16hdim_latent4_step6_batch512_22dec_exp.png)
 
 training setup
@@ -170,6 +170,16 @@ When I increased the seqlen I observe that the model manage to go over the previ
 At 50seqlen I have un error realted to CUDA even if I only use 0.3/15 GB of GPU MEM! 
 
 So I increased the vocabulary size from 16 to 32, even with that the model dont seem to be at capacity
+![curriculum based with 40 seqlen](/exp_logs/loss_curriculum_copytask-vocabsize_32_seq-len-40_16hdim_latent4_step6_batch512_22dec_exp.png)
+
+hypothesis for plateau:
+learning rate 0.01 too high, might explain the noisy loss curve even with 512 batch size
 
 conclusion: having a plateau doesn't mean that the model is at capacity
 I still suspect the position encore to be cause 
+
+## varying position embedding
+the model stuck at .2 accuracy with `varying position embedding`
+
+![varying position embedding](/exp_logs/loss_varying-position-emb_copytask-vocabsize_16_seq-len-10_16hdim_latent4_step6_batch512_22dec_exp.png)
+
