@@ -195,22 +195,13 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset, DataLoader
 
-def sample_base(values, batch=None, distribution=None):
-    # Normalize the distribution to sum to 1
-    # distribution = np.array(distribution)
-    # distribution = distribution / distribution.sum()
-    # Sample a base according to the probability distribution
-    base = np.random.choice(values, size=batch, p=distribution)
-    return base
-
-# Update the task_scheme definition with an actual distribution
-# task_scheme['input']['base']['distribution'] = [1 / (2 ** i) for i, _ in enumerate(task_scheme['input']['base']['values'])]
-
 class NumbersCopyDataset(IterableDataset):
     count = 0
     accuracy = 0
-    challenge_factor = 1
-    
+    challenge_factor = 0
+    raw_acc = 0
+    target_len = 1
+
     def __init__(self, vocab_size, seq_len, batch, uniform_len=False, task=None):
         self.vocab_size = vocab_size
         self.batch = batch
@@ -220,20 +211,22 @@ class NumbersCopyDataset(IterableDataset):
         self.task = task
 
     @classmethod
-    def update_accuracy(cls, accuracy):
-        cls.accuracy = accuracy
-        
+    def update_accuracy(cls, raw_acc):
+        cls.raw_acc = raw_acc
+        # print('update_accuracy ->', cls.raw_acc, raw_acc)
+
     @classmethod
     def update_challenge_factor(cls, challenge_factor):
         cls.challenge_factor = challenge_factor
-    
+
     @classmethod
     def get_challenge_factor(cls):
         return cls.challenge_factor
 
     @classmethod
-    def reset(cls, count=0):
+    def reset(cls, count=0, target_len=1):
         cls.count = count
+        cls.target_len = target_len
 
     @classmethod
     def incr(cls, count=1):
@@ -247,26 +240,42 @@ class NumbersCopyDataset(IterableDataset):
         seq_len, batch = self.seq_len, self.batch
         while True:
             NumbersCopyDataset.incr(batch)
-            accuracy = NumbersCopyDataset.accuracy
-            target_len = accuracy*seq_len
+            factor = NumbersCopyDataset.get_challenge_factor()
 
+            # accuracy = NumbersCopyDataset.accuracy
+            # target_len = accuracy*seq_len
+            raw_acc = NumbersCopyDataset.raw_acc
+            target_len = NumbersCopyDataset.target_len
+            if raw_acc > 0.85:
+               target_len += 0.05
+               if target_len > seq_len: target_len = seq_len
+
+            # print('raw_acc:', raw_acc)
+            # print('target_len:', target_len)
+            # print('cls.target_len:',NumbersCopyDataset.target_len)
+            NumbersCopyDataset.target_len = target_len
             NumbersCopyDataset.update_challenge_factor(target_len/seq_len)
-            
+
+            x = torch.randint(0, self.vocab_size, (batch, seq_len))
+
             if 'progressive_copy' == self.task:
-                mask_target_len = seq_len - target_len
+                mask_target_len = seq_len - target_len # * 1.1
                 # :-) basic implementation of prgoressive/currilum learning
-                
+                # print('mask_target_len',mask_target_len)
+
                 # build mask
                 # _, mu, _ -> 0, target_len, seq_len
                 s = torch.normal(0, 1, (batch,))
-                s = 1 + s / (max(s)-min(s))
-                s = s * mask_target_len
-                s = torch.clip(s, 0, seq_len)
+                min_s = min(s)
+                s = (s-min_s) / (max(s)-min_s)
+                s = s * mask_target_len * 2
+                s = torch.clip(s, 0, seq_len-1)
                 mask_len = s.int() - 1
                 # mask_len = torch.randint(0, seq_len-3, (batch,)) # uniform generation
                 mask = torch.arange(seq_len)[None,:].expand(batch, -1) > mask_len[:,None]
 
-                x = torch.randint(0, self.vocab_size, (batch, seq_len))
+                # m = mask_len.min()
+                # if m<3: print("-"*20, f"min len mask:{m}")
 
                 x = torch.where(mask, x, 0)
                 y = x # just copy
@@ -310,6 +319,19 @@ How do we handle the noisy property of text?
 - give inductive bias that will direct the model : summary, keyword, ... (inductive input tokens get optimization on expected output)
 
 '''
+
+
+def sample_base(values, batch=None, distribution=None):
+    # Normalize the distribution to sum to 1
+    # distribution = np.array(distribution)
+    # distribution = distribution / distribution.sum()
+    # Sample a base according to the probability distribution
+    base = np.random.choice(values, size=batch, p=distribution)
+    return base
+
+# Update the task_scheme definition with an actual distribution
+# task_scheme['input']['base']['distribution'] = [1 / (2 ** i) for i, _ in enumerate(task_scheme['input']['base']['values'])]
+
 
 class NumbersComputeDataset(IterableDataset):
     def __init__(self, cfg):

@@ -124,8 +124,52 @@ I design a basic currilum learning and it make the copy task much easier to lear
 
 How I made the currilum, I vary the sequence lenght in the dataset following an uniform distrubtion, so that the model can easily learn from the short sequence and progressively learn how the longer one's
 
-![with uniform curriculum](/exp_logs/loss_uniform_copytask_acc_16hdim_latent8_step4_batch1024_20dec_exp.png)
-![with non uniform](/exp_logs/loss_non-uniform_copytask_acc_16hdim_latent8_step4_batch1024_20dec_exp.png)
+![with uniform curriculum](/exp_logs/loss_uniform_copytask_acc_16hdim_latent4_step8_batch1024_20dec_exp.png)
+![with non uniform](/exp_logs/loss_non-uniform_copytask_acc_16hdim_latent4_step8_batch1024_20dec_exp.png)
 
 Regarding this significan improvement I made a better currilum: by make a dynamic sampling the dataset distrution. With a risk of making the problem non-stationnary, but I think even if is non stationary the loss landscape should be easier the navigate during optimisation. 
 
+# 22 Dec
+I implemented a training process that progressivelly increase the difficulty level of the task
+![curriculum based](/exp_logs/loss_curriculum_copytask_acc_16hdim_latent4_step6_batch512_22dec_exp.png)
+
+training setup
+```
+task:
+    name = curriculum_copy
+    sequence_len = 20
+    vocab_size = 16
+model:
+    hdim = 16
+    prossing_layer = 1 
+    ouput_decoding layer = 1 
+running:
+    latent = 4
+    step = 6
+training:
+    batch = 512
+    learning rate = 0.05
+    check_point_auto_reset = 0
+```
+
+I observe a plateau,
+
+Hypothesis:
+1. the learning signal is weak since there are only ~3tokens failling at the end of the training, the level of success is too to created a good training signal we can observe the loss drop in the figure up here ☝
+2. the learned positionnal encoding to be stuck for some last element to learn
+
+An solution to the last hypothesis could a variable position encoding "kinda denoising position"
+ideas: I could randomized postional encoding
+    eg.1 vary the resolution and the offset of frequency base positional encoder  
+    eg.2 sample while keeping order of learned postionnal embedding   
+
+
+When I increased the seqlen I observe that the model manage to go over the previous performance plateau. It took around 10k iteration to reach %50 wich is approximate to 20seqlen prediction and after 30k step the model reach 30seqlen copy before have a peak loss (I should implement a better model checkpoint reload!)  
+![curriculum based with 40 seqlen](/exp_logs/loss_curriculum_copytask_seq-len-40_16hdim_latent4_step6_batch512_22dec_exp.png)
+
+At 50seqlen I have un error realted to CUDA even if I only use 0.3/15 GB of GPU MEM! 
+
+So I increased the vocabulary size from 16 to 32, even with that the model dont seem to be at capacity
+
+conclusion: having a plateau doesn't mean that the model is at capacity
+I still suspect the position encore to be cause 

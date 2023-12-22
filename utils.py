@@ -68,31 +68,31 @@ class CfgNode:
 import pandas as pd
 import seaborn as sns
 
-# training visualization utils
-def plot_loss_and_accuracy(logs, experiment=None):
+def plot_loss_and_accuracy(logs, experiment=None, title=None):
     # Create a DataFrame from the list of dictionaries.
     if isinstance(logs, pd.DataFrame): df = logs
     else: df = pd.DataFrame(logs)
 
     # Filter current experiment
     if 'experiment' in df.columns:
-        curr_experiment = df.iloc[-1].experiment
-        df = df[df.experiment == curr_experiment]
+        if experiment == None:
+            experiment = df.iloc[-1].experiment
+        df = df[df.experiment == experiment]
 
     # Plot the loss values on the left y-axis.
-    sns.lineplot(data=df, x=df.index, y='loss', color='orange') #, hue='step')
-    if 'probe_loss' in df.columns:
-        sns.lineplot(data=df, x=df.index, y='probe_loss', color='peru') #, hue='step')
+    sns.lineplot(data=df, x='iteration', y='loss', color='orange') #, hue='step')
+    # sns.lineplot(data=df, x='iteration', y='probe_loss', color='peru') #, hue='step')
     plt.ylabel('Loss')
     # plt.yscale('log',base=2)
 
     # Plot the accuracy values on the right y-axis.
     plt.twinx()
-    sns.lineplot(data=df, x=df.index, y='accuracy', color='purple') #, hue='latent')
+    sns.lineplot(data=df, x='iteration', y='accuracy', color='purple') #, hue='latent')
     plt.ylabel('Accuracy')
 
     # Set the title of the plot.
-    plt.title('Loss and Accuracy')
+    if title: plt.title(title)
+    else: plt.title('Loss and Accuracy')
     plt.xlabel('Step')
 
 
@@ -104,8 +104,7 @@ def plot_loss_and_accuracy(logs, experiment=None):
 
     #plot_hp_heatmap(logs)
 
-# training visualization utils
-def plot_hp_heatmap(logs, use_last_n_batch=200, aggr='mean'):
+def plot_hp_heatmap(logs, use_last_n_batch=200, aggr='max'):
     if isinstance(logs, pd.DataFrame): df = logs
     else: df = pd.DataFrame(logs)
 
@@ -155,4 +154,5 @@ def loop_over_extremum(*args, corner=True, edge=True):
         n_extremum = sum([ (p==0 or p==m) for m,p in zip(maxs_,prod)])
         if (corner and n==n_extremum) or (edge and (n-1)==n_extremum) :
             yield tuple([arg[p] for arg,p in zip(args,prod)])
+    
 
