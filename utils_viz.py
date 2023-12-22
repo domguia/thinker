@@ -19,10 +19,10 @@ def plot_loss_and_accuracy(logs, experiment=None, title=None, ax=None, y_log=Fal
     # Plot the loss values on the left y-axis.
     sns.lineplot(data=df, x=df.index, y='loss', color='red', alpha=.1, ax=ax) #, hue='step')
     sns.lineplot(data=df, x=df.index, y=df.loss.rolling(100).mean(), label='loss', color='red', linewidth=.3, ax=ax)
-    if 'factor' in df.columns:
-        loss_factor = df.loss*df.factor
-        sns.lineplot(data=df, x=df.index, y=loss_factor,  color='darkorange', alpha=.1, ax=ax)
-        sns.lineplot(data=df, x=df.index, y=loss_factor.rolling(100).mean(), label='loss * weight', color='darkorange', ax=ax)
+    # if 'factor' in df.columns: # no that use full to visualize
+    #     loss_factor = df.loss*df.factor
+    #     sns.lineplot(data=df, x=df.index, y=loss_factor,  color='darkorange', alpha=.1, ax=ax)
+    #     sns.lineplot(data=df, x=df.index, y=loss_factor.rolling(100).mean(), label='loss * weight', color='darkorange', ax=ax)
     # sns.lineplot(data=df, x='iteration', y='probe_loss', color='peru', ax=ax)
     ax.set_ylabel('Loss')
     if y_log: plt.yscale('log',base=2)
