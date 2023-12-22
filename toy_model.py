@@ -8,7 +8,7 @@ from model_utils import FlexTransformerDecoder, FlexTransformerDecoderLayer
 
 class ToyThinker(nn.Module):
     # inspered from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
-    def __init__(self, vocab_size: int, max_latent: int, max_input_len: int, output_len: int, d_model: int, nhead: int, d_hid: int,
+    def __init__(self, vocab_size: int, max_latent: int, max_input_len: int, max_output_len: int, d_model: int, nhead: int, d_hid: int,
                  nlayers: int, n_probe: int = 0, dropout: float = 0.1):
         super().__init__()
         self.pos_encoder = PositionalEncoding(d_model, dropout=0)
@@ -21,14 +21,14 @@ class ToyThinker(nn.Module):
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.latent_embedding = nn.Embedding(max_latent, d_model)
         self.pos_embedding_in  = nn.Embedding(max_input_len, d_model)
-        self.pos_embedding_out = nn.Embedding(output_len, d_model)
+        self.pos_embedding_out = nn.Embedding(max_output_len, d_model)
         
         self.linear = nn.Linear(d_model, vocab_size + n_probe)
 
         self.d_model = d_model
         self.vocab_size = vocab_size
         self.max_input_len = max_input_len
-        self.output_len = output_len
+        self.max_output_len = max_output_len
         self.n_probe = n_probe
 
         self.init_weights()
@@ -73,7 +73,7 @@ class ToyThinker(nn.Module):
         latent = self.latent_embedding(pos[:,:n_latent])
 
         # define output query
-        offset = torch.randint(self.output_len-n_target, size=(1,)).item()
+        offset = torch.randint(self.max_output_len-n_target, size=(1,)).item()
         out_query = self.pos_embedding_out(offset + pos[:,:n_target])
 
         latents = []
@@ -133,7 +133,7 @@ class PositionalEncoding(nn.Module):
 
 if __name__ == '__main__':
     model = ToyThinker(
-         vocab_size=17, max_latent=4, max_input_len=7, output_len=5,
+         vocab_size=17, max_latent=4, max_input_len=7, max_output_len=5,
          d_model=32, nhead=4, d_hid=32*4, nlayers=1, n_probe=1, dropout=0.1)
     
     import torchinfo
