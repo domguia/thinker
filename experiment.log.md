@@ -141,6 +141,8 @@ task:
     vocab_size = 16
 model:
     hdim = 16
+    nhead = 4
+    d_hid = 16*4  # feed forward project dimension
     prossing_layer = 1 
     ouput_decoding layer = 1 
 running:
@@ -182,4 +184,36 @@ I still suspect the position encore to be cause
 the model stuck at .2 accuracy with `varying position embedding`
 
 ![varying position embedding](/exp_logs/loss_varying-position-emb_copytask-vocabsize_16_seq-len-10_16hdim_latent4_step6_batch512_22dec_exp.png)
+
+Sometimes you just have to train longer and/or make the task easier
+after some iteration, I made it WORK!!
+
+key_parameters
+```
+task:
+    name = curriculum_copy
+    sequence_len = 5 (and 10 in the 2nd experiment)
+    vocab_size = 16
+model:
+    max_input_len  = 5 *4, # x4 space for varying position embedding
+    max_output_len = 5 *4, # x4 space for varying position embedding
+
+    hdim  = 32
+    nhead = 8
+    prossing_layer = 1 
+    ouput_decoding layer = 2 # big change
+```
+_Note: I enable self attention in output TransformerDecoder, it was disable before since we where querying the model directly with the output query_
+
+![varying position embed first work!](/exp_logs/loss_varying-position-emb-WORK_copytask-vocabsize_16_seq-len-5_input-output-5x4_32hdim_2layer-output_latent4_step6_batch512_22dec_exp.png)
+
+for the second experiment I changed
+```
+sequence_len = 10
+max_input_len  = 10 *3,
+max_output_len = 10 *3,
+```
+![varying position embed 2nd work!](/exp_logs/loss_varying-position-emb-WORK_copytask-vocabsize_16_seq-len-10_input-output-10x3_32hdim_2layer-output_latent4_step6_batch512_22dec_exp.png)
+
+
 
