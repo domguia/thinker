@@ -7,15 +7,15 @@ from torch import nn, Tensor
 from model_utils import FlexTransformerDecoder, FlexTransformerDecoderLayer
 
 class ToyThinker(nn.Module):
-
+    # inspered from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
     def __init__(self, vocab_size: int, max_latent: int, max_input_len: int, output_len: int, d_model: int, nhead: int, d_hid: int,
                  nlayers: int, n_probe: int = 0, dropout: float = 0.1):
         super().__init__()
-        # self.pos_encoder = PositionalEncoding(d_model, dropout)
+        self.pos_encoder = PositionalEncoding(d_model, dropout=0)
         decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu, batch_first=True)
         self.compute_step = FlexTransformerDecoder(decoder_layers, nlayers)
 
-        decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_model, dropout, activation=nn.functional.gelu, batch_first=True, skip_self_attn=True) # n_hid = d_model*2 because shoul be smaller
+        decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_model, dropout, activation=nn.functional.gelu, batch_first=True) #, skip_self_attn=True) # n_hid = d_model*2 because shoul be smaller
         self.compute_output = FlexTransformerDecoder(decoder_layers, 1) # only one layer
 
         self.embedding = nn.Embedding(vocab_size, d_model)
@@ -59,16 +59,22 @@ class ToyThinker(nn.Module):
         B, T = x.shape
 
         pos = torch.arange(0, max(T,n_latent,n_target), dtype=torch.long, device=x.device).unsqueeze(0).repeat(B,1) # shape (1, t)
-        # x = self.pos_embedding_in(pos) + self.embedding(x)
-        x = self.embedding(x) + self.pos_embedding_in(pos[:,:T])
+        
+        offset = torch.randint(self.max_input_len-T, size=(1,)).item()
+        x = self.embedding(x) + self.pos_embedding_in(offset+pos[:,:T])
 
         # x = self.embedding(x) * math.sqrt(self.d_model)
         # x = self.pos_encoder(x)
+
         if n_target == None: n_target = T
         if n_latent == None: n_latent = 8
 
+        # define init latent
         latent = self.latent_embedding(pos[:,:n_latent])
-        out_query = self.pos_embedding_out(pos[:,:n_target])
+
+        # define output query
+        offset = torch.randint(self.output_len-n_target, size=(1,)).item()
+        out_query = self.pos_embedding_out(offset + pos[:,:n_target])
 
         latents = []
         outputs = []
@@ -111,12 +117,16 @@ class PositionalEncoding(nn.Module):
         pe[:, 0, 0::2] = torch.sin(position * div_term)
         pe[:, 0, 1::2] = torch.cos(position * div_term)
         self.register_buffer('pe', pe)
+        self.max_len = max_len
 
     def forward(self, x: Tensor) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
         """
+        # seq_len = x.size(0)
+        # offset = torch.randint(self.max_len-seq_len, size=(1,)).item()
+        # x = x + self.pe[offset : offset + seq_len]
         x = x + self.pe[:x.size(0)]
         return self.dropout(x)
 
