@@ -48,7 +48,7 @@ class ToyThinker(nn.Module):
             self.linear,
         )]
 
-    def forward(self, x: Tensor, n_latent: int = None, n_target: int = None, n_step: int = 1, read_step: int = 1e4, n_keep_output:int = 1, n_memory:int = 1e4) -> Tensor:
+    def forward(self, x: Tensor, n_latent: int = None, n_target: int = None, n_step: int = 1, read_step: int = 1e4, n_keep_output:int = 1, n_memory:int = 1e4, output_step:int = 1) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size]``
@@ -83,25 +83,30 @@ class ToyThinker(nn.Module):
             latent = self.compute_step(latent, memory, skip_self_attn = not i) # skip only for first layer
 
             # append to latents memory
-            latents.append(latent)
+            latents.append(latent)      # remove old memorised latents
             if len(latents) > n_memory: latents.pop(0) # first in first out
 
             # compute context : memory + input
             memory = latents if i>=read_step else latents + [x] 
             memory = torch.cat(memory, dim=1)
+            # print(i, f': process step: mem*{len(latents)}') if i>=read_step else print(i, f': process step: read + mem*{len(latents)}')
 
             if i >= (n_step - n_keep_output):
-                # compute output at the last step
-                output = self.compute_output(out_query, memory) # B, T, H
-                outputs.append(output)
-                out_query = output # for multistep decoding
+                output = out_query # avoid ereasing out_query 
+                for j in range(output_step):
+                    # compute output at the last step
+                    # print(i, j, ': output compute step')
+                    output = self.compute_output(output, memory) # B, T, H
+                    if j >= (output_step - 1):
+                        # print(i, j, ': keep output')
+                        outputs.append(output) # keep output
 
         outputs = torch.stack(outputs, dim=1) # B, S, T, H
         outputs = self.linear(outputs)
 
         # split outputs
         logits = outputs[:, :, :, :self.vocab_size] # B, S, T, vocab_size
-        probes = outputs[:, :, :, -self.n_probe:]   # B, S, T, n_probe
+        probes = outputs[:, :, :, self.vocab_size:] # B, S, T, n_probe
 
         return logits, probes
     
@@ -134,7 +139,7 @@ class PositionalEncoding(nn.Module):
 if __name__ == '__main__':
     model = ToyThinker(
          vocab_size=17, max_latent=4, max_input_len=7, max_output_len=15,
-         d_model=32, nhead=4, d_hid=32*4, nlayers=1, n_probe=1, dropout=0.1)
+         d_model=32, nhead=4, d_hid=32*4, nlayers=1, n_probe=0, dropout=0.1)
     
     import torchinfo
     torchinfo.summary(model, depth = 4) # should print model summary
@@ -165,8 +170,15 @@ if __name__ == '__main__':
     print('decoder param count:', decoder)
 
     x = torch.randint(0,16, (2,5))
-    y, p = model(x, n_latent = 3, n_target = 5, n_step = 4, read_step = 2)
-    print("y.shape:", y.shape)
-    print("p.shape:", p.shape)
+    print()
+    output, probe = model(x,
+                 n_latent = 3, n_target = 5,
+                 n_step = 5, read_step = 2, n_keep_output = 2,
+                 n_memory = 3, output_step = 2)
+    print()
+    print("     x.shape:", x.shape)
+    print("output.shape:", output.shape)
+    print(" probe.shape:", probe.shape)
+
 
 
