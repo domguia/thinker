@@ -59,8 +59,8 @@ class ToyThinker(nn.Module):
         B, T = x.shape
 
         pos = torch.arange(0, max(T,n_latent,n_target), dtype=torch.long, device=x.device).unsqueeze(0).repeat(B,1) # shape (1, t)
-        
-        offset = torch.randint(self.max_input_len-T, size=(1,)).item()
+
+        offset = torch.randint(self.max_input_len-T, size=(B,1), device=x.device)
         x = self.embedding(x) + self.pos_embedding_in(offset+pos[:,:T])
 
         # x = self.embedding(x) * math.sqrt(self.d_model)
@@ -73,7 +73,7 @@ class ToyThinker(nn.Module):
         latent = self.latent_embedding(pos[:,:n_latent])
 
         # define output query
-        offset = torch.randint(self.max_output_len-n_target, size=(1,)).item()
+        offset = torch.randint(self.max_output_len-n_target, size=(B,1), device=x.device)
         out_query = self.pos_embedding_out(offset + pos[:,:n_target])
 
         latents = []
