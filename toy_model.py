@@ -94,7 +94,7 @@ class ToyThinker(nn.Module):
                 # compute output at the last step
                 output = self.compute_output(out_query, memory) # B, T, H
                 outputs.append(output)
-                # out_query = output
+                out_query = output # for multistep decoding
 
         outputs = torch.stack(outputs, dim=1) # B, S, T, H
         outputs = self.linear(outputs)
