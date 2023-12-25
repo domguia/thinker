@@ -9,14 +9,16 @@ from model_utils import FlexTransformerDecoder, FlexTransformerDecoderLayer
 class ToyThinker(nn.Module):
     # inspered from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
     def __init__(self, vocab_size: int, max_latent: int, max_input_len: int, max_output_len: int, d_model: int, nhead: int, d_hid: int,
-                 nlayers: int, n_probe: int = 0, dropout: float = 0.1, static_mem_len:int = 0):
+                 nlayers: int, n_probe: int = 0, dropout: float = 0.1, static_mem_len:int = 0,
+                 skip_self_attn:bool = False, ff_in_self_attn:bool = False):
         super().__init__()
         self.pos_encoder = PositionalEncoding(d_model, dropout=0)
-        decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu, batch_first=True)
-        self.compute_step = TransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
+        # decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu, batch_first=True)
+        # self.compute_step = TransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
 
-        # decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu, batch_first=True, ff_in_self_attn=True)
-        # self.compute_step = FlexTransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
+        decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu,
+                                                     batch_first=True, skip_self_attn=skip_self_attn, ff_in_self_attn=ff_in_self_attn)
+        self.compute_step = FlexTransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
 
         # decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_model, dropout, activation=nn.functional.gelu, batch_first=True) #, skip_self_attn=True) # n_hid = d_model*2 because shoul be smaller
         # self.compute_output = FlexTransformerDecoder(decoder_layers, 1) # only one layer

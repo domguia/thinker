@@ -51,6 +51,8 @@ class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex 
         if self.norm_first:
             if not skip_self_attn: # disable self attention block
                 x = x + self._sa_block(self.norm1(x), tgt_mask, tgt_key_padding_mask, tgt_is_causal)
+                if self.ff_in_self_attn:
+                    x = x + self._ff_block(self.norm4(x))
             x = x + self._mha_block(self.norm2(x), memory, memory_mask, memory_key_padding_mask, memory_is_causal)
             x = x + self._ff_block(self.norm3(x))
         else: # default case we runing in this project
