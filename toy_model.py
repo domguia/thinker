@@ -12,8 +12,11 @@ class ToyThinker(nn.Module):
                  nlayers: int, n_probe: int = 0, dropout: float = 0.1, static_mem_len:int = 0):
         super().__init__()
         self.pos_encoder = PositionalEncoding(d_model, dropout=0)
-        decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu, batch_first=True)
-        self.compute_step = TransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
+        # decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu, batch_first=True)
+        # self.compute_step = TransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
+
+        decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu, batch_first=True, ff_in_self_attn=True)
+        self.compute_step = FlexTransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
 
         # decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_model, dropout, activation=nn.functional.gelu, batch_first=True) #, skip_self_attn=True) # n_hid = d_model*2 because shoul be smaller
         # self.compute_output = FlexTransformerDecoder(decoder_layers, 1) # only one layer

@@ -1,8 +1,9 @@
 
+import copy
 from torch import nn
 from torch import Tensor
 from typing import Optional
-from torch.nn import TransformerDecoder, TransformerDecoderLayer
+from torch.nn import TransformerDecoder, TransformerDecoderLayer, LayerNorm
 
 class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex model! the real one is really flexible!!!
     r"""
@@ -11,10 +12,9 @@ class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex 
     """
 
     def __init__(self, *args, **kwargs):
-        self.skip_self_attn = False
-        if 'skip_self_attn' in kwargs:
-            self.skip_self_attn = kwargs['skip_self_attn']
-            del kwargs['skip_self_attn']
+        self.skip_self_attn = kwargs.pop('skip_self_attn', False)
+        self.ff_in_self_attn = kwargs.pop('ff_in_self_attn', False)
+        assert not (self.skip_self_attn and self.ff_in_self_attn), "skip_self_attn and ff_in_self_attn cannot be True at the same time"
 
         super().__init__(*args, **kwargs)
 
@@ -25,6 +25,9 @@ class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex 
             self.norm1 = nn.Identity()
             self.dropout1 = nn.Identity()
             self.self_attn.batch_first = True
+
+        if self.ff_in_self_attn:
+            self.norm4 = copy.deepcopy(self.norm2)
     
     def forward(
         self,
@@ -53,6 +56,8 @@ class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex 
         else: # default case we runing in this project
             if not skip_self_attn: # disable self attention block
                 x = self.norm1(x + self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal))
+                if self.ff_in_self_attn:
+                    x = self.norm4(x + self._ff_block(x))
             x = self.norm2(x + self._mha_block(x, memory, memory_mask, memory_key_padding_mask, memory_is_causal))
             x = self.norm3(x + self._ff_block(x))
 
