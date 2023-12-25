@@ -177,13 +177,13 @@ class ToyThinker(nn.Module):
                         outputs.append(output) # keep output
 
         outputs = torch.stack(outputs, dim=1) # B, S, T, H
-        outputs = self.linear(outputs)
+        logits = self.linear(outputs)
 
         # split outputs
-        logits = outputs[:, :, :, :self.vocab_size] # B, S, T, vocab_size
-        probes = outputs[:, :, :, self.vocab_size:] # B, S, T, n_probe
+        logits = logits[:, :, :, :self.vocab_size] # B, S, T, vocab_size
+        probes = logits[:, :, :, self.vocab_size:] # B, S, T, n_probe
 
-        return logits, probes
+        return outputs, logits, probes
     
 class PositionalEncoding(nn.Module):
 
@@ -207,6 +207,12 @@ class PositionalEncoding(nn.Module):
         """
         B, T, H = x.shape
         if self.randomised:
+            # resolution = torch.randint(1, int(T/self.max_len) + 1, size=(B,))
+            # offset = torch.rand(size=(B,))
+            # offset = offset*(self.max_len-T*resolution).clamp(min=0, max=self.max_len)
+            # index = torch.arange(T).unsqueeze(0).repeat(B,1)
+            # index = (index*resolution.unsqueeze(-1) + offset.unsqueeze(-1)).long()
+            # x = x + self.pe[:, index, :].expand_as(x) # advanced indexing
             offset = torch.randint(self.max_len-T, size=(B,))
             x = x + self.pe[offset.unsqueeze(-1), :T].expand_as(x)  # apply offset to each batch item
             # x = x + self.pe[offset.unsqueeze(-1), :T].expand_as(x) # advanced indexing
@@ -216,9 +222,9 @@ class PositionalEncoding(nn.Module):
 
 
 if __name__ == '__main__':
-    d_model = 1024 * 1
+    d_model = 1024 # + 512
     d_hid = d_model * 4
-    nhead = d_model // 16 # 1024/32=32
+    nhead = 64 # 1024/32=32
     nlayers = 1
     static_mem_len = 0 # 1024*1024
     
@@ -266,15 +272,16 @@ if __name__ == '__main__':
     start_time = time()
     x = torch.randint(0, 16, (2, 5))
     print()
-    output, probe = model(x, target = 5,
-                 n_latent = 3,
+    outputs_emb, logits, probe = model(x, target = 5, n_latent = 3,
                  n_step = 5, read_step = 2, n_keep_output = 2,
                  n_memory = 3, output_step = 2)
     print()
     print("Time:", time() - start_time)
-    print("     x.shape:", x.shape)
-    print("output.shape:", output.shape)
-    print(" probe.shape:", probe.shape)
+    print("          x.shape:", x.shape)
+    print("outputs_emb.shape:", outputs_emb.shape)
+    print("     logits.shape:", logits.shape)
+    print("      probe.shape:", probe.shape)
+
 
 
 
