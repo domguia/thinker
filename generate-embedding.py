@@ -149,6 +149,36 @@ for i, text_article in enumerate(split_file_by_pattern(file_path, pattern)):
 
 print("total chunk:", n)
 
+# write a pytorch dataset for the text, token and embedding
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+class EmbeddingDataset(Dataset):
+    # dataset for embedding
+    # expect directory of embedding files
+    def __init__(self, root_dir):
+        self.root_dir = root_dir
+
+        # get all embedding files
+        self.files = [f for f in os.listdir(root_dir) if os.path.isfile(os.path.join(root_dir, f)) and f.endswith(".embedding.bin")]
+        self.files.sort()
+    
+    def __len__(self):
+        return len(self.files)
+    
+    def __getitem__(self, idx):
+        # read embedding file
+        embedding = np.fromfile(self.root_dir + self.files[idx], dtype=np.float32)
+        # read token file
+        token = np.fromfile(self.root_dir + self.files[idx].replace(".embedding.bin", ".token.bin"), dtype=np.int64)
+        # read text file
+        with open(self.root_dir + self.files[idx].replace(".embedding.bin", ".txt"), 'r') as f:
+            text = f.read()
+
+        sample = {'embedding': embedding, 'token': token, 'text': text}
+
+        return sample
 
 
 
