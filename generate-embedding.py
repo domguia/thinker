@@ -52,8 +52,6 @@ if False:
 
     print("sentence_embedding:", sentence_embedding.shape)
 
-# Set pad_token as eos_token
-tokenizer.pad_token = tokenizer.eos_token
 
 import re
 
@@ -86,6 +84,12 @@ file_path = "./data/wikitext-2-raw-v1/wikitext-2-raw/wiki.test.raw"
 target_dir = "./data/wikitext-2-raw-v1/embedding/wikitext-2-raw/"
 os.makedirs(target_dir, exist_ok=True)
 
+max_tokens = 512
+stride = 128
+
+# Set pad_token as eos_token
+tokenizer.pad_token = tokenizer.eos_token
+
 from tqdm import tqdm
 file_size = os.path.getsize(file_path)
 pbar = tqdm(total=file_size)
@@ -104,8 +108,6 @@ for i, text_article in enumerate(split_file_by_pattern(file_path, pattern)):
         tokens = tokenizer(text_article, return_tensors='pt', padding=True)
 
         # make chunks to fit in memory
-        max_tokens = 512
-        stride = 128
         # batch_size = 10
         tokens_chuncks = [ {k: v[:,i:i+max_tokens] for k, v in tokens.items()} for i in range(0, tokens['input_ids'].shape[1], max_tokens-stride) ]
 
@@ -146,6 +148,8 @@ for i, text_article in enumerate(split_file_by_pattern(file_path, pattern)):
             f.write(text_article)
 
 print("total chunk:", n)
+
+
 
 
 
