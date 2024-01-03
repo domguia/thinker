@@ -1,4 +1,5 @@
-# The trained computer
+# Thinker
+The trained computer
 
 We want to train a model that does numeric computation such as 1 + 2 = 3,
 what do we need for computation:
