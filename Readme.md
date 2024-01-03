@@ -33,4 +33,4 @@ The model is a cross-attention latent-based transformer (like Perceiver):
 
 [here's a visual](https://www.figma.com/file/MNe376umkTm5iCpg9kSmcq/thinking-transformer?type=design&node-id=328-196&mode=design)
 
-[here's draft of the initial idea](/ideas-draft.md)
+[here's a draft of the initial idea](/ideas-draft.md)
