@@ -19,6 +19,6 @@ the `algorithm` we decided to learn are (from easy to difficult) :
 
 Task 3 in particular will help to test how this method performs in variable complexity. Since the last task highly relies on memory to reduce computation we will observe how the model model will use the given memory.
 
-Check ou : [/thinker_model.py](/thinker_model.py#L373)
+Checkout : [/thinker_model.py](/thinker_model.py#L373)
 
 Based on the observed result we could re-use the same approach on Language Modeling Task following the [original ideas](https://www.figma.com/file/MNe376umkTm5iCpg9kSmcq/thinking-transformer?type=design&node-id=328-196&mode=design).
