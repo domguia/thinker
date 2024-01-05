@@ -255,7 +255,7 @@ def all_losses_compute(outs, target, target_emb=None, last_step_only = True):
     # probes_ar: B, S, T, n_probe
     # target: B, T
 
-    def compute_vocab_proj_loss(logits, target, last_step_only=False):
+    def compute_token_pred_loss(logits, target, last_step_only=True):
         B, S, T, vocab_size = logits.shape
         # logits: B, S, T, vocab_size
         # target: B, T
@@ -268,20 +268,42 @@ def all_losses_compute(outs, target, target_emb=None, last_step_only = True):
 
         return loss, losses.detach().cpu()
     
-    def compute_emdedding_loss(output_emb, target_emb, last_step_only=False):
+    def compute_emdedding_loss(output_emb, target_emb, last_step_only=True,
+                               proj_model:nn.Module = None, proj_target:nn.Module = None,
+                               method:str = 'mse'):
         # output_emb: B, S, T, H = hdim_model
         # target_emb: B, S, T, H = hdim_target
         hdim_model  = output_emb.size(-1)
         hdim_target = target_emb.size(-1)
 
-        losses = nn.functional.mse_loss(output_emb, target_emb, reduction='none') # B, S, T, H
-        losses = losses.mean(dim=3) # B, S, T
+
+        if hdim_model != hdim_target:
+            assert proj_model, "proj_model should be provided if model hdim and target are different"
+            # project model embedding to target
+            output_emb = proj_model(output_emb) # B, S, T, H = hdim_target from hdim_model
+
+        if method == 'mse':
+            losses = nn.functional.mse_loss(output_emb, target_emb, reduction='none') # B, S, T, H
+            losses = losses.mean(dim=-1) # B, S, T
+        elif method == 'cross_entropy':
+            assert proj_target, "proj_target should be provided if method is cross_entropy"
+            
+            # project target embedding to model
+            target_emb = proj_target(target_emb) # B, S, T, H = proj_dim
+            assert output_emb.size(-1) == target_emb.size(-1), "proj_dim should be the same for model and target"
+            
+            output_logits = output_emb.softmax(dim=-1).permute(0,3,1,2) # B, H, S, T
+            target_logits = target_emb.softmax(dim=-1).permute(0,3,1,2) # B, H, S, T
+            
+            losses = nn.functional.cross_entropy(output_logits, target_logits, reduction='none') # B, S, T
+        else:
+            raise Exception(f"method {method} is not supported")
 
         loss = losses[:,-1].mean() if last_step_only else losses.mean()
 
         return loss, losses.detach().cpu()
     
-    def compute_probe_loss(probes, target, last_step_only=False, factor=1):
+    def compute_probe_loss(probes, target, last_step_only=True, factor=1):
         # probes: B, S, T, P = n_probe
         # target: B, T
         B, S, T, P = probes.shape
@@ -307,12 +329,12 @@ def all_losses_compute(outs, target, target_emb=None, last_step_only = True):
         return viz
 
     logs = []
-    logs += [('vocab',    compute_vocab_proj_loss(logits,    target,      last_step_only))]
-    logs += [('vocab_ar', compute_vocab_proj_loss(logits_ar, target,      last_step_only))] if logits_ar is not None else []
-    logs += [('embd',     compute_emdedding_loss(outputs,    target_emb, last_step_only))] if target_emb is not None else []
-    logs += [('embd_ar',  compute_emdedding_loss(outputs_ar, target_emb, last_step_only))] if not (outputs_ar is None or target_emb is None) else []
-    logs += [('probe',    compute_probe_loss(probes,         target,      last_step_only, factor=4))]
-    logs += [('probe_ar', compute_probe_loss(probes_ar,      target,      last_step_only, factor=4))] if probes_ar is not None else []
+    logs += [('token_pred',    compute_token_pred_loss(logits,    target,      last_step_only))]
+    logs += [('token_pred_ar', compute_token_pred_loss(logits_ar, target,      last_step_only))] if logits_ar is not None else []
+    logs += [('embd',          compute_emdedding_loss(outputs,    target_emb, last_step_only))] if target_emb is not None else []
+    logs += [('embd_ar',       compute_emdedding_loss(outputs_ar, target_emb, last_step_only))] if not (outputs_ar is None or target_emb is None) else []
+    logs += [('probe',         compute_probe_loss(probes,         target,      last_step_only, factor=4))]
+    logs += [('probe_ar',      compute_probe_loss(probes_ar,      target,      last_step_only, factor=4))] if probes_ar is not None else []
 
     # compute loss for loss.backward()
     aggregated_loss = sum([loss for name, (loss, losses) in logs])
@@ -362,11 +384,11 @@ class PositionalEncoding(nn.Module):
 
 
 if __name__ == '__main__':
-    d_model = 1024 # + 512
+    d_model = 512 # + 512
     d_hid = d_model * 4
-    nhead = 64 # 1024/32=32
+    nhead = 32 * 1 # 1024/32=32
     nlayers = 1
-    static_mem_len = 1024 # 1024*1024
+    static_mem_len = 100 # 1024*1024
     
     def manual_parameters_count(d_model, d_hid, nlayers, static_mem_len):
         # multiheadattention param count
@@ -437,7 +459,7 @@ if __name__ == '__main__':
         print("  probes_ar.shape:", probes_ar.shape)
 
 
-    loss, logs = all_losses_compute(outs, target, None, last_step_only=False)
+    loss, logs = all_losses_compute(outs, target, None, last_step_only=True)
 
     print('loss:', loss)
     print('logs:', logs)
