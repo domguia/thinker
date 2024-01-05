@@ -39,6 +39,17 @@ Phi 1.5 : https://huggingface.co/microsoft/phi-1_5/blob/main/config.json
   intermediate_size = 8192
   ... all same with Ph 2
 
+  
+For Kmeans, clustering:
+https://github.com/facebookresearch/fairseq/blob/main/fairseq/modules/kmeans_vector_quantizer.py
+
+all data -> find kmeans cluster for k=10, k=100, k=500, k=1000, k=10_000
+  -> get number of element in each kmeans cluster
+  -> distribute them according to frequency among total available static_memory eg. cluster 3 --map-> embedding : 2,3,4,5,6,7
+
+at training -> map target_emb -> cluster -> static mem embedding (we should be able to keep undercontrol the number of embedding in context)
+at inference -> put all static memory in context and let the model decide
+
 '''
 
 ## FP32 / CPU
