@@ -3,7 +3,7 @@ from typing import Optional #, Any, Union, Callable
 
 import torch
 from torch import nn, Tensor
-from torch.nn import TransformerDecoder, TransformerDecoderLayer
+from torch.nn import TransformerDecoder, TransformerDecoderLayer, Transformer
 from model_utils import FlexTransformerDecoder, FlexTransformerDecoderLayer
 
 class ToyThinker(nn.Module):
@@ -14,11 +14,11 @@ class ToyThinker(nn.Module):
         super().__init__()
         self.pos_encoder = PositionalEncoding(d_model, dropout=0)
         # decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu, batch_first=True)
-        # self.compute_step = TransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
+        # self.attn_compute = TransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
 
         decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu,
                                                      batch_first=True, skip_self_attn=skip_self_attn, ff_in_self_attn=ff_in_self_attn)
-        self.compute_step = FlexTransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
+        self.attn_compute = FlexTransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
 
         # decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_model, dropout, activation=nn.functional.gelu, batch_first=True) #, skip_self_attn=True) # n_hid = d_model*2 because shoul be smaller
         # self.compute_output = FlexTransformerDecoder(decoder_layers, 1) # only one layer
@@ -39,7 +39,7 @@ class ToyThinker(nn.Module):
         self.max_output_len = max_output_len
         self.n_probe = n_probe
 
-        self.tgt_is_causal = False
+        self.ouput_is_causal = False
         self.randomise_output = False
         self.perturb_prob = 0.1
 
@@ -115,7 +115,7 @@ class ToyThinker(nn.Module):
         return latent
 
 
-    def forward(self, x: Tensor, target = None, n_latent = None, n_step: int = 1, read_step: int = 1e4, n_keep_output:int = 1, n_memory:int = 1e4, output_step:int = 1, knowledge_trigger = torch.LongTensor([])) -> Tensor:
+    def forward(self, x: Tensor, target = None, n_latent = None, n_step: int = 1, read_step: int = 1e4, n_keep_output:int = 1, n_memory:int = 1e4, output_step:int = 1, knowledge_trigger = torch.LongTensor([]), is_ar:bool = False) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size]``
@@ -145,7 +145,19 @@ class ToyThinker(nn.Module):
         #     offset = torch.randint(self.max_output_len-n_target, size=(B,1), device=x.device)
         #     out_query = self.embd_out_pos(offset + pos[:,:n_target])
         out_query = self.embd_out_pos(pos[:,:n_target])
-        if isinstance(target, torch.Tensor): out_query += target
+        if isinstance(target, torch.FloatTensor): out_query += target
+
+        # autogressive ouput like Perceiver AR
+        if is_ar: 
+            assert isinstance(target, torch.Tensor) and target.dtype == torch.long, "target must be a sequence of token index"
+            C = target.size(1)
+            tgt_mask = Transformer.generate_square_subsequent_mask(n_latent+C, latent.device)
+            
+            output_ar = self.embd_vocab(target) * math.sqrt(self.d_model)
+            output_ar = self.pos_encoder(output_ar, offset=T)
+            outputs_ar = []
+        else:
+            outputs_ar = None
 
         latents = []
         outputs = []
@@ -158,14 +170,17 @@ class ToyThinker(nn.Module):
             #     latent = self.pertub(latent)
 
             # compute step
-            latent = self.compute_step(latent, memory)
+            latent = self.attn_compute(latent, memory)
+            if is_ar:
+                output_ar = self.attn_compute(output_ar, memory, tgt_mask=tgt_mask, tgt_is_causal=True) # Fix: avoid twice compute with mask attention
+                outputs_ar.append(output_ar)
 
             # append to latents memory
             latents.append(latent)      # remove old memorised latents
             if len(latents) > n_memory: latents.pop(0) # first in first out
 
             # define context : memory + input
-            memory = latents if i>=read_step else latents + [x] 
+            memory = latents if i>=read_step else [x] + latents 
             # add static memory
             memory = memory + [static_mem] if static_mem.nelement() else memory
             memory = torch.cat(memory, dim=1)
@@ -176,7 +191,7 @@ class ToyThinker(nn.Module):
                 for j in range(output_step):
                     # compute output at the last step
                     # print(i, j, ': output compute step')
-                    output = self.compute_step(output, memory, tgt_is_causal=self.tgt_is_causal) # B, T, H
+                    output = self.attn_compute(output, memory, tgt_is_causal=self.ouput_is_causal) # B, T, H
                     if j >= (output_step - 1):
                         # print(i, j, ': keep output')
                         outputs.append(output) # keep output
@@ -185,11 +200,46 @@ class ToyThinker(nn.Module):
         logits = self.linear(outputs)
 
         # split outputs
-        logits = logits[:, :, :, :self.vocab_size] # B, S, T, vocab_size
         probes = logits[:, :, :, self.vocab_size:] # B, S, T, n_probe
+        logits = logits[:, :, :, :self.vocab_size] # B, S, T, vocab_size
 
-        return outputs, logits, probes
+        logits_ar, probes_ar = None, None
+        if is_ar:
+            outputs_ar = torch.stack(outputs_ar, dim=1) # B, S, T, H
+            logits_ar = self.linear(outputs_ar)
+
+            probes_ar = logits_ar[:, :, :, self.vocab_size:] # B, S, T, n_probe
+            logits_ar = logits_ar[:, :, :, :self.vocab_size] # B, S, T, vocab_size
+
+        return outputs, logits, probes, outputs_ar, logits_ar, probes_ar
     
+    def compute_step(self, latent, memory, ouput_query=None):
+        B, L, _ = latent.shape
+
+        mask = None
+        in_latent = latent
+
+        # generate attention mask
+        if ouput_query:
+            _, C, _ = ouput_query.shape # number of causal elements
+            mask = mask_attn((B,L+C,L+C), C, latent.device)
+            in_latent = torch.cat((latent, ouput_query), dim=1)
+
+        out_latent = self.attn_compute(in_latent, memory, tgt_mask=mask)
+
+        # extract latent and output
+        latent = out_latent[:,:L,:]
+        output_emb = out_latent[:,L:,:]
+
+        return latent, output_emb
+
+def mask_attn(size, n_causal:int = None, device=None):
+    # size = (B, L, L) or (L, L)
+    # n_causal is number element were causal mask is applied, if None use all L elements
+    if n_causal is None: n_causal = size[-2]
+    mask = torch.tril(torch.ones(size, device=device), diagonal=-n_causal)
+    return mask
+
 class PositionalEncoding(nn.Module):
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000, randomised: bool = False):
@@ -205,12 +255,15 @@ class PositionalEncoding(nn.Module):
         self.max_len = max_len
         self.randomised = randomised
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, offset: int = 0) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
         """
         B, T, H = x.shape
+        
+        assert self.randomised==False or offset==0, "randomise can't work simultaneously with offset"
+
         if self.randomised:
             # resolution = torch.randint(1, int(T/self.max_len) + 1, size=(B,))
             # offset = torch.rand(size=(B,))
@@ -222,7 +275,7 @@ class PositionalEncoding(nn.Module):
             x = x + self.pe[offset.unsqueeze(-1), :T].expand_as(x)  # apply offset to each batch item
             # x = x + self.pe[offset.unsqueeze(-1), :T].expand_as(x) # advanced indexing
         else:
-            x = x + self.pe[:, :T, :]
+            x = x + self.pe[:, offset:T+offset, :]
         return self.dropout(x)
 
 
@@ -231,7 +284,7 @@ if __name__ == '__main__':
     d_hid = d_model * 4
     nhead = 64 # 1024/32=32
     nlayers = 1
-    static_mem_len = 0 # 1024*1024
+    static_mem_len = 1024 # 1024*1024
     
     def manual_parameters_count(d_model, d_hid, nlayers, static_mem_len):
         # multiheadattention param count
@@ -276,16 +329,28 @@ if __name__ == '__main__':
     from time import time
     start_time = time()
     x = torch.randint(0, 16, (2, 5))
+    target = torch.randint(0, 16, (2, 3))
+    knowledge_trigger = torch.randint(0, 16, (2, 10))
     print()
-    outputs_emb, logits, probe = model(x, target = 5, n_latent = 3,
+    outputs_emb, logits, probes, outputs_ar, logits_ar, probes_ar  = model(x, target = target, n_latent = 3,
                  n_step = 5, read_step = 2, n_keep_output = 2,
-                 n_memory = 3, output_step = 2)
+                 n_memory = 3, output_step = 2,
+                 knowledge_trigger = knowledge_trigger,
+                 is_ar = False)
     print()
     print("Time:", time() - start_time)
     print("          x.shape:", x.shape)
+    print("      ---:---     ")
     print("outputs_emb.shape:", outputs_emb.shape)
     print("     logits.shape:", logits.shape)
-    print("      probe.shape:", probe.shape)
+    print("     probes.shape:", probes.shape)
+
+    if logits_ar is not None:
+        print("      ---:---     ")
+        print(" outputs_ar.shape:", outputs_ar.shape)
+        print("  logits_ar.shape:", logits_ar.shape)
+        print("  probes_ar.shape:", probes_ar.shape)
+
 
 
 
