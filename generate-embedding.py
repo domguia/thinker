@@ -19,6 +19,28 @@ tokenizer = AutoTokenizer.from_pretrained(
   cache_dir="./pythia-70m-deduped/step3000",
 )
 
+'''
+Phi Model config:
+
+ Phi 2   : https://huggingface.co/microsoft/phi-2/blob/main/config.json
+  "n_embd": 2560,
+  "n_head": 32,
+  "n_layer": 32,
+  "n_positions": 2048,
+  "rotary_dim": 32,
+  "vocab_size": 51200
+
+  24
+
+  
+Phi 1.5 : https://huggingface.co/microsoft/phi-1_5/blob/main/config.json
+  "n_embd": 2048,
+  "n_layer": 24,
+  intermediate_size = 8192
+  ... all same with Ph 2
+
+'''
+
 ## FP32 / CPU
 # model = PhiForCausalLM.from_pretrained("susnato/phi-1_5_dev", torch_dtype=torch.float16, device_map="cpu", trust_remote_code=True)
 
