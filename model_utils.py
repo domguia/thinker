@@ -1,5 +1,6 @@
 
 import copy
+import torch
 from torch import nn
 from torch import Tensor
 from typing import Optional
@@ -55,7 +56,7 @@ class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex 
                     x = x + self._ff_block(self.norm4(x))
             x = x + self._mha_block(self.norm2(x), memory, memory_mask, memory_key_padding_mask, memory_is_causal)
             x = x + self._ff_block(self.norm3(x))
-        else: # default case we runing in this project
+        else: # default case we are runing in this project
             if not skip_self_attn: # disable self attention block
                 x = self.norm1(x + self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal))
                 if self.ff_in_self_attn:
@@ -100,3 +101,36 @@ class FlexTransformerDecoder(TransformerDecoder):
             output = self.norm(output)
 
         return output
+    
+
+
+class LeveledPositionalEncoding(nn.Module):
+
+    def __init__(self, d_model: int, level: int, base: int=2, overlap: int =0, dropout: float = 0.1, max_len: int = 5000, randomised: bool = False):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.emb = nn.Embedding(level*base, d_model)
+
+        self.level = level
+        self.base = base
+        self.overlap = overlap # offset between levels
+        self.max_len = max_len
+    
+    def forward(self, x: Tensor) -> Tensor:
+        B, T = x.shape
+        device, dytpe = x.device, x.dtype
+        
+        max_level = math.ceil(math.log(T, self.base))
+
+        # compute level
+        pos = torch.arange(0, T, dtype=torch.long, device=device).unsqueeze(0).repeat(B,1)
+        level = torch.arange(0, max_level, dtype=torch.long, device=device).unsqueeze(1).repeat(1,T)
+    
+        pos = pos * (level + 1)
+        pos = pos % self.base
+        pos = pos + level * self.base
+
+        # compute embedding
+        x = self.emb(pos)
+
+        return self.dropout(x)
