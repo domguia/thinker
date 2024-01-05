@@ -4,7 +4,7 @@ from typing import Optional #, Any, Union, Callable
 import torch
 from torch import nn, Tensor
 from torch.nn import TransformerDecoder, TransformerDecoderLayer, Transformer
-from model_utils import FlexTransformerDecoder, FlexTransformerDecoderLayer
+from model_utils import FlexTransformerDecoder, FlexTransformerDecoderLayer, TokenProject
 
 class ToyThinker(nn.Module):
     # inspered from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
@@ -328,13 +328,21 @@ def all_losses_compute(outs, target, target_emb=None, last_step_only = True):
 
         return viz
 
+    # Load projection model
+    
+    # proj_model  = TokenProject(outputs.size(-1), probes.size(-1))
+    # proj_target = TokenProject(target_emb.size(-1), probes.size(-1))
+
+    # proj_model.load_state_dict()
+    # proj_target.load_state_dict()
+
     logs = []
-    logs += [('token_pred',    compute_token_pred_loss(logits,    target,      last_step_only))]
-    logs += [('token_pred_ar', compute_token_pred_loss(logits_ar, target,      last_step_only))] if logits_ar is not None else []
+    logs += [('token_pred',    compute_token_pred_loss(logits,    target,     last_step_only))]
+    logs += [('token_pred_ar', compute_token_pred_loss(logits_ar, target,     last_step_only))] if logits_ar is not None else []
     logs += [('embd',          compute_emdedding_loss(outputs,    target_emb, last_step_only))] if target_emb is not None else []
     logs += [('embd_ar',       compute_emdedding_loss(outputs_ar, target_emb, last_step_only))] if not (outputs_ar is None or target_emb is None) else []
-    logs += [('probe',         compute_probe_loss(probes,         target,      last_step_only, factor=4))]
-    logs += [('probe_ar',      compute_probe_loss(probes_ar,      target,      last_step_only, factor=4))] if probes_ar is not None else []
+    logs += [('probe',         compute_probe_loss(probes,         target,     last_step_only, factor=4))]
+    logs += [('probe_ar',      compute_probe_loss(probes_ar,      target,     last_step_only, factor=4))] if probes_ar is not None else []
 
     # compute loss for loss.backward()
     aggregated_loss = sum([loss for name, (loss, losses) in logs])

@@ -3,7 +3,7 @@ import copy
 import torch
 from torch import nn
 from torch import Tensor
-from typing import Optional
+from typing import Any, Mapping, Optional
 from torch.nn import TransformerDecoder, TransformerDecoderLayer, LayerNorm
 
 class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex model! the real one is really flexible!!!
@@ -134,3 +134,25 @@ class LeveledPositionalEncoding(nn.Module):
         x = self.emb(pos)
 
         return self.dropout(x)
+
+class TokenProject(nn.Module):
+    def __init__(self, d_model: int, outdim: int):
+        super().__init__()
+        self.proj = nn.Linear(d_model, outdim)
+
+    def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False):
+        # load weights from state_dict
+        if assign:
+            self.proj.weight = nn.Parameter(state_dict['proj.weight'])
+            self.proj.bias = nn.Parameter(state_dict['proj.bias'])
+        else:
+            self.proj.load_state_dict(state_dict)
+        
+        # freeze the weights
+        for param in self.parameters():
+            param.requires_grad = False
+            
+        return self 
+    
+    def forward(self, x: Tensor) -> Tensor:
+        return self.proj(x)
