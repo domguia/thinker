@@ -115,7 +115,10 @@ class ToyThinker(nn.Module):
         return latent
 
 
-    def forward(self, x: Tensor, target = None, n_latent = None, n_step: int = 1, read_step: int = 1e4, n_keep_output:int = 1, n_memory:int = 1e4, output_step:int = 1, knowledge_trigger = torch.LongTensor([]), is_ar:bool = False) -> Tensor:
+    def forward(self, x: Tensor, target = None,
+                n_latent = None, n_step: int = 1, read_step: int = 1e4, n_keep_output:int = 1,
+                n_memory:int = 1e4, output_step:int = 1, knowledge_trigger = torch.LongTensor([]),
+                is_full_ar:bool = False, is_output_ar:bool = False) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size]``
@@ -127,6 +130,7 @@ class ToyThinker(nn.Module):
 
         if isinstance(target, torch.Tensor): n_target = target.shape[1]
         else: n_target = target if isinstance(target,int) else T
+        print('n_target:',n_target)
 
         pos = torch.arange(0, max(T,n_latent,n_target), dtype=torch.long, device=x.device).unsqueeze(0).repeat(B,1) # shape (1, t)
 
@@ -141,23 +145,25 @@ class ToyThinker(nn.Module):
         latent = self.embd_latent(pos[:,:n_latent]) # B, L, H
 
         # define output query
-        # if self.randomise_output:
-        #     offset = torch.randint(self.max_output_len-n_target, size=(B,1), device=x.device)
-        #     out_query = self.embd_out_pos(offset + pos[:,:n_target])
         out_query = self.embd_out_pos(pos[:,:n_target])
-        if isinstance(target, torch.FloatTensor): out_query += target
+        if isinstance(target, torch.Tensor):
+            if isinstance(target, torch.FloatTensor):
+                out_query += target
+            elif isinstance(target, torch.LongTensor):
+                assert is_output_ar, "is_output_ar must be True for target sequence of tokens"
+                out_query += self.embd_vocab(target)
+
+        if is_full_ar or is_output_ar:
+            tgt_mask = Transformer.generate_square_subsequent_mask(n_target, latent.device)
+        else: tgt_mask = None
 
         # autogressive ouput like Perceiver AR
-        if is_ar: 
+        outputs_ar = None
+        if is_full_ar: 
             assert isinstance(target, torch.Tensor) and target.dtype == torch.long, "target must be a sequence of token index"
-            C = target.size(1)
-            tgt_mask = Transformer.generate_square_subsequent_mask(n_latent+C, latent.device)
-            
             output_ar = self.embd_vocab(target) * math.sqrt(self.d_model)
             output_ar = self.pos_encoder(output_ar, offset=T)
             outputs_ar = []
-        else:
-            outputs_ar = None
 
         latents = []
         outputs = []
@@ -171,7 +177,7 @@ class ToyThinker(nn.Module):
 
             # compute step
             latent = self.attn_compute(latent, memory)
-            if is_ar:
+            if is_full_ar:
                 output_ar = self.attn_compute(output_ar, memory, tgt_mask=tgt_mask, tgt_is_causal=True) # Fix: avoid twice compute with mask attention
                 outputs_ar.append(output_ar)
 
@@ -191,7 +197,7 @@ class ToyThinker(nn.Module):
                 for j in range(output_step):
                     # compute output at the last step
                     # print(i, j, ': output compute step')
-                    output = self.attn_compute(output, memory, tgt_is_causal=self.ouput_is_causal) # B, T, H
+                    output = self.attn_compute(output, memory, tgt_mask=tgt_mask, tgt_is_causal=is_output_ar) # B, T, H
                     if j >= (output_step - 1):
                         # print(i, j, ': keep output')
                         outputs.append(output) # keep output
@@ -204,7 +210,7 @@ class ToyThinker(nn.Module):
         logits = logits[:, :, :, :self.vocab_size] # B, S, T, vocab_size
 
         logits_ar, probes_ar = None, None
-        if is_ar:
+        if is_full_ar:
             outputs_ar = torch.stack(outputs_ar, dim=1) # B, S, T, H
             logits_ar = self.linear(outputs_ar)
 
@@ -239,6 +245,82 @@ def mask_attn(size, n_causal:int = None, device=None):
     if n_causal is None: n_causal = size[-2]
     mask = torch.tril(torch.ones(size, device=device), diagonal=-n_causal)
     return mask
+
+def all_losses_compute(outs, target, target_emb=None, last_step_only = True):
+    outputs, logits, probes, outputs_ar, logits_ar, probes_ar = outs
+    # outputs: B, S, T, H
+    # probes: B, S, T, n_probe
+    # outputs_ar: B, S, T, H
+    # logits_ar: B, S, T, vocab_size
+    # probes_ar: B, S, T, n_probe
+    # target: B, T
+
+    def compute_vocab_proj_loss(logits, target, last_step_only=False):
+        B, S, T, vocab_size = logits.shape
+        # logits: B, S, T, vocab_size
+        # target: B, T
+
+        target_ = target.repeat(S,1,1).permute(1,0,2) # B, S, T wich is B, T -> S, B, T -> B, S, T
+        logits_ = logits.permute(0,3,1,2) # B, vocab_size, S, T
+        losses = nn.functional.cross_entropy(logits_, target_, reduction='none', ignore_index=-100)
+        
+        loss = losses[:,-1].mean() if last_step_only else losses.mean()
+
+        return loss, losses.detach().cpu()
+    
+    def compute_emdedding_loss(output_emb, target_emb, last_step_only=False):
+        # output_emb: B, S, T, H = hdim_model
+        # target_emb: B, S, T, H = hdim_target
+        hdim_model  = output_emb.size(-1)
+        hdim_target = target_emb.size(-1)
+
+        losses = nn.functional.mse_loss(output_emb, target_emb, reduction='none') # B, S, T, H
+        losses = losses.mean(dim=3) # B, S, T
+
+        loss = losses[:,-1].mean() if last_step_only else losses.mean()
+
+        return loss, losses.detach().cpu()
+    
+    def compute_probe_loss(probes, target, last_step_only=False, factor=1):
+        # probes: B, S, T, P = n_probe
+        # target: B, T
+        B, S, T, P = probes.shape
+
+        target = target[:, None, :, None].repeat(1,S,1,P).float()
+        losses = nn.functional.mse_loss(probes, target/factor, reduction='none') # B, S, T, P
+        losses = losses.mean(dim=3) # B, S, T
+
+        loss = losses[:,-1].mean() if last_step_only else losses.mean()
+
+        return loss, losses.detach().cpu()
+
+    # visualisation losses
+    def compute_viz_loss(losses):
+        # losses: B, S, T
+        # compute loss over S and T
+        losses = losses.detach().mean(dim=0)
+
+        viz = dict()
+        viz['last_step_seq_losses'] = losses[-1,:]
+        viz['mean_losses_per_step'] = losses.mean(dim=1)
+
+        return viz
+
+    logs = []
+    logs += [('vocab',    compute_vocab_proj_loss(logits,    target,      last_step_only))]
+    logs += [('vocab_ar', compute_vocab_proj_loss(logits_ar, target,      last_step_only))] if logits_ar is not None else []
+    logs += [('embd',     compute_emdedding_loss(outputs,    target_emb, last_step_only))] if target_emb is not None else []
+    logs += [('embd_ar',  compute_emdedding_loss(outputs_ar, target_emb, last_step_only))] if not (outputs_ar is None or target_emb is None) else []
+    logs += [('probe',    compute_probe_loss(probes,         target,      last_step_only, factor=4))]
+    logs += [('probe_ar', compute_probe_loss(probes_ar,      target,      last_step_only, factor=4))] if probes_ar is not None else []
+
+    # compute loss for loss.backward()
+    aggregated_loss = sum([loss for name, (loss, losses) in logs])
+
+    # compute loss for visualization
+    logs = [dict(name=name, loss=loss.detach().cpu(), losses=losses, **compute_viz_loss(losses)) for name, (loss, losses) in logs]
+
+    return aggregated_loss, logs
 
 class PositionalEncoding(nn.Module):
 
@@ -336,8 +418,9 @@ if __name__ == '__main__':
                  n_step = 5, read_step = 2, n_keep_output = 2,
                  n_memory = 3, output_step = 2,
                  knowledge_trigger = knowledge_trigger,
-                 is_ar = True)
+                 is_full_ar = True, is_output_ar=True)
     outputs_emb, logits, probes, outputs_ar, logits_ar, probes_ar = outs
+
 
     print()
     print("Time:", time() - start_time)
@@ -352,6 +435,12 @@ if __name__ == '__main__':
         print(" outputs_ar.shape:", outputs_ar.shape)
         print("  logits_ar.shape:", logits_ar.shape)
         print("  probes_ar.shape:", probes_ar.shape)
+
+
+    loss, logs = all_losses_compute(outs, target, None, last_step_only=False)
+
+    print('loss:', loss)
+    print('logs:', logs)
 
 
 
