@@ -332,11 +332,13 @@ if __name__ == '__main__':
     target = torch.randint(0, 16, (2, 3))
     knowledge_trigger = torch.randint(0, 16, (2, 10))
     print()
-    outputs_emb, logits, probes, outputs_ar, logits_ar, probes_ar  = model(x, target = target, n_latent = 3,
+    outs = model(x, target = target, n_latent = 3,
                  n_step = 5, read_step = 2, n_keep_output = 2,
                  n_memory = 3, output_step = 2,
                  knowledge_trigger = knowledge_trigger,
-                 is_ar = False)
+                 is_ar = True)
+    outputs_emb, logits, probes, outputs_ar, logits_ar, probes_ar = outs
+
     print()
     print("Time:", time() - start_time)
     print("          x.shape:", x.shape)
