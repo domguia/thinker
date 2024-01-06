@@ -242,6 +242,17 @@ class ToyThinker(nn.Module):
 def mask_attn(size, n_causal:int = None, device=None):
     # size = (B, L, L) or (L, L)
     # n_causal is number element were causal mask is applied, if None use all L elements
+    #         0 0 0|0 0 0|0 0 1    1 1 1    
+    #       O 0 0 0|0 0 0|0 1 1 or 1 1 1 for full attention output   
+    #       __0_0_0|0_0_0|1_1_1    1_1_1    
+    #         0 0 0|0 0 1|0 0 0    
+    # key-> C 0 0 0|0 1 1|0 0 0    
+    #       __0_0_0|1_1_1|0_0_0    
+    #         1 1 1|1 1 1|1 1 1    L : Lantent full attention
+    #       L 1 1 1|1 1 1|1 1 1    C : Causal attention, with full ar pass
+    #         1 1 1|1 1 1|1 1 1    O : Output attention
+    # query->   L  |  C  |  O       
+    
     if n_causal is None: n_causal = size[-2]
     mask = torch.tril(torch.ones(size, device=device), diagonal=-n_causal)
     return mask
