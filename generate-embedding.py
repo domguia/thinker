@@ -29,6 +29,7 @@ Phi Model config:
   "n_positions": 2048,
   "rotary_dim": 32,
   "vocab_size": 51200
+  intermediate_size = 4*2560 (should be checked)
 
   24
 
