@@ -239,8 +239,8 @@ class ToyThinker(nn.Module):
 
         return latent, output_emb
 
-def mask_attn(size, n_causal:int = None, device=None):
-    # size = (B, L, L) or (L, L)
+def mask_attn(size, n_causal:int = 0, n_output:int = 0, is_causal_ouput:bool = False, device=None):
+    # size = (B, T, T) or (T, T)
     # n_causal is number element were causal mask is applied, if None use all L elements
     #         0 0 0|0 0 0|0 0 1    1 1 1    
     #       O 0 0 0|0 0 0|0 1 1 or 1 1 1 for full attention output   
@@ -253,8 +253,22 @@ def mask_attn(size, n_causal:int = None, device=None):
     #         1 1 1|1 1 1|1 1 1    O : Output attention
     # query->   L  |  C  |  O       
     
-    if n_causal is None: n_causal = size[-2]
-    mask = torch.tril(torch.ones(size, device=device), diagonal=-n_causal)
+    # define param
+    T = size[1]
+    B = size[0] if len(size)==3 else 0
+    C, O = n_causal, n_output
+    L = T - C - O
+    
+    # init mask
+    mask = torch.ones(size, device=device)
+
+    # mask orginin is bottom, left
+    mask[   L: ,    :  ] = 0 # mask output
+    mask[ L+C: , L+C:  ] = torch.tril(torch.ones((O,O)), diagonal=O) if is_causal_ouput else 1
+    mask[   L:C,   L:C ] = torch.tril(torch.ones((C,C)), diagonal=C) # fill causal attention
+
+    if len(size)==3:
+        mask = mask.repeat(B,1,1)
     return mask
 
 def all_losses_compute(outs, target, target_emb=None, last_step_only = True):
