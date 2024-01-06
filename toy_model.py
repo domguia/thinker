@@ -252,6 +252,7 @@ def mask_attn(size, n_causal:int = 0, n_output:int = 0, is_causal_ouput:bool = F
     #       L 1 1 1|1 1 1|1 1 1    C : Causal attention, with full ar pass
     #         1 1 1|1 1 1|1 1 1    O : Output attention
     # query->   L  |  C  |  O       
+    # TODO: important check tgt_is_causal=True with this kind of mask but I dont think so 
     
     # define param
     T = size[1]

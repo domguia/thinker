@@ -217,3 +217,12 @@ max_output_len = 10 *3,
 
 
 
+# Jan 6
+
+No experiment has been conducted recently, but I have implemented a full auto regressive flow (i.e., [Perceiver AR](https://arxiv.org/abs/2202.07765)). This ensures that the model will have a history from the beginning to the end of the multi-step forward pass, providing a stronger signal for easier optimization.
+- With an appropriate mask, this will ensure there's no data leakage from future tokens given as input.
+- Since there's more 'capacity' in the latent flow than in a single token flow, I expect the optimization to transfer the required computation to the latent flow.
+- The capabilities learned in the latent flow could easily be transferred to the standard output, which has a weaker signal compared to the full flow autoregressive process.
+
+
+
