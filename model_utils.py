@@ -28,7 +28,8 @@ class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex 
             self.self_attn.batch_first = True
 
         if self.ff_in_self_attn:
-            self.norm4 = copy.deepcopy(self.norm2)
+            self.norm4 = copy.deepcopy(self.norm1)
+        self.norm5 = copy.deepcopy(self.norm1)
     
     def forward(
         self,
@@ -58,12 +59,16 @@ class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex 
             x = x + self._ff_block(self.norm3(x))
         else: # default case we are runing in this project
             if not skip_self_attn: # disable self attention block
-                x = self.norm1(x + self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal))
+                x = self.norm1(x + self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal)) # latent -> _sa_block: where I am? -> what should I do
                 if self.ff_in_self_attn:
-                    x = self.norm4(x + self._ff_block(x))
-            x = self.norm2(x + self._mha_block(x, memory, memory_mask, memory_key_padding_mask, memory_is_causal))
-            x = self.norm3(x + self._ff_block(x))
+                    x = self.norm4(x + self._ff_block(x)) # -> _ff_block: what should I look for? ->
+            x = self.norm2(x + (x2 := self._mha_block(x, memory, memory_mask, memory_key_padding_mask, memory_is_causal))) # _mha_block: info lookup
+            x = self.norm3(x + (x3 := self._ff_block(x))) # _ff_block: what I'm doing with what I have found?
 
+        # if self.ff_in_self_attn:
+        #     return x, self.norm5(x2)
+        # else:
+        #     return x, self.norm5(x3)
         return x
 
 class FlexTransformerDecoder(TransformerDecoder):
@@ -151,7 +156,7 @@ class TokenProject(nn.Module):
         # freeze the weights
         for param in self.parameters():
             param.requires_grad = False
-            
+
         return self 
     
     def forward(self, x: Tensor) -> Tensor:

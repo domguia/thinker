@@ -127,10 +127,10 @@ class ToyThinker(nn.Module):
             output Tensor of shape ``[seq_len, batch_size, vocab_size]``
         """
         B, T = x.shape
+        device = x.device
 
         if isinstance(target, torch.Tensor): n_target = target.shape[1]
         else: n_target = target if isinstance(target,int) else T
-        print('n_target:',n_target)
 
         pos = torch.arange(0, max(T,n_latent,n_target), dtype=torch.long, device=x.device).unsqueeze(0).repeat(B,1) # shape (1, t)
 
@@ -168,7 +168,7 @@ class ToyThinker(nn.Module):
         latents = []
         outputs = []
         memory = x
-        static_mem = self.emb_static_mem(knowledge_trigger)
+        static_mem = self.emb_static_mem(knowledge_trigger.to(device))
         # static_mem = self.emb_static_mem.data.weight if knowledge_trigger=='all' else self.emb_static_mem(knowledge_trigger)
         for i in range(n_step):
             # add pertubation to latent
@@ -466,9 +466,10 @@ if __name__ == '__main__':
 
     from time import time
     start_time = time()
-    x = torch.randint(0, 16, (2, 5))
-    target = torch.randint(0, 16, (2, 3))
-    knowledge_trigger = torch.randint(0, 16, (2, 10))
+
+    x = torch.randint(0, 16, (4, 5))
+    target = torch.randint(0, 16, (4, 3))
+    knowledge_trigger = torch.randint(0, 16, (4, 10))
     print()
     outs = model(x, target = target, n_latent = 3,
                  n_step = 5, read_step = 2, n_keep_output = 2,
