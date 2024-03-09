@@ -254,7 +254,7 @@ _This is not yet implemented!_
 
 # March 8
 Empty brain!  
-Should I implement, language model distillation task?  
+Should I implement, language model distillation task? as initially planned  
 or keep going with toy task and model?
 
 

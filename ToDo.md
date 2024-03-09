@@ -12,7 +12,7 @@ done | value    | task                         | complexity
  [ ] |    6     | optim model with cache       |    very high
  [ ] |    6     | experiment tracking wandb    |    medium
  [ ] |    1     | arg's scripting runner       |    medium
- [ ] |    1     | arg's scripting emb. gen.    |    low
+ [x] |    1     | arg's scripting emb. gen.    |    low
  [ ] |    -     |                              |    
  [ ] |    -     |                              |    
 

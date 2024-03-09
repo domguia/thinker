@@ -138,22 +138,44 @@ def split_file_by_pattern(filepath, pattern):
             yield buffer
 
 
-# import argparse as args
+import argparse
 
-pattern = r"\n = [^=]+ = "
-file_path = "./data/wikitext-2-raw-v1/wikitext-2-raw/wiki.test.raw"
+parser = argparse.ArgumentParser(description='generate embedding params.')
 
-target_dir = "./data/wikitext-2-raw-v1/embedding/wikitext-2-raw/"
+parser.add_argument('-pt', '--pattern', default=r"\n = [^=]+ = ")
+parser.add_argument('-f', '--file_path', default="./data/wikitext-2-raw-v1/wikitext-2-raw/wiki.test.raw")
+parser.add_argument('-td', '--target_dir', default="./data/wikitext-2-raw-v1/embedding/wikitext-2-raw/")
+
+parser.add_argument('-c', '--cuda', type=bool, default=False)
+parser.add_argument('-m', '--model_name', default="pythia-70m")
+
+parser.add_argument('-t', '--max_tokens', type=int, default=512)
+parser.add_argument('-s', '--stride', type=int, default=128)
+parser.add_argument('-p', '--pad_token', type=int, default=None)
+args = parser.parse_args()
+
+pattern = args.pattern
+file_path = args.file_path
+target_dir = args.target_dir
+cuda = args.cuda
+model_name = args.model_name
+max_tokens = args.max_tokens
+stride = args.stride
+pad_token = args.pad_token
+
+# pattern = r"\n = [^=]+ = "
+# file_path = "./data/wikitext-2-raw-v1/wikitext-2-raw/wiki.test.raw"
+
+# target_dir = "./data/wikitext-2-raw-v1/embedding/wikitext-2-raw/"
 os.makedirs(target_dir, exist_ok=True)
 
+# cuda=False
+# model_name = "pythia-70m" # or phi1.5 or hugging face model name
 
-cuda=False
-model_name = "pythia-70m" # or phi1.5 or hugging face model name
+# max_tokens = 512
+# stride = 128
 
-max_tokens = 512
-stride = 128
-
-pad_token = None
+# pad_token = None
 
 # define the model
 model, tokenizer = load_model(model_name, cuda)
