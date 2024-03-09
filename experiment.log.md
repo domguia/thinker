@@ -223,6 +223,41 @@ No experiment has been conducted recently, but I have implemented a full auto re
 - With an appropriate mask, this will ensure there's no data leakage from future tokens given as input.
 - Since there's more 'capacity' in the latent flow than in a single token flow, I expect the optimization to transfer the required computation to the latent flow.
 - The capabilities learned in the latent flow could easily be transferred to the standard output, which has a weaker signal compared to the full flow autoregressive process.
+:-) for longuer context we can use mistral layer to layer window shift 
+
+I should implement a planned flow runner, that will help to implement different strategy or even random strategy
+
+strategy: do all the time  
+step | read_input | mem_lookup | mem_write  | output  
+-----|------------|------------|------------|-------  
+  1  |     1      |      1     |      1     |   1     
+  2  |     1      |      1     |      1     |   1     
+  3  |     1      |      1     |      1     |   1     
+
+strategy: read ounce at the begging, output at the end with mem  
+step | read_input | mem_lookup | mem_write  | output  
+-----|------------|------------|------------|-------  
+  1  |     1      |      0     |      1     |   0     
+  2  |     0      |      1     |      1     |   0     
+  3  |     0      |      1     |      1     |   0     
+  4  |     0      |      1     |      0     |   1     
+
+
+list of attributes:
+- read_input
+- mem_lookup
+- mem_write
+- static_mem_lookup
+- output
+
+_This is not yet implemented!_
+
+# March 8
+Empty brain!  
+Should I implement, language model distillation task?  
+or keep going with toy task and model?
+
+
 
 
 

@@ -5,19 +5,41 @@ import torch
 from transformers import PhiForCausalLM, AutoTokenizer, AutoModelForCausalLM
 from transformers import GPTNeoXForCausalLM, AutoTokenizer
 
-# define the model
-# model = PhiForCausalLM.from_pretrained("susnato/phi-1_5_dev")
-model = GPTNeoXForCausalLM.from_pretrained(
-  "EleutherAI/pythia-70m-deduped",
-  revision="step3000",
-  cache_dir="./pythia-70m-deduped/step3000",
-)
 
-tokenizer = AutoTokenizer.from_pretrained(
-  "EleutherAI/pythia-70m-deduped",
-  revision="step3000",
-  cache_dir="./pythia-70m-deduped/step3000",
-)
+def load_model(model_name, cuda=False):
+    if model_name == "pythia-70m":
+        model = GPTNeoXForCausalLM.from_pretrained(
+            "EleutherAI/pythia-70m-deduped",
+            revision="step3000",
+            cache_dir="./pythia-70m-deduped/step3000",
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            "EleutherAI/pythia-70m-deduped",
+            revision="step3000",
+            cache_dir="./pythia-70m-deduped/step3000",
+        )
+    
+    elif model_name == "phi1.5":
+        if cuda:
+            ## FP16 / Flash-Attention / CUDA
+            model = AutoModelForCausalLM.from_pretrained("microsoft/phi-1_5", torch_dtype="auto", flash_attn=True, flash_rotary=True, fused_dense=True, device_map="cuda", trust_remote_code=True)
+        
+        else:
+            ## FP32 / CPU
+            # model = PhiForCausalLM.from_pretrained("susnato/phi-1_5_dev", torch_dtype=torch.float16, device_map="cpu", trust_remote_code=True)
+
+            ## load model fp16 cpu
+            model = PhiForCausalLM.from_pretrained("susnato/phi-1_5_dev", from_tf=True)
+
+        ## define tokenizer
+        tokenizer = AutoTokenizer.from_pretrained("susnato/phi-1_5_dev")
+    
+    else:
+        model = GPTNeoXForCausalLM.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    return model, tokenizer
 
 '''
 Phi Model config:
@@ -51,6 +73,9 @@ all data -> find kmeans cluster for k=10, k=100, k=500, k=1000, k=10_000
 at training -> map target_emb -> cluster -> static mem embedding (we should be able to keep undercontrol the number of embedding in context)
 at inference -> put all static memory in context and let the model decide
 
+Usefull data :
+https://github.com/Zjh-819/LLMDataHub#pretrain - collection of dataset
+https://huggingface.co/datasets/allenai/peS2o - A high quality academic paper dataset for pretraining.
 '''
 
 ## FP32 / CPU
@@ -112,17 +137,33 @@ def split_file_by_pattern(filepath, pattern):
         if buffer:
             yield buffer
 
+
+# import argparse as args
+
 pattern = r"\n = [^=]+ = "
 file_path = "./data/wikitext-2-raw-v1/wikitext-2-raw/wiki.test.raw"
 
 target_dir = "./data/wikitext-2-raw-v1/embedding/wikitext-2-raw/"
 os.makedirs(target_dir, exist_ok=True)
 
+
+cuda=False
+model_name = "pythia-70m" # or phi1.5 or hugging face model name
+
 max_tokens = 512
 stride = 128
 
-# Set pad_token as eos_token
-tokenizer.pad_token = tokenizer.eos_token
+pad_token = None
+
+# define the model
+model, tokenizer = load_model(model_name, cuda)
+
+if pad_token is not None:
+    print(f'Set {pad_token} as pad_token')
+    tokenizer.pad_token = pad_token
+elif tokenizer.pad_token is None:
+    print(f'Set eos_token as pad_token')
+    tokenizer.pad_token = tokenizer.eos_token
 
 from tqdm import tqdm
 file_size = os.path.getsize(file_path)
@@ -134,52 +175,53 @@ for i, text_article in enumerate(split_file_by_pattern(file_path, pattern)):
     pbar.update(len(text_article))
     # if len(text_article)>10:
     # if len(text_article)<512:
-    if i%5==0:
-        # print("text_article:",i, "text_article len:", len(text_article))
+    # if i%5!=0: continue
+    # print("text_article:",i, "text_article len:", len(text_article))
 
-        # chunk are too large to fit in memory
-        # split chunk into sequences of 512 tokens with overlap of 128 tokens
-        tokens = tokenizer(text_article, return_tensors='pt', padding=True)
+    # chunk are too large to fit in memory
+    # split chunk into sequences of 512 tokens with overlap of 128 tokens
+    tokens = tokenizer(text_article, return_tensors='pt', padding=True)
 
-        # make chunks to fit in memory
-        # batch_size = 10
-        tokens_chuncks = [ {k: v[:,i:i+max_tokens] for k, v in tokens.items()} for i in range(0, tokens['input_ids'].shape[1], max_tokens-stride) ]
+    # make chunks to fit in memory
+    # batch_size = 10
+    total_tokens = tokens['input_ids'].shape[1]
+    tokens_chuncks = [ {k: v[:,i:i+max_tokens] for k, v in tokens.items()} for i in range(0, total_tokens, max_tokens-stride) ]
 
-        first_chunk = None
-        embeds = []
-        for j, tokens in enumerate(tokens_chuncks):
-            # print("number of sub sub chunk:", len(texts))
-            # print("tokenized:", tokens['input_ids'].shape)
+    first_chunk = None
+    embeds = []
+    for j, tokens in enumerate(tokens_chuncks):
+        # print("number of sub sub chunk:", len(texts))
+        # print("tokenized:", tokens['input_ids'].shape)
 
-            with torch.no_grad():
-                output = model(**tokens, output_hidden_states=True)
+        with torch.no_grad():
+            output = model(**tokens, output_hidden_states=True)
 
-            last_hidden_state = output.hidden_states[-1].detach().cpu().squeeze(0)
+        last_hidden_state = output.hidden_states[-1].detach().cpu().squeeze(0)
 
-            # print("last_hidden_state:", last_hidden_state.shape)
+        # print("last_hidden_state:", last_hidden_state.shape)
 
-            if j == 0:  # first element
-                embeds.append(last_hidden_state) # the first element
-                # if last_hidden_state.size(0)>1: embeds.append(last_hidden_state[128:, :])
-            else:
-                embeds.append(last_hidden_state[128:, :])
-            # embeds.append(last_hidden_state)
+        if j == 0:  # first element
+            embeds.append(last_hidden_state) # the first element
+            # if last_hidden_state.size(0)>1: embeds.append(last_hidden_state[128:, :])
+        else:
+            embeds.append(last_hidden_state[128:, :])
+        # embeds.append(last_hidden_state)
 
-        # Concatenate the embeddings along the first dimension
-        embeds = torch.cat(embeds, dim=0)
+    # Concatenate the embeddings along the first dimension
+    embeds = torch.cat(embeds, dim=0)
 
-        # Reshape the tensor to (B*T, H)
-        # embeds = [embed.view(-1, embed.shape[2]) for embed in embeds]
-        # embeds = embeds.view(-1, embeds.shape[2]).shape
+    # Reshape the tensor to (B*T, H)
+    # embeds = [embed.view(-1, embed.shape[2]) for embed in embeds]
+    # embeds = embeds.view(-1, embeds.shape[2]).shape
 
-        # write embedding to file with numpy
-        filename = target_dir + "/wiki.test.raw."+str(i)
-        embeds.numpy().tofile(filename+".embedding.bin")
-        # write token to file
-        tokens['input_ids'].numpy().tofile(filename+".token.bin")
-        # write text to file
-        with open(filename+".txt", 'w') as f:
-            f.write(text_article)
+    # write embedding to file with numpy
+    filename = target_dir + "/wiki.test.raw."+str(i)
+    embeds.numpy().tofile(filename+".embedding.bin")
+    # write token to file
+    tokens['input_ids'].numpy().tofile(filename+".token.bin")
+    # write text to file
+    with open(filename+".txt", 'w') as f:
+        f.write(text_article)
 
 print("total chunk:", n)
 

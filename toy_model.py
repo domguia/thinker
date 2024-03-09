@@ -272,7 +272,9 @@ def mask_attn(size, n_causal:int = 0, n_output:int = 0, is_causal_ouput:bool = F
         mask = mask.repeat(B,1,1)
     return mask
 
-def all_losses_compute(outs, target, target_emb=None, last_step_only = True):
+def all_losses_compute(outs, target, target_emb=None, last_step_only = True, seq_len = None):
+    if seq_len:
+        outs = [ out[:,:seq_len] if len(out.shape)==2 else out[:,:,:seq_len] for out in outs]
     outputs, logits, probes, outputs_ar, logits_ar, probes_ar = outs
     # outputs: B, S, T, H
     # probes: B, S, T, n_probe

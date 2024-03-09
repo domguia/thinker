@@ -37,8 +37,8 @@ def plot_loss_and_accuracy(logs, experiment=None, title=None, ax=None, y_log=Fal
 
     if 'factor' in df.columns:   sns.lineplot(data=df, x=df.index, y='factor',   label='difficulty weight',   color='gray', ax=ax2)
 
-    if 'loss_std' in df.columns: sns.lineplot(data=df, x=df.index, y='loss_std', label='loss_std', color='wheat', ax=ax2)
-    if 'acc_std' in df.columns:  sns.lineplot(data=df, x=df.index, y='acc_std',  label='acc_std',  color='lavender', ax=ax2)
+    # if 'loss_std' in df.columns: sns.lineplot(data=df, x=df.index, y='loss_std', label='loss_std', color='wheat', ax=ax2)
+    # if 'acc_std' in df.columns:  sns.lineplot(data=df, x=df.index, y='acc_std',  label='acc_std',  color='lavender', ax=ax2)
       
     ax2.set_ylabel('Accuracy')
 
@@ -70,6 +70,10 @@ def plot_hp_heatmap(logs, use_last_n_batch=200, aggr='max', ax=None):
         df = df.mean()
     elif aggr == 'max':
         df = df.max()
+    elif aggr == 'top10_avg':
+        def avg_top_k(series, k):
+            return series.nlargest(k).mean()
+        df = df.agg(avg_top_k, k=2)
     else:
         assert f'Invalid argument aggr={aggr}'
     df = df.reset_index().pivot(index="latent", columns="step", values="accuracy")
@@ -77,7 +81,7 @@ def plot_hp_heatmap(logs, use_last_n_batch=200, aggr='max', ax=None):
     if ax is None: fig, ax = plt.subplots()
 
     # Plot a heatmap of the average loss.
-    sns.heatmap(df, annot=True, ax=ax, annot_kws={"size": 22})
+    sns.heatmap(df, annot=True, ax=ax, annot_kws={"size": 12})
 
 def compare_experiments(logs):
     if isinstance(logs, pd.DataFrame): df = logs
