@@ -257,6 +257,43 @@ Empty brain!
 Should I implement, language model distillation task? as initially planned  
 or keep going with toy task and model?
 
+# Sept 18
+Ca marche!
+
+![learned converging compute](/exp_logs/ca-marche_with_scaled_loss_overstep-learned_cumsum.png)
+
+```
+    learning_rate=0.001,
+    batch = 128,
+    n_latent = [range(4,16+1,2)], # max latent -> 16
+    n_step = [range(4,12+1)],     # max step   -> 12
+```
+
+At epoch 30k I paused the training, and incresed the compute capacity and this happened, the model generalized immediatly for all compute capacity
+![learned converging compute after change](/exp_logs/ca-marche_with_scaled_loss_overstep-learned_cumsum_after-change.png)
+
+![learned converging compute curve](/exp_logs/ca-marche_with_scaled_loss_overstep-learned_cumsum_curve_after-change.png)
+
+Changelog when increased compute capacity
+```
+    learning_rate=0.01,
+    batch = 1024,
+    n_latent = [range(4,24+1,2)], # max latent -> 24
+    n_step = [range(4,16+1)],     # max step   -> 16
+```
+
+hypothesis pertubation help, shake the model and might lead to convergence since the optimization is on going
+
+### add pertubation in latent
+```
+# latent = self.embd_latent(pos[:,:n_latent]) # B, L, H
+latent = self.embd_latent(pos[:,0:1]) + torch.normal(0, .1, size=(B, L, H)) # B, L, H
+```
+
+# Sept 19
+With lower training iteration, we observe this, the same partern with lower accuracy
+![accuracy_leverage_by_compute](exp_logs/ca_marche-no_scaled_loss-overstep-learned_cumsum.png)
+![accuracy_leverage_by_compute](exp_logs/ca_marche-no_scaled_loss-overstep-learned-cumsum-curve.png)
 
 
 
