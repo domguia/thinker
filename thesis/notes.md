@@ -78,7 +78,7 @@ Looking for solution to make the model reach 100% accuracy on copy task, but the
 
 I move for 0,1 sequence of number to 0,1,2 .., 10 sequence wich with my with give stringe signale to model during trining since the're not just 2 options
 
-![loss plot](/exp_logs/copy_task_w1layer_loss_curve.png)
+![loss plot](/logs/archive_exp_logs/copy_task_w1layer_loss_curve.png)
 
 ## 08 Dec 2023
 
@@ -107,7 +107,7 @@ I was worrying about the data loading timing, but it seem to be good
 I manage to have 95% GPU utilisation even with 2.6Gb usage on Colab T4
 
 I manage to reach 97accuracy for addition of base 16 number between 0-1000 (base10) with bacth size1024 and lr 0.005
-![loss accuracy plot](/exp_logs/loss_acc_1addition_base16_max_number1000_hdim32_2step_8latent_lr0.005-0.0002.png)
+![loss accuracy plot](/logs/archive_exp_logs/loss_acc_1addition_base16_max_number1000_hdim32_2step_8latent_lr0.005-0.0002.png)
 
 # 19 Dec
 I manage to run 3000 iteration in 2min with 95 accuracy on addition task but didn't reach 100% accuracy  
@@ -137,8 +137,8 @@ For faster training improve the loss, by make it lower for likely output regardi
 # 20 Dec
 
 model with hdim=16 and 9k parameters seam to perform the addition as well, just need more iteration to converge, number of latent and step seam not affect much the performance even the training are the all same while changing latent and step
-![heatmap](/exp_logs/heatmap_16hdim_batch1024_20dec_exp.png)
-![training curve](/exp_logs/loss_acc_16hdim_latent8_step4_batch1024_20dec_exp.png)
+![heatmap](/logs/archive_exp_logs/heatmap_16hdim_batch1024_20dec_exp.png)
+![training curve](/logs/archive_exp_logs/loss_acc_16hdim_latent8_step4_batch1024_20dec_exp.png)
 
 to go faster I should test the model with simpler task, such as copy and thier variants
 
@@ -156,7 +156,7 @@ exp_cfg = CfgNode(
 )
 ```
 the result below
-![overview map](/exp_logs/copy_task-seq_len_20-hdim16_20dec_exp.png)
+![overview map](/logs/archive_exp_logs/copy_task-seq_len_20-hdim16_20dec_exp.png)
 
 Observation, the model with higher capacity step=4 perform consitenly bad, probably it need more iterations to converge
 
@@ -166,14 +166,14 @@ I design a basic currilum learning and it make the copy task much easier to lear
 
 How I made the currilum, I vary the sequence lenght in the dataset following an uniform distrubtion, so that the model can easily learn from the short sequence and progressively learn how the longer one's
 
-![with uniform curriculum](/exp_logs/loss_uniform_copytask_acc_16hdim_latent4_step8_batch1024_20dec_exp.png)
-![with non uniform](/exp_logs/loss_non-uniform_copytask_acc_16hdim_latent4_step8_batch1024_20dec_exp.png)
+![with uniform curriculum](/logs/archive_exp_logs/loss_uniform_copytask_acc_16hdim_latent4_step8_batch1024_20dec_exp.png)
+![with non uniform](/logs/archive_exp_logs/loss_non-uniform_copytask_acc_16hdim_latent4_step8_batch1024_20dec_exp.png)
 
 Regarding this significan improvement I made a better currilum: by make a dynamic sampling the dataset distrution. With a risk of making the problem non-stationnary, but I think even if is non stationary the loss landscape should be easier the navigate during optimisation. 
 
 # 22 Dec
 I implemented a training process that progressivelly increase the difficulty level of the task, wich seem to give better result
-![curriculum based](/exp_logs/loss_curriculum_copytask_acc_16hdim_latent4_step6_batch512_22dec_exp.png)
+![curriculum based](/logs/archive_exp_logs/loss_curriculum_copytask_acc_16hdim_latent4_step6_batch512_22dec_exp.png)
 
 training setup
 ```
@@ -209,12 +209,12 @@ ideas: I could randomized postional encoding
 
 
 When I increased the seqlen I observe that the model manage to go over the previous performance plateau. It took around 10k iteration to reach %50 wich is approximate to 20seqlen prediction and after 30k step the model reach 30seqlen copy before have a peak loss (I should implement a better model checkpoint reload!)  
-![curriculum based with 40 seqlen](/exp_logs/loss_curriculum_copytask_seq-len-40_16hdim_latent4_step6_batch512_22dec_exp.png)
+![curriculum based with 40 seqlen](/logs/archive_exp_logs/loss_curriculum_copytask_seq-len-40_16hdim_latent4_step6_batch512_22dec_exp.png)
 
 At 50seqlen I have un error realted to CUDA even if I only use 0.3/15 GB of GPU MEM! 
 
 So I increased the vocabulary size from 16 to 32, even with that the model dont seem to be at capacity
-![curriculum based with 40 seqlen](/exp_logs/loss_curriculum_copytask-vocabsize_32_seq-len-40_16hdim_latent4_step6_batch512_22dec_exp.png)
+![curriculum based with 40 seqlen](/logs/archive_exp_logs/loss_curriculum_copytask-vocabsize_32_seq-len-40_16hdim_latent4_step6_batch512_22dec_exp.png)
 
 hypothesis for plateau:
 learning rate 0.01 too high, might explain the noisy loss curve even with 512 batch size
@@ -225,7 +225,7 @@ I still suspect the position encore to be cause
 ## varying position embedding
 the model stuck at .2 accuracy with `varying position embedding`
 
-![varying position embedding](/exp_logs/loss_varying-position-emb_copytask-vocabsize_16_seq-len-10_16hdim_latent4_step6_batch512_22dec_exp.png)
+![varying position embedding](/logs/archive_exp_logs/loss_varying-position-emb_copytask-vocabsize_16_seq-len-10_16hdim_latent4_step6_batch512_22dec_exp.png)
 
 Sometimes you just have to train longer and/or make the task easier
 after some iteration, I made it WORK!!
@@ -247,7 +247,7 @@ model:
 ```
 _Note: I enable self attention in output TransformerDecoder, it was disable before since we where querying the model directly with the output query_
 
-![varying position embed first work!](/exp_logs/loss_varying-position-emb-WORK_copytask-vocabsize_16_seq-len-5_input-output-5x4_32hdim_2layer-output_latent4_step6_batch512_22dec_exp.png)
+![varying position embed first work!](/logs/archive_exp_logs/loss_varying-position-emb-WORK_copytask-vocabsize_16_seq-len-5_input-output-5x4_32hdim_2layer-output_latent4_step6_batch512_22dec_exp.png)
 
 for the second experiment I changed
 ```
@@ -255,7 +255,7 @@ sequence_len = 10
 max_input_len  = 10 *3,
 max_output_len = 10 *3,
 ```
-![varying position embed 2nd work!](/exp_logs/loss_varying-position-emb-WORK_copytask-vocabsize_16_seq-len-10_input-output-10x3_32hdim_2layer-output_latent4_step6_batch512_22dec_exp.png)
+![varying position embed 2nd work!](/logs/archive_exp_logs/loss_varying-position-emb-WORK_copytask-vocabsize_16_seq-len-10_input-output-10x3_32hdim_2layer-output_latent4_step6_batch512_22dec_exp.png)
 
 
 
@@ -302,7 +302,7 @@ or keep going with toy task and model?
 # Sept 18
 Ca marche!
 
-![learned converging compute](/exp_logs/ca-marche_with_scaled_loss_overstep-learned_cumsum.png)
+![learned converging compute](/logs/archive_exp_logs/ca-marche_with_scaled_loss_overstep-learned_cumsum.png)
 
 ```
     learning_rate=0.001,
@@ -312,9 +312,9 @@ Ca marche!
 ```
 
 At epoch 30k I paused the training, and incresed the compute capacity and this happened, the model generalized immediatly for all compute capacity
-![learned converging compute after change](/exp_logs/ca-marche_with_scaled_loss_overstep-learned_cumsum_after-change.png)
+![learned converging compute after change](/logs/archive_exp_logs/ca-marche_with_scaled_loss_overstep-learned_cumsum_after-change.png)
 
-![learned converging compute curve](/exp_logs/ca-marche_with_scaled_loss_overstep-learned_cumsum_curve_after-change.png)
+![learned converging compute curve](/logs/archive_exp_logs/ca-marche_with_scaled_loss_overstep-learned_cumsum_curve_after-change.png)
 
 Changelog when increased compute capacity
 ```
@@ -334,6 +334,6 @@ latent = self.embd_latent(pos[:,0:1]) + torch.normal(0, .1, size=(B, L, H)) # B,
 
 # Sept 19
 With lower training iteration, we observe this, the same partern with lower accuracy
-![accuracy_leverage_by_compute](exp_logs/ca_marche-no_scaled_loss-overstep-learned_cumsum.png)
-![accuracy_leverage_by_compute](exp_logs/ca_marche-no_scaled_loss-overstep-learned-cumsum-curve.png)
+![accuracy_leverage_by_compute](logs/archive_exp_logs/ca_marche-no_scaled_loss-overstep-learned_cumsum.png)
+![accuracy_leverage_by_compute](logs/archive_exp_logs/ca_marche-no_scaled_loss-overstep-learned-cumsum-curve.png)
 

@@ -1,0 +1,2 @@
+step,elapsed_min,loss,accuracy,n_latent,n_step
+100,0.17,4.588681,0.832545,6,1
