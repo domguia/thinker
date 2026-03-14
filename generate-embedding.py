@@ -23,7 +23,7 @@ def load_model(model_name, cuda=False):
     elif model_name == "phi1.5":
         if cuda:
             ## FP16 / Flash-Attention / CUDA
-            model = AutoModelForCausalLM.from_pretrained("microsoft/phi-1_5", torch_dtype="auto", flash_attn=True, flash_rotary=True, fused_dense=True, device_map="cuda", trust_remote_code=True)
+            model = AutoModelForCausalLM.from_pretrained("microsoft/phi-1_5", torch_dtype="auto", attn_implementation="flash_attention_2", device_map="cuda", trust_remote_code=True)
         
         else:
             ## FP32 / CPU
@@ -82,7 +82,7 @@ https://huggingface.co/datasets/allenai/peS2o - A high quality academic paper da
 # model = PhiForCausalLM.from_pretrained("susnato/phi-1_5_dev", torch_dtype=torch.float16, device_map="cpu", trust_remote_code=True)
 
 ## FP16 / Flash-Attention / CUDA
-# model = AutoModelForCausalLM.from_pretrained("microsoft/phi-1_5", torch_dtype="auto", flash_attn=True, flash_rotary=True, fused_dense=True, device_map="cuda", trust_remote_code=True)
+# model = AutoModelForCausalLM.from_pretrained("microsoft/phi-1_5", torch_dtype="auto", attn_implementation="flash_attention_2", device_map="cuda", trust_remote_code=True)
 
 ## load model fp16 cpu
 # model = PhiForCausalLM.from_pretrained("susnato/phi-1_5_dev", from_tf=True)

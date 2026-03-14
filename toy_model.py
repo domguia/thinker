@@ -4,7 +4,9 @@ from typing import Optional #, Any, Union, Callable
 import torch
 from torch import nn, Tensor
 from torch.nn import TransformerDecoder, TransformerDecoderLayer, Transformer
+import torch.nn.functional as F
 from model_utils import FlexTransformerDecoder, FlexTransformerDecoderLayer, TokenProject
+from model_utils import CustomFlexDecoder, CustomFlexDecoderLayer, RotaryEmbedding
 
 class ToyThinker(nn.Module):
     # inspered from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
@@ -13,12 +15,18 @@ class ToyThinker(nn.Module):
                  skip_self_attn:bool = False, ff_in_self_attn:bool = False):
         super().__init__()
         self.pos_encoder = PositionalEncoding(d_model, dropout=0)
+        self.rope = RotaryEmbedding(d_model // nhead)
+
         # decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu, batch_first=True)
         # self.attn_compute = TransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
 
-        decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu,
-                                                     batch_first=True, skip_self_attn=skip_self_attn, ff_in_self_attn=ff_in_self_attn)
-        self.attn_compute = FlexTransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
+        # decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_hid, dropout, activation=nn.functional.gelu,
+        #                                              batch_first=True, skip_self_attn=skip_self_attn, ff_in_self_attn=ff_in_self_attn)
+        # self.attn_compute = FlexTransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
+
+        decoder_layers = CustomFlexDecoderLayer(d_model, nhead, d_hid, dropout, skip_self_attn=skip_self_attn, ff_in_self_attn=ff_in_self_attn)
+        self.attn_compute = CustomFlexDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
+
 
         # decoder_layers = FlexTransformerDecoderLayer(d_model, nhead, d_model, dropout, activation=nn.functional.gelu, batch_first=True) #, skip_self_attn=True) # n_hid = d_model*2 because shoul be smaller
         # self.compute_output = FlexTransformerDecoder(decoder_layers, 1) # only one layer
@@ -31,7 +39,8 @@ class ToyThinker(nn.Module):
         # self.embd_vocab_out = nn.Embedding(vocab_size, d_model)
         self.emb_static_mem = nn.Embedding(static_mem_len, d_model)
         
-        self.linear = nn.Linear(d_model, vocab_size + n_probe)
+        self.probe_proj = nn.Linear(d_model, n_probe) if n_probe > 0 else None
+        # self.linear = nn.Linear(d_model, vocab_size + n_probe)
 
         self.d_model = d_model
         self.vocab_size = vocab_size
@@ -52,14 +61,17 @@ class ToyThinker(nn.Module):
             if isinstance(module, nn.Linear):
                 module.bias.data.zero_()
 
-        [_apply_init_weights(module) for module in (
+        modules_to_init = [
             self.embd_vocab,
             self.embd_latent,
             self.embd_in_pos,
             self.embd_out_pos,
             self.emb_static_mem,
-            self.linear,
-        )]
+            # self.linear,
+        ]
+        if self.probe_proj is not None:
+            modules_to_init.append(self.probe_proj)
+        [_apply_init_weights(module) for module in modules_to_init]
 
     def insert_or_remove_latent(self, latent, n_latent):
         '''
@@ -137,6 +149,9 @@ class ToyThinker(nn.Module):
         # offset = torch.randint(self.max_input_len-T, size=(B,1), device=x.device)
         # x = self.embd_vocab(x) + self.embd_in_pos(offset+pos[:,:T])
 
+        # Compute RoPE
+        rope_cos, rope_sin = self.rope(max(T, n_latent, n_target), x.device)
+
         x = self.embd_vocab(x) * math.sqrt(self.d_model)
         x = self.pos_encoder(x)
 
@@ -176,9 +191,9 @@ class ToyThinker(nn.Module):
             #     latent = self.pertub(latent)
 
             # compute step
-            latent = self.attn_compute(latent, memory)
+            latent = self.attn_compute(latent, memory, rope_cos=rope_cos, rope_sin=rope_sin)
             if is_full_ar:
-                output_ar = self.attn_compute(output_ar, memory, tgt_mask=tgt_mask, tgt_is_causal=True) # Fix: avoid twice compute with mask attention
+                output_ar = self.attn_compute(output_ar, memory, tgt_mask=tgt_mask, rope_cos=rope_cos, rope_sin=rope_sin) # Fix: avoid twice compute with mask attention
                 outputs_ar.append(output_ar)
 
             # append to latents memory
@@ -197,25 +212,29 @@ class ToyThinker(nn.Module):
                 for j in range(output_step):
                     # compute output at the last step
                     # print(i, j, ': output compute step')
-                    output = self.attn_compute(output, memory, tgt_mask=tgt_mask, tgt_is_causal=is_output_ar) # B, T, H
+                    output = self.attn_compute(output, memory, tgt_mask=tgt_mask, rope_cos=rope_cos, rope_sin=rope_sin) # B, T, H
                     if j >= (output_step - 1):
                         # print(i, j, ': keep output')
                         outputs.append(output) # keep output
 
         outputs = torch.stack(outputs, dim=1) # B, S, T, H
-        logits = self.linear(outputs)
-
-        # split outputs
-        probes = logits[:, :, :, self.vocab_size:] # B, S, T, n_probe
-        logits = logits[:, :, :, :self.vocab_size] # B, S, T, vocab_size
+        # logits = self.linear(outputs)
+        #
+        # # split outputs
+        # probes = logits[:, :, :, self.vocab_size:] # B, S, T, n_probe
+        # logits = logits[:, :, :, :self.vocab_size] # B, S, T, vocab_size
+        logits = F.linear(outputs, self.embd_vocab.weight.to(outputs.dtype))
+        probes = self.probe_proj(outputs) if self.probe_proj is not None else None
 
         logits_ar, probes_ar = None, None
         if is_full_ar:
             outputs_ar = torch.stack(outputs_ar, dim=1) # B, S, T, H
-            logits_ar = self.linear(outputs_ar)
-
-            probes_ar = logits_ar[:, :, :, self.vocab_size:] # B, S, T, n_probe
-            logits_ar = logits_ar[:, :, :, :self.vocab_size] # B, S, T, vocab_size
+            # logits_ar = self.linear(outputs_ar)
+            #
+            # probes_ar = logits_ar[:, :, :, self.vocab_size:] # B, S, T, n_probe
+            # logits_ar = logits_ar[:, :, :, :self.vocab_size] # B, S, T, vocab_size
+            logits_ar = F.linear(outputs_ar, self.embd_vocab.weight.to(outputs_ar.dtype))
+            probes_ar = self.probe_proj(outputs_ar) if self.probe_proj is not None else None
 
         return outputs, logits, probes, outputs_ar, logits_ar, probes_ar
     

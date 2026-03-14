@@ -227,6 +227,7 @@ class NumbersCopyDataset(IterableDataset):
     def reset(cls, count=0, target_len=1):
         cls.count = count
         cls.target_len = target_len
+        cls.acc_history = []
 
     @classmethod
     def incr(cls, count=1):
@@ -238,21 +239,25 @@ class NumbersCopyDataset(IterableDataset):
 
     def __iter__(self):
         seq_len, batch = self.seq_len, self.batch
+        if not hasattr(NumbersCopyDataset, 'acc_history'):
+            NumbersCopyDataset.acc_history = []
+            
         while True:
             NumbersCopyDataset.incr(batch)
             factor = NumbersCopyDataset.get_challenge_factor()
 
-            # accuracy = NumbersCopyDataset.accuracy
-            # target_len = accuracy*seq_len
             raw_acc = NumbersCopyDataset.raw_acc
             target_len = NumbersCopyDataset.target_len
-            if raw_acc > 0.85:
-               target_len += 0.05
-               if target_len > seq_len: target_len = seq_len
+            
+            # Stationary Curriculum: only update target_len every 100 batches
+            NumbersCopyDataset.acc_history.append(raw_acc)
+            if len(NumbersCopyDataset.acc_history) >= 100:
+                avg_acc = sum(NumbersCopyDataset.acc_history) / len(NumbersCopyDataset.acc_history)
+                if avg_acc > 0.85:
+                    target_len += 0.5
+                    if target_len > seq_len: target_len = seq_len
+                NumbersCopyDataset.acc_history = []
 
-            # print('raw_acc:', raw_acc)
-            # print('target_len:', target_len)
-            # print('cls.target_len:',NumbersCopyDataset.target_len)
             NumbersCopyDataset.target_len = target_len
             NumbersCopyDataset.update_challenge_factor(target_len/seq_len)
 

@@ -5,6 +5,149 @@ from torch import nn
 from torch import Tensor
 from typing import Any, Mapping, Optional
 from torch.nn import TransformerDecoder, TransformerDecoderLayer, LayerNorm
+import torch.nn.functional as F
+
+class RMSNorm(nn.Module):
+    def __init__(self, d_model: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(d_model))
+
+    def forward(self, x):
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
+        return self.weight * x
+
+class SwiGLU(nn.Module):
+    def __init__(self, d_model: int, d_hid: int):
+        super().__init__()
+        self.w1 = nn.Linear(d_model, d_hid, bias=False)
+        self.w2 = nn.Linear(d_model, d_hid, bias=False)
+        self.w3 = nn.Linear(d_hid, d_model, bias=False)
+
+    def forward(self, x):
+        return self.w3(F.silu(self.w1(x)) * self.w2(x))
+
+def apply_rotary_emb(q, k, cos, sin):
+    # q, k: [B, num_heads, seq_len, head_dim]
+    # cos, sin: [B, 1, seq_len, head_dim]
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+def rotate_half(x):
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, base=10000):
+        super().__init__()
+        self.dim = dim
+        self.base = base
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, seq_len, device):
+        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1) # [seq_len, dim]
+        return emb.cos()[None, None, :, :], emb.sin()[None, None, :, :] # [1, 1, seq_len, dim]
+
+class CustomFlexDecoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, d_hid, dropout=0.1, skip_self_attn=False, ff_in_self_attn=False):
+        super().__init__()
+        self.d_model = d_model
+        self.nhead = nhead
+        self.head_dim = d_model // nhead
+        self.skip_self_attn = skip_self_attn
+        self.ff_in_self_attn = ff_in_self_attn
+        
+        # Self-attention
+        if not skip_self_attn:
+            self.sa_q_proj = nn.Linear(d_model, d_model, bias=False)
+            self.sa_k_proj = nn.Linear(d_model, d_model, bias=False)
+            self.sa_v_proj = nn.Linear(d_model, d_model, bias=False)
+            self.sa_o_proj = nn.Linear(d_model, d_model, bias=False)
+            self.norm1 = RMSNorm(d_model)
+            if ff_in_self_attn:
+                self.ff_sa = SwiGLU(d_model, d_hid)
+                self.norm4 = RMSNorm(d_model)
+                
+        # Cross-attention
+        self.mha_q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.mha_k_proj = nn.Linear(d_model, d_model, bias=False)
+        self.mha_v_proj = nn.Linear(d_model, d_model, bias=False)
+        self.mha_o_proj = nn.Linear(d_model, d_model, bias=False)
+        self.norm2 = RMSNorm(d_model)
+        
+        # Feed-forward
+        self.ff = SwiGLU(d_model, d_hid)
+        self.norm3 = RMSNorm(d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, rope_cos=None, rope_sin=None, **kwargs):
+        x = tgt
+        B, T, D = x.shape
+        
+        if not self.skip_self_attn:
+            res = x
+            x = self.norm1(x)
+            q = self.sa_q_proj(x).view(B, T, self.nhead, self.head_dim).transpose(1, 2)
+            k = self.sa_k_proj(x).view(B, T, self.nhead, self.head_dim).transpose(1, 2)
+            v = self.sa_v_proj(x).view(B, T, self.nhead, self.head_dim).transpose(1, 2)
+            
+            if rope_cos is not None and rope_sin is not None:
+                q, k = apply_rotary_emb(q, k, rope_cos[:,:,:T,:], rope_sin[:,:,:T,:])
+            
+            # tgt_mask adjustment for SDPA
+            sa_mask = None
+            if tgt_mask is not None:
+                sa_mask = tgt_mask.unsqueeze(1) if tgt_mask.dim() == 3 else tgt_mask.unsqueeze(0).unsqueeze(0)
+                sa_mask = sa_mask == 1
+                
+            attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=sa_mask)
+            attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D)
+            x = res + self.sa_o_proj(attn_out)
+            
+            if self.ff_in_self_attn:
+                x = x + self.ff_sa(self.norm4(x))
+                
+        # Cross Attention
+        res = x
+        x = self.norm2(x)
+        S = memory.shape[1]
+        
+        q = self.mha_q_proj(x).view(B, T, self.nhead, self.head_dim).transpose(1, 2)
+        k = self.mha_k_proj(memory).view(B, S, self.nhead, self.head_dim).transpose(1, 2)
+        v = self.mha_v_proj(memory).view(B, S, self.nhead, self.head_dim).transpose(1, 2)
+        
+        ca_mask = None
+        if memory_mask is not None:
+            ca_mask = memory_mask.unsqueeze(1) if memory_mask.dim() == 3 else memory_mask.unsqueeze(0).unsqueeze(0)
+            ca_mask = ca_mask == 1
+            
+        attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=ca_mask)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D)
+        x = res + self.mha_o_proj(attn_out)
+        
+        # Feed forward
+        x = x + self.ff(self.norm3(x))
+        return x
+
+class CustomFlexDecoder(nn.Module):
+    def __init__(self, layer, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(num_layers)])
+        self.norm = RMSNorm(layer.d_model)
+        
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, rope_cos=None, rope_sin=None, **kwargs):
+        x = tgt
+        for layer in self.layers:
+            x = layer(x, memory, tgt_mask=tgt_mask, memory_mask=memory_mask, rope_cos=rope_cos, rope_sin=rope_sin)
+        return self.norm(x)
+
 
 class FlexTransformerDecoderLayer(TransformerDecoderLayer): # Not the real flex model! the real one is really flexible!!!
     r"""
