@@ -4,4 +4,4 @@ draft_ideas/
 lightning_logs/
 __pycache__/
 thinker-model-anim/
-
+*.log

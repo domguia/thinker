@@ -14,12 +14,12 @@ def train():
     # Model configuration
     model_cfg = CfgNode(
         vocab_size=17, max_latent=16, max_input_len=30, max_output_len=30,
-        d_model=256, nhead=8, d_hid=1024, nlayers=1, n_probe=1, dropout=0.0
+        d_model=128, nhead=4, d_hid=256, nlayers=1, n_probe=1, dropout=0.0, rank=16
     )
     
     # Run configuration
     run_cfg = CfgNode(
-        batch=1024, learning_rate=5e-4, max_time_minutes=15, acc_gradient=1
+        batch=256, learning_rate=1e-3, max_time_minutes=15, acc_gradient=1
     )
     
     # Data configuration
@@ -38,7 +38,7 @@ def train():
     dataset = NumbersCopyDataset(**data_cfg.__dict__)
     NumbersCopyDataset.reset(target_len=3)
     
-    print(f"Starting training on {device} for a maximum of {run_cfg.max_time_minutes} minutes.")
+    print(f"Starting training on {device} for a maximum of {run_cfg.max_time_minutes} minutes.", flush=True)
     
     start_time = time.time()
     max_time_seconds = run_cfg.max_time_minutes * 60
@@ -53,7 +53,7 @@ def train():
     for idx, (inputs, targets) in enumerate(dataset):
         elapsed_time = time.time() - start_time
         if elapsed_time > max_time_seconds:
-            print(f"Time budget of {run_cfg.max_time_minutes} minutes reached. Stopping training.")
+            print(f"Time budget of {run_cfg.max_time_minutes} minutes reached. Stopping training.", flush=True)
             break
             
         inputs, targets = inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
@@ -95,7 +95,7 @@ def train():
         if idx % 100 == 0:
             mean_loss = np.mean(loss_tracker[-100:]) if len(loss_tracker) >= 100 else np.mean(loss_tracker)
             mean_acc = np.mean(acc_tracker[-100:]) if len(acc_tracker) >= 100 else np.mean(acc_tracker)
-            print(f"Step {idx:5d} | Elapsed: {elapsed_time/60:.2f}m | Loss: {mean_loss:.4f} | Acc: {mean_acc:.4f} | n_latent: {n_latent} | n_step: {n_step} | target_len: {NumbersCopyDataset.target_len:.1f}")
+            print(f"Step {idx:5d} | Elapsed: {elapsed_time/60:.2f}m | Loss: {mean_loss:.4f} | Acc: {mean_acc:.4f} | n_latent: {n_latent} | n_step: {n_step} | target_len: {NumbersCopyDataset.target_len:.1f}", flush=True)
             
             if mean_loss < best_loss and idx > 0:
                 best_loss = mean_loss

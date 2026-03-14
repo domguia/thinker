@@ -18,6 +18,20 @@ class RMSNorm(nn.Module):
         x = x * torch.rsqrt(variance + self.eps)
         return self.weight * x
 
+class FactorizedLinear(nn.Module):
+    def __init__(self, in_features, out_features, rank=None, bias=False):
+        super().__init__()
+        if rank is None or rank >= min(in_features, out_features):
+            self.fn = nn.Linear(in_features, out_features, bias=bias)
+        else:
+            self.fn = nn.Sequential(
+                nn.Linear(in_features, rank, bias=False),
+                nn.Linear(rank, out_features, bias=bias)
+            )
+            
+    def forward(self, x):
+        return self.fn(x)
+
 class SwiGLU(nn.Module):
     def __init__(self, d_model: int, d_hid: int):
         super().__init__()
@@ -55,7 +69,7 @@ class RotaryEmbedding(nn.Module):
         return emb.cos()[None, None, :, :], emb.sin()[None, None, :, :] # [1, 1, seq_len, dim]
 
 class CustomFlexDecoderLayer(nn.Module):
-    def __init__(self, d_model, nhead, d_hid, dropout=0.1, skip_self_attn=False, ff_in_self_attn=False):
+    def __init__(self, d_model, nhead, d_hid, dropout=0.1, skip_self_attn=False, ff_in_self_attn=False, rank=None):
         super().__init__()
         self.d_model = d_model
         self.nhead = nhead
@@ -65,20 +79,20 @@ class CustomFlexDecoderLayer(nn.Module):
         
         # Self-attention
         if not skip_self_attn:
-            self.sa_q_proj = nn.Linear(d_model, d_model, bias=False)
-            self.sa_k_proj = nn.Linear(d_model, d_model, bias=False)
-            self.sa_v_proj = nn.Linear(d_model, d_model, bias=False)
-            self.sa_o_proj = nn.Linear(d_model, d_model, bias=False)
+            self.sa_q_proj = FactorizedLinear(d_model, d_model, rank=rank, bias=False)
+            self.sa_k_proj = FactorizedLinear(d_model, d_model, rank=rank, bias=False)
+            self.sa_v_proj = FactorizedLinear(d_model, d_model, rank=rank, bias=False)
+            self.sa_o_proj = FactorizedLinear(d_model, d_model, rank=rank, bias=False)
             self.norm1 = RMSNorm(d_model)
             if ff_in_self_attn:
                 self.ff_sa = SwiGLU(d_model, d_hid)
                 self.norm4 = RMSNorm(d_model)
                 
         # Cross-attention
-        self.mha_q_proj = nn.Linear(d_model, d_model, bias=False)
-        self.mha_k_proj = nn.Linear(d_model, d_model, bias=False)
-        self.mha_v_proj = nn.Linear(d_model, d_model, bias=False)
-        self.mha_o_proj = nn.Linear(d_model, d_model, bias=False)
+        self.mha_q_proj = FactorizedLinear(d_model, d_model, rank=rank, bias=False)
+        self.mha_k_proj = FactorizedLinear(d_model, d_model, rank=rank, bias=False)
+        self.mha_v_proj = FactorizedLinear(d_model, d_model, rank=rank, bias=False)
+        self.mha_o_proj = FactorizedLinear(d_model, d_model, rank=rank, bias=False)
         self.norm2 = RMSNorm(d_model)
         
         # Feed-forward

@@ -12,7 +12,7 @@ class ToyThinker(nn.Module):
     # inspered from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
     def __init__(self, vocab_size: int, max_latent: int, max_input_len: int, max_output_len: int, d_model: int, nhead: int, d_hid: int,
                  nlayers: int, n_probe: int = 0, dropout: float = 0.1, static_mem_len:int = 0,
-                 skip_self_attn:bool = False, ff_in_self_attn:bool = False):
+                 skip_self_attn:bool = False, ff_in_self_attn:bool = False, rank: Optional[int] = None):
         super().__init__()
         self.pos_encoder = PositionalEncoding(d_model, dropout=0)
         self.rope = RotaryEmbedding(d_model // nhead)
@@ -24,7 +24,7 @@ class ToyThinker(nn.Module):
         #                                              batch_first=True, skip_self_attn=skip_self_attn, ff_in_self_attn=ff_in_self_attn)
         # self.attn_compute = FlexTransformerDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
 
-        decoder_layers = CustomFlexDecoderLayer(d_model, nhead, d_hid, dropout, skip_self_attn=skip_self_attn, ff_in_self_attn=ff_in_self_attn)
+        decoder_layers = CustomFlexDecoderLayer(d_model, nhead, d_hid, dropout, skip_self_attn=skip_self_attn, ff_in_self_attn=ff_in_self_attn, rank=rank)
         self.attn_compute = CustomFlexDecoder(decoder_layers, nlayers) if nlayers>1 else decoder_layers
 
 
@@ -480,7 +480,7 @@ if __name__ == '__main__':
     model = ToyThinker(
          vocab_size=17, max_latent=4, max_input_len=7, max_output_len=15,
          d_model=d_model, nhead=nhead, d_hid=d_hid, nlayers=nlayers, n_probe=1, dropout=0.1,
-         static_mem_len=static_mem_len)
+         static_mem_len=static_mem_len, rank=16)
     
     import torchinfo
     torchinfo.summary(model, depth = 4) # should print model summary
