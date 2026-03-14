@@ -20,8 +20,8 @@ the `algorithm` we decided to learn are (from easy to difficult) :
 Task 3 in particular will help to test how this method performs in variable complexity. Since the last task highly relies on memory to reduce computation we will observe how the model model will use the given memory.
 
 Checkout :
-- [toy_model.py](/toy_model.py#L373)
-- on going [experiment log](/experiment.log.md)
+- [toy_model.py](core/toy_model.py)
+- on going [experiment log](dev_notes/experiment.log.md)
 
 Based on the observed result we could re-use the same approach on Language Modeling Task following the [original ideas](https://www.figma.com/file/MNe376umkTm5iCpg9kSmcq/thinking-transformer?type=design&node-id=328-196&mode=design).
 
@@ -36,7 +36,35 @@ The model is a cross-attention latent-based transformer (like Perceiver):
 
 ![visual explanation](visual-explanation.svg)
 
-[here's a draft of the initial idea](/ideas-draft.md)
+[here's a draft of the initial idea](dev_notes/ideas/ideas-draft.md)
+
+## Project Structure
+
+```text
+thinker/
+├── core/                       # 🧠 Core architecture and tools
+│   ├── models.py               # Main model configurations
+│   ├── toy_model.py            # Primary ToyThinker model
+│   ├── layers.py               # Basic model layers (SwiGLU, RMSNorm, FlexDecoderLayer, RoPE)
+│   └── utils.py                # Core utilities (e.g. CfgNode)
+├── data/                       # 🗃️ Datasets and curriculum logic
+│   └── numbers.py              # Generative/Curriculum datasets
+├── scripts/                    # 🚀 Entrypoint scripts for execution
+│   ├── train.py                # Setup for automated (15 min budget) autoresearch training
+│   ├── th1nker_runner.py       # Standard runner
+│   ├── run_lightning.py        # Lightning-based runner
+│   ├── generate_embeddings.py  # Utility scripts
+│   └── visualize.py            # Log visualization
+├── notebooks/                  # 📓 Rapid prototyping and Colab entrypoint
+│   └── Th1nker_runner.ipynb
+├── dev_notes/                  # 📝 Development notes, DB structures, past experiments
+│   ├── ideas/                  
+│   └── experiment.log.md
+├── docs/                       # 📚 Documentation
+│   └── ToDo.md
+├── inspirations/               # 💡 External references (Autoresearch, AdderBoard)
+└── program.md                  # 🤖 System instructions for automated research agents
+```
 
 Similar ideas:
 1. Looped Transformers - [paper](https://arxiv.org/pdf/2311.12424) - [x_post](https://twitter.com/DimitrisPapail/status/1747302035077378110) - [code](https://github.com/Leiay/looped_transformer/tree/main)

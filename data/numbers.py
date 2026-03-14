@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from thinker_model import CfgNode
+from core.utils import CfgNode
 # MAX_NUMBER = 1e10
 
 MAX_BASE = 16 + 1 #256

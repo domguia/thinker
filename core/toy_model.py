@@ -5,8 +5,8 @@ import torch
 from torch import nn, Tensor
 from torch.nn import TransformerDecoder, TransformerDecoderLayer, Transformer
 import torch.nn.functional as F
-from model_utils import FlexTransformerDecoder, FlexTransformerDecoderLayer, TokenProject
-from model_utils import CustomFlexDecoder, CustomFlexDecoderLayer, RotaryEmbedding
+from core.layers import FlexTransformerDecoder, FlexTransformerDecoderLayer, TokenProject
+from core.layers import CustomFlexDecoder, CustomFlexDecoderLayer, RotaryEmbedding
 
 class ToyThinker(nn.Module):
     # inspered from https://pytorch.org/tutorials/beginner/transformer_tutorial.html

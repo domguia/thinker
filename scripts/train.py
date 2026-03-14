@@ -3,9 +3,9 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader
 
-from toy_model import ToyThinker, all_losses_compute
-from numbers_data import NumbersCopyDataset
-from thinker_model import CfgNode
+from core.toy_model import ToyThinker, all_losses_compute
+from data.numbers import NumbersCopyDataset
+from core.utils import CfgNode
 
 def train():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

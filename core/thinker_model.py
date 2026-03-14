@@ -2,7 +2,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from utils import CfgNode
+from core.utils import CfgNode
 
 class Th1nker(nn.Module):
     def __init__(self, config):

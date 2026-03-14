@@ -55,7 +55,7 @@ wiki data from [saleforce](https://blog.salesforceairesearch.com/the-wikitext-lo
 # from torch.utils.data import DataLoader
 
 # from thinker_model import Th1nker, compute_loss, CfgNode
-# from toy_model import ToyThinker
+# from core.toy_model import ToyThinker
 # from numbers_data import NumbersComputeDataset
 
 # from torchmetrics.classification import Accuracy
@@ -270,8 +270,8 @@ from torch.utils.data import DataLoader
 
 # from thinker_model import Th1nker
 from utils import CfgNode, plot_loss_and_accuracy, MatchCount, plot_hp_heatmap, loop_over_extremum
-from utils_viz import plot_loss_and_accuracy, plot_hp_heatmap
-from toy_model import ToyThinker, all_losses_compute
+from scripts.visualize import plot_loss_and_accuracy, plot_hp_heatmap
+from core.toy_model import ToyThinker, all_losses_compute
 from numbers_data import NumbersComputeDataset, NumbersCopyDataset, TASK_SCHEME
 
 torch.set_printoptions(linewidth=180)
@@ -572,7 +572,7 @@ for i, (inputs, targets) in enumerate(dataset):
 # import torch
 # from torch import nn, Tensor
 # from torch.nn import TransformerDecoder, TransformerDecoderLayer
-# from model_utils import FlexTransformerDecoder, FlexTransformerDecoderLayer
+# from core.layers import FlexTransformerDecoder, FlexTransformerDecoderLayer
 
 # class ToyThinker(nn.Module):
 #     # inspered from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
