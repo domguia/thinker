@@ -16,7 +16,8 @@ def log_experiment(date, model, target_len, prompt_len, steps, accuracy, ratio, 
 def main():
     parser = argparse.ArgumentParser(description="Study Scaling Curve of LLM Compressor")
     parser.add_argument("--models", type=str, nargs="+", default=["gpt2"], help="List of HF model names")
-    parser.add_argument("--steps", type=int, default=100, help="Optimization steps per run")
+    parser.add_argument("--steps", type=int, default=500, help="Optimization steps per run")
+    parser.add_argument("--loss_threshold", type=float, default=0.0001, help="Target loss for early stopping")
     parser.add_argument("--exp_name", type=str, default="scaling_study", help="Experiment name")
     parser.add_argument("--quick", action="store_true", help="Run only a small subset for verification")
     parser.add_argument("--hierarchical", action="store_true", help="Use hierarchical search for optimal n_prompt")
@@ -84,7 +85,7 @@ def main():
             print(f"\n>>> Running: {text_key} (len={target_len}), prompt={n_prompt}")
             
             # Optimize with early stopping
-            soft_prompt, _ = optimizer.optimize(text, n_prompt_tokens=n_prompt, n_steps=args.steps, loss_threshold=0.001)
+            soft_prompt, _ = optimizer.optimize(text, n_prompt_tokens=n_prompt, n_steps=args.steps, loss_threshold=args.loss_threshold, verbose=True)
             
             # Evaluate
             discrete_prompt_ids = optimizer.get_discrete_prompt(soft_prompt)
