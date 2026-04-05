@@ -21,14 +21,13 @@ This sub-project explores using LLMs to compress data by finding optimal prompts
 - **Goal:** Achieve high compression ratios by storing only a short prompt and correction ranks.
 - **Experiment Storage:** 
     - Detailed artifacts (logits, ranks, prompts) are stored in `logs/`.
-    - Experiment summaries and findings are documented in `dev_notes/compressor_experiments.md` and `dev_notes/experiment.log.md`.
+    - Experiment summaries and technical notes are documented in [docs/compression/](docs/compression/).
     - When running on Colab, use `scripts/sync_results.py` to package results, then unzip them at the project root to synchronize.
 - **Key Findings (Apr 2026):**
     - **Model Scaling:** Decompressing ability scales clearly with model size. `Qwen2.5-3B` reached **~66%** Top-1 accuracy on 800-token sequences, compared to **~60%** for `SmolLM-135M`.
     - **Compression Efficiency:** We achieved **~3.6x** compression on long sequences (800 tokens) even with high overhead 100-token prompts.
-    - **Quantization Gap:** Even with deep optimization (Loss < 0.00001), discrete accuracy remains significantly lower than soft accuracy, confirming the "Translation Loss" from continuous embeddings to discrete tokens.
-    - **Correction bits:** Modern base models significantly reduce the information needed for error correction by providing a much stronger natural prior.
-    - **Deep Dive:** See [Analyse détaillée des premières expériences](dev_notes/analysis_first_experiments.md) for a technical breakdown of the "55% accuracy wall" and the "Quantization Gap".
+    - **Quantization Gap:** Even with deep optimization (Loss < 0.00001), discrete accuracy remains significantly lower than soft accuracy, confirming the "Translation Loss".
+    - **Technical Deep Dives:** See [Explanation of Convergence](docs/compression/explanation_convergence.md) and [Analysis of First Experiments](docs/compression/analysis_first_experiments.md).
 - **Environment:** Use the `thinker` conda environment.
 - **Usage:**
   ```bash
