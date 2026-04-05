@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--steps", type=int, default=100, help="Optimization steps per run")
     parser.add_argument("--exp_name", type=str, default="scaling_study", help="Experiment name")
     parser.add_argument("--quick", action="store_true", help="Run only a small subset for verification")
+    parser.add_argument("--hierarchical", action="store_true", help="Use hierarchical search for optimal n_prompt")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -40,18 +41,26 @@ def main():
     os.makedirs(exp_dir, exist_ok=True)
 
     for text_key, text in samples.items():
+        if text_key.startswith("_"): continue
         target_ids = wrapper.encode(text)
         target_len = target_ids.shape[1]
         
-        for n_prompt in prompt_lengths:
+        if args.hierarchical:
+            print(f"\n>>> Hierarchical Search for: {text_key} (len={target_len})")
+            soft_prompt, n_prompt = optimizer.hierarchical_search(text, max_prompt_tokens=100, loss_threshold=0.01, steps_per_increment=args.steps)
+            lengths_to_test = [n_prompt]
+        else:
+            lengths_to_test = prompt_lengths
+
+        for n_prompt in lengths_to_test:
             run_id = f"{text_key}_p{n_prompt}"
             run_dir = os.path.join(exp_dir, run_id)
             os.makedirs(run_dir, exist_ok=True)
             
             print(f"\n>>> Running: {text_key} (len={target_len}), prompt={n_prompt}")
             
-            # Optimize
-            soft_prompt, _ = optimizer.optimize(text, n_prompt_tokens=n_prompt, n_steps=args.steps)
+            # Optimize with early stopping
+            soft_prompt, _ = optimizer.optimize(text, n_prompt_tokens=n_prompt, n_steps=args.steps, loss_threshold=0.001)
             
             # Evaluate
             discrete_prompt_ids = optimizer.get_discrete_prompt(soft_prompt)
