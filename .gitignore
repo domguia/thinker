@@ -5,3 +5,13 @@ lightning_logs/
 __pycache__/
 thinker-model-anim/
 *.log
+*.swp
+.agents/
+knowledge/
+skills-lock.json
+*.pdf
+.DS_Store
+.venv/
+env/
+venv/
+.env
