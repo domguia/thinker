@@ -27,6 +27,10 @@ Checkout :
 ## LLM as Data Compressor
 This sub-project explores using LLMs to compress data by finding optimal prompts.
 - **Goal:** Achieve high compression ratios by storing only a short prompt and correction ranks.
+- **Experiment Storage:** 
+    - Detailed artifacts (logits, ranks, prompts) are stored in `logs/`.
+    - Experiment summaries and findings are documented in `dev_notes/compressor_experiments.md` and `dev_notes/experiment.log.md`.
+    - When running on Colab, use `scripts/sync_results.py` to package results, then unzip them at the project root to synchronize.
 - **Key Findings (Apr 2026):**
     - **Compression Scaling:** Compression ratio increases with target text length. We achieved **~5.0x** compression on ~100 token sequences using `SmolLM-135M`.
     - **Prompt Optimization:** 5-10 tokens are often enough to reach the "elbow" of the compression curve. Adding more tokens increases overhead without proportional accuracy gains.
