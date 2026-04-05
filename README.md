@@ -22,6 +22,18 @@ Task 3 in particular will help to test how this method performs in variable comp
 Checkout :
 - [toy_model.py](core/toy_model.py)
 - on going [experiment log](dev_notes/experiment.log.md)
+- [LLM as Data Compressor](core/compressor/)
+
+## LLM as Data Compressor
+This sub-project explores using LLMs to compress data by finding optimal prompts.
+- **Goal:** Achieve high compression ratios by storing only a short prompt and correction ranks.
+- **Environment:** Use the `thinker` conda environment.
+- **Usage:**
+  ```bash
+  export PYTHONPATH=$PYTHONPATH:.
+  conda run -n thinker python scripts/compress_demo.py --text "Your text here" --n_prompt 5 --n_steps 100
+  ```
+- **Dependencies:** `transformers`, `accelerate`, `torch` (CPU version recommended for local development).
 
 Based on the observed result we could re-use the same approach on Language Modeling Task following the [original ideas](https://www.figma.com/file/MNe376umkTm5iCpg9kSmcq/thinking-transformer?type=design&node-id=328-196&mode=design).
 
