@@ -33,6 +33,7 @@ This sub-project explores using LLMs to compress data by finding optimal prompts
   export PYTHONPATH=$PYTHONPATH:.
   conda run -n thinker python scripts/compress_demo.py --text "Your text here" --n_prompt 5 --n_steps 100
   ```
+- **Experiment Skill:** A project-specific skill `compressor-experiment` is available to automate and log experiments. Use it to run batch trials or systematic tests.
 - **Dependencies:** `transformers`, `accelerate`, `torch` (CPU version recommended for local development).
 
 Based on the observed result we could re-use the same approach on Language Modeling Task following the [original ideas](https://www.figma.com/file/MNe376umkTm5iCpg9kSmcq/thinking-transformer?type=design&node-id=328-196&mode=design).
