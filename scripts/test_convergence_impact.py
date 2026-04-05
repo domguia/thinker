@@ -49,7 +49,7 @@ def run_deep_convergence_test():
         results.append({
             "target_thresh": thresh,
             "final_soft_loss": f"{final_loss:.6f}",
-            "discrete_accuracy": f"{acc*100.2:.2f}%",
+            "discrete_accuracy": f"{acc*100.0:.2f}%",
             "time_sec": f"{stage_time:.1f}s"
         })
         print(f"RESULT: Loss {final_loss:.6f} -> Discrete Acc: {acc*100.0:.2f}% (Took {stage_time:.1f}s)")
