@@ -1,0 +1,9 @@
+prompt_bits: 156.17036934287742
+correction_bits: 144.91173577308655
+total_bits: 301.08210511596394
+original_bits: 796.4688836486748
+compression_ratio: 2.645354440251137
+accuracy: 0.529411792755127
+Text: The Moon is Earth's only natural satellite. It is the fifth largest satellite in the Solar System and the largest and most massive relative to its parent planet. At a mean distance of 384,400 km, it is about 30 times the diameter of Earth.
+Discrete Prompt IDs: [16724, 45054, 1481, 23010, 33615, 32475, 19940, 47035, 42636, 26527]
+Discrete Prompt Text: ULT disinformationstandScient NottingLabour Transport PACK Pluginporting

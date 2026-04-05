@@ -21,3 +21,11 @@ The goal is to quantify the relationship between prompt length, text length, and
 | 2026-04-05 | GPT-2 | 13 | 10 | 30 | 61.5% | 1.13x | Text: 'The Sun is the star ...' |
 | 2026-04-05 | GPT-2 | 13 | 10 | 30 | 61.5% | 1.13x | Text: 'The Sun is the star ...' |
 | 2026-04-05 | GPT-2 | 53 | 10 | 30 | 39.6% | 2.52x | Text: 'The Sun is the star ...' |
+| 2026-04-05 | gpt2 | 9 | 5 | 50 | 55.6% | 1.48x | Exp: wiki_length_study, Run: short_p5 |
+| 2026-04-05 | gpt2 | 9 | 10 | 50 | 33.3% | 0.78x | Exp: wiki_length_study, Run: short_p10 |
+| 2026-04-05 | gpt2 | 9 | 20 | 50 | 33.3% | 0.42x | Exp: wiki_length_study, Run: short_p20 |
+| 2026-04-05 | gpt2 | 31 | 5 | 50 | 38.7% | 2.80x | Exp: wiki_length_study, Run: medium_p5 |
+| 2026-04-05 | gpt2 | 31 | 10 | 50 | 41.9% | 1.95x | Exp: wiki_length_study, Run: medium_p10 |
+| 2026-04-05 | gpt2 | 9 | 10 | 30 | 33.3% | 0.78x | Exp: resume_study, Run: short |
+| 2026-04-05 | gpt2 | 31 | 10 | 30 | 48.4% | 2.00x | Exp: resume_study, Run: medium |
+| 2026-04-05 | gpt2 | 51 | 10 | 30 | 52.9% | 2.65x | Exp: resume_study, Run: long |
