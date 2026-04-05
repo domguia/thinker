@@ -78,8 +78,25 @@ def main():
             # Log
             log_experiment(date_str, args.model, target_len, n_prompt, args.steps, metrics['accuracy'], metrics['compression_ratio'], args.exp_name, run_id)
             
-            # Save artifacts
-            torch.save({'metrics': metrics, 'prompt_ids': discrete_prompt_ids, 'ranks': ranks}, os.path.join(run_dir, "data.pt"))
+            # Save artifacts with full config
+            config = {
+                "model": args.model,
+                "steps": args.steps,
+                "n_prompt": n_prompt,
+                "text_key": text_key,
+                "device": device,
+                "date": date_str
+            }
+            torch.save({
+                'config': config,
+                'metrics': metrics, 
+                'prompt_ids': discrete_prompt_ids, 
+                'ranks': ranks,
+                'text': text
+            }, os.path.join(run_dir, "data.pt"))
+            
+            with open(os.path.join(run_dir, "config.json"), "w") as f:
+                json.dump(config, f, indent=4)
             print(f"Result: Ratio {metrics['compression_ratio']:.2f}x, Accuracy {metrics['accuracy']:.2%}")
 
 if __name__ == "__main__":

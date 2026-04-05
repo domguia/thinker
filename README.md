@@ -35,6 +35,7 @@ This sub-project explores using LLMs to compress data by finding optimal prompts
     - **Compression Scaling:** Compression ratio increases with target text length. We achieved **~5.0x** compression on ~100 token sequences using `SmolLM-135M`.
     - **Prompt Optimization:** 5-10 tokens are often enough to reach the "elbow" of the compression curve. Adding more tokens increases overhead without proportional accuracy gains.
     - **Model Comparison:** Modern small models (`SmolLM`, `Qwen`) provide a much stronger prior than `gpt2`, significantly reducing correction costs.
+    - **Deep Dive:** See [Analyse détaillée des premières expériences](dev_notes/analysis_first_experiments.md) for a technical breakdown of the "55% accuracy wall" and the "Quantization Gap".
 - **Environment:** Use the `thinker` conda environment.
 - **Usage:**
   ```bash
