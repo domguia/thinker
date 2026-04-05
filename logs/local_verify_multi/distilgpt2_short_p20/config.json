@@ -1,0 +1,8 @@
+{
+    "model": "distilgpt2",
+    "steps": 30,
+    "n_prompt": 20,
+    "text_key": "short",
+    "device": "cpu",
+    "date": "2026-04-05"
+}

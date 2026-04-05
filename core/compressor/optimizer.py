@@ -8,7 +8,7 @@ class SoftPromptOptimizer:
         self.wrapper = wrapper
 
     def optimize(self, target_text: str, n_prompt_tokens: int = 10, n_steps: int = 100, lr: float = 0.1, 
-                 loss_threshold: float = 0.001, patience: int = 20):
+                 loss_threshold: float = 0.001, patience: int = 20, verbose: bool = False):
         target_ids = self.wrapper.encode(target_text) # (1, seq_len)
         target_len = target_ids.shape[1]
         
@@ -39,23 +39,23 @@ class SoftPromptOptimizer:
             
             current_loss = loss.item()
             
+            if verbose and i % 50 == 0:
+                print(f"  Step {i:4d} | Loss: {current_loss:.6f}")
+
             # Check for early stopping
-            if current_loss < best_loss - 1e-5:
+            if current_loss < best_loss - 1e-7:
                 best_loss = current_loss
                 steps_without_improvement = 0
             else:
                 steps_without_improvement += 1
                 
             if current_loss < loss_threshold:
-                print(f"Step {i}: Converged (Loss {current_loss:.4f} < {loss_threshold})")
+                if verbose: print(f"  Converged at step {i} (Loss {current_loss:.6f})")
                 break
                 
             if steps_without_improvement >= patience:
-                print(f"Step {i}: Early stopping (No improvement for {patience} steps)")
+                if verbose: print(f"  Early stopping at step {i} (No improvement for {patience} steps)")
                 break
-
-            if i % 20 == 0:
-                print(f"Step {i}: Loss = {current_loss:.4f}")
                 
         return prompt_embeddings.detach(), best_loss
 
@@ -70,15 +70,9 @@ class SoftPromptOptimizer:
         
         while n_prompt <= max_prompt_tokens:
             print(f"\n--- Testing n_prompt = {n_prompt} ---")
-            # If we have previous embeddings, use them as starting point
-            if current_embeddings is not None:
-                new_token_id = torch.randint(0, self.wrapper.model.config.vocab_size, (1, 1), device=self.wrapper.device)
-                new_embedding = self.wrapper.get_embeddings(new_token_id).detach()
-                # We could try to freeze previous embeddings here, but let's start with full optimization
-                # for simplicity unless specific 'progressive' behavior is needed.
             
             emb, loss = self.optimize(target_text, n_prompt_tokens=n_prompt, n_steps=steps_per_increment, 
-                                     loss_threshold=loss_threshold)
+                                     loss_threshold=loss_threshold, verbose=True)
             
             if loss < loss_threshold:
                 print(f"Goal reached with {n_prompt} tokens (Loss: {loss:.4f})")
@@ -112,7 +106,6 @@ class SoftPromptOptimizer:
         loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
         
         # Target embeddings for teacher forcing
-        # We need to handle padding here too
         target_embeddings = self.wrapper.model.get_input_embeddings()(torch.clamp(target_ids, min=0))
         
         best_loss = float('inf')
@@ -140,7 +133,6 @@ class SoftPromptOptimizer:
                 steps_without_improvement += 1
                 
             if current_loss < loss_threshold:
-                print(f"Step {i}: Batch converged (Loss {current_loss:.4f})")
                 break
             if steps_without_improvement >= patience:
                 break
@@ -153,7 +145,6 @@ class SoftPromptOptimizer:
         all_embeddings = self.wrapper.model.get_input_embeddings().weight # (vocab_size, d_model)
         
         # Find nearest neighbor for each embedding in the soft prompt
-        # Use cosine similarity or MSE
         discrete_ids = []
         for i in range(soft_prompt.shape[1]):
             emb = soft_prompt[0, i]

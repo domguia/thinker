@@ -72,7 +72,12 @@ def main():
                 lengths_to_test = prompt_lengths
 
             for n_prompt in lengths_to_test:
+                if n_prompt >= target_len:
+                    print(f"Skipping n_prompt={n_prompt} for target_len={target_len} (would result in expansion)")
+                    continue
+
                 run_id = f"{model_name.replace('/','_')}_{text_key}_p{n_prompt}"
+
                 run_dir = os.path.join(exp_dir, run_id)
             os.makedirs(run_dir, exist_ok=True)
             
