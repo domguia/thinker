@@ -20,12 +20,25 @@ def main():
     parser.add_argument("--exp_name", type=str, default="scaling_study", help="Experiment name")
     parser.add_argument("--quick", action="store_true", help="Run only a small subset for verification")
     parser.add_argument("--hierarchical", action="store_true", help="Use hierarchical search for optimal n_prompt")
+    parser.add_argument("--input_file", type=str, help="Path to a text file to sample from (e.g. wikitext-2/test.txt)")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    with open("data/wiki_samples.json", "r") as f:
-        samples = json.load(f)
+    if args.input_file and os.path.exists(args.input_file):
+        print(f"Sampling from {args.input_file}...")
+        with open(args.input_file, "r", encoding="utf-8") as f:
+            full_text = f.read()
+        # Simple sampling: find a continuous block of text
+        # Let's just use the first 5000 characters to find samples
+        samples = {
+            "short": full_text[100:300],   # ~50 tokens
+            "medium": full_text[100:1000], # ~200 tokens
+            "long": full_text[100:3000],   # ~600 tokens
+        }
+    else:
+        with open("data/wiki_samples.json", "r") as f:
+            samples = json.load(f)
     
     prompt_lengths = [5, 10, 20, 50, 100]
     if args.quick:
