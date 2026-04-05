@@ -15,7 +15,7 @@ def log_experiment(date, model, target_len, prompt_len, steps, accuracy, ratio, 
 
 def main():
     parser = argparse.ArgumentParser(description="Study Scaling Curve of LLM Compressor")
-    parser.add_argument("--model", type=str, default="gpt2", help="HF model name")
+    parser.add_argument("--models", type=str, nargs="+", default=["gpt2"], help="List of HF model names")
     parser.add_argument("--steps", type=int, default=100, help="Optimization steps per run")
     parser.add_argument("--exp_name", type=str, default="scaling_study", help="Experiment name")
     parser.add_argument("--quick", action="store_true", help="Run only a small subset for verification")
@@ -23,9 +23,6 @@ def main():
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Loading {args.model} on {device}...")
-    wrapper = HFModelWrapper(args.model, device=device)
-    optimizer = SoftPromptOptimizer(wrapper)
     
     with open("data/wiki_samples.json", "r") as f:
         samples = json.load(f)
@@ -40,21 +37,30 @@ def main():
     exp_dir = os.path.join("logs", args.exp_name)
     os.makedirs(exp_dir, exist_ok=True)
 
-    for text_key, text in samples.items():
-        if text_key.startswith("_"): continue
-        target_ids = wrapper.encode(text)
-        target_len = target_ids.shape[1]
-        
-        if args.hierarchical:
-            print(f"\n>>> Hierarchical Search for: {text_key} (len={target_len})")
-            soft_prompt, n_prompt = optimizer.hierarchical_search(text, max_prompt_tokens=100, loss_threshold=0.01, steps_per_increment=args.steps)
-            lengths_to_test = [n_prompt]
-        else:
-            lengths_to_test = prompt_lengths
+    for model_name in args.models:
+        print(f"\n\n===== Testing Model: {model_name} =====")
+        try:
+            wrapper = HFModelWrapper(model_name, device=device)
+            optimizer = SoftPromptOptimizer(wrapper)
+        except Exception as e:
+            print(f"Failed to load model {model_name}: {e}")
+            continue
 
-        for n_prompt in lengths_to_test:
-            run_id = f"{text_key}_p{n_prompt}"
-            run_dir = os.path.join(exp_dir, run_id)
+        for text_key, text in samples.items():
+            if text_key.startswith("_"): continue
+            target_ids = wrapper.encode(text)
+            target_len = target_ids.shape[1]
+            
+            if args.hierarchical:
+                print(f"\n>>> Hierarchical Search for: {text_key} (len={target_len})")
+                soft_prompt, n_prompt = optimizer.hierarchical_search(text, max_prompt_tokens=100, loss_threshold=0.01, steps_per_increment=args.steps)
+                lengths_to_test = [n_prompt]
+            else:
+                lengths_to_test = prompt_lengths
+
+            for n_prompt in lengths_to_test:
+                run_id = f"{model_name.replace('/','_')}_{text_key}_p{n_prompt}"
+                run_dir = os.path.join(exp_dir, run_id)
             os.makedirs(run_dir, exist_ok=True)
             
             print(f"\n>>> Running: {text_key} (len={target_len}), prompt={n_prompt}")

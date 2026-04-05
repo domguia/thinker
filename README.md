@@ -1,28 +1,20 @@
 # Thinker
 The trained computer
 
-We want to train a model that does numeric computation such as 1 + 2 = 3,
-what do we need for computation:
-1. `input`
-2. reusable `computer` unit -> repeat transformer block
-3. `memory` -> concatenated embeddings accessed via cross attention
-4. `algorithm`, that gives the desired `output`
+This project explores "Language Modeling as Compression" and reasoning via latent transformers.
 
-in our case `computer` & `algorithm` will be merged in the `model`  
-`memory` will be intermediates latent states concatenated
-
-the `algorithm` we decided to learn are (from easy to difficult) : 
-1. copy input to output, with some variations
-2. addition
-3. multiplication
-4. number factorisation
-
-Task 3 in particular will help to test how this method performs in variable complexity. Since the last task highly relies on memory to reduce computation we will observe how the model model will use the given memory.
+## 🚀 Recent Updates: LLM as Data Compressor
+We have implemented a framework to use pretrained LLMs (GPT-2, SmolLM, Qwen) as general-purpose compressors.
+- **Hierarchical Latent Optimization:** Automatically find the minimal prompt length needed for a target text.
+- **Multi-Model Scaling Study:** Systematic analysis of how model size (135M to 1.5B+) impacts compression efficiency.
+- **Rank-Based Error Correction:** quantify additional information needed to reach 100% accuracy using Shannon entropy of token ranks.
+- **Visual Analytics:** Enhanced plotting of scaling curves and rank distributions to analyze the "Quantization Gap".
 
 Checkout :
 - [toy_model.py](core/toy_model.py)
-- on going [experiment log](dev_notes/experiment.log.md)
-- [LLM as Data Compressor](core/compressor/)
+- [LLM as Data Compressor Core](core/compressor/)
+- [Scaling Study Notebook](notebooks/LLM_Compressor_Scaling.ipynb) (Colab-ready with T4 GPU)
+- [Analyse détaillée des expériences](dev_notes/analysis_first_experiments.md)
 
 ## LLM as Data Compressor
 This sub-project explores using LLMs to compress data by finding optimal prompts.
