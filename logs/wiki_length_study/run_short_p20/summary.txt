@@ -1,0 +1,9 @@
+prompt_bits: 312.34073868575484
+correction_bits: 21.774436712265015
+total_bits: 334.11517539801986
+original_bits: 140.55333240858968
+compression_ratio: 0.420673296988541
+accuracy: 0.3333333432674408
+Text: The Moon is Earth's only natural satellite.
+Discrete Prompt IDs: [9934, 27834, 343, 13233, 43651, 47857, 17094, 46956, 49558, 6869, 13175, 47002, 28057, 16012, 32334, 9517, 18591, 7029, 35999, 38634]
+Discrete Prompt Text:  removal Evangelir cous commandments Oprahaternity;} UNHCR MoonNBC Citizenship medalsSunSamsungcard eliminating400 Keller 470

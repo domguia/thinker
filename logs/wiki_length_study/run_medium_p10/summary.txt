@@ -1,0 +1,9 @@
+prompt_bits: 156.17036934287742
+correction_bits: 91.47435474395752
+total_bits: 247.64472408683494
+original_bits: 484.12814496292
+compression_ratio: 1.9549301797084266
+accuracy: 0.4193548262119293
+Text: The Moon is Earth's only natural satellite. It is the fifth largest satellite in the Solar System and the largest and most massive relative to its parent planet.
+Discrete Prompt IDs: [33590, 31921, 45612, 13872, 35088, 5331, 11805, 9980, 46809, 7352]
+Discrete Prompt Text:  Hollande upro peanuts Close Harmonykins��News Slayinations

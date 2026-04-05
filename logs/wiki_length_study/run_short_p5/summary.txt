@@ -1,0 +1,9 @@
+prompt_bits: 78.08518467143871
+correction_bits: 16.9196834564209
+total_bits: 95.00486812785961
+original_bits: 140.55333240858968
+compression_ratio: 1.4794329509455237
+accuracy: 0.5555555820465088
+Text: The Moon is Earth's only natural satellite.
+Discrete Prompt IDs: [29214, 13135, 6773, 6869, 39515]
+Discrete Prompt Text: another juice refere Moon starch

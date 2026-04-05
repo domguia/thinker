@@ -1,0 +1,9 @@
+prompt_bits: 156.17036934287742
+correction_bits: 23.77443766593933
+total_bits: 179.94480700881675
+original_bits: 140.55333240858968
+compression_ratio: 0.7810913509813205
+accuracy: 0.3333333432674408
+Text: The Moon is Earth's only natural satellite.
+Discrete Prompt IDs: [23950, 290, 32220, 24249, 5160, 47828, 14705, 16188, 28973, 40345]
+Discrete Prompt Text:  hashtag and387 bisexual earn Zub planetsailandthinkingㅋㅋ

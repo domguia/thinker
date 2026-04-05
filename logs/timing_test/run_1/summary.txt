@@ -1,0 +1,9 @@
+prompt_bits: 156.17036934287742
+correction_bits: 11.609640121459961
+total_bits: 167.78000946433738
+original_bits: 78.08518467143871
+compression_ratio: 0.46540219493810536
+accuracy: 0.0
+Text: Test text for timing.
+Discrete Prompt IDs: [34404, 10576, 28330, 13045, 20047, 36537, 48000, 22072, 21154, 39886]
+Discrete Prompt Text:  characterize timing Holt pricing emphasized calibration047 realities counters pci
