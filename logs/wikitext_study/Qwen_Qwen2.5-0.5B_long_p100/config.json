@@ -1,0 +1,8 @@
+{
+    "model": "Qwen/Qwen2.5-0.5B",
+    "steps": 150,
+    "n_prompt": 100,
+    "text_key": "long",
+    "device": "cuda",
+    "date": "2026-04-05"
+}

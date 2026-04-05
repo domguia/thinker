@@ -24,9 +24,10 @@ This sub-project explores using LLMs to compress data by finding optimal prompts
     - Experiment summaries and findings are documented in `dev_notes/compressor_experiments.md` and `dev_notes/experiment.log.md`.
     - When running on Colab, use `scripts/sync_results.py` to package results, then unzip them at the project root to synchronize.
 - **Key Findings (Apr 2026):**
-    - **Compression Scaling:** Compression ratio increases with target text length. We achieved **~5.0x** compression on ~100 token sequences using `SmolLM-135M`.
-    - **Prompt Optimization:** 5-10 tokens are often enough to reach the "elbow" of the compression curve. Adding more tokens increases overhead without proportional accuracy gains.
-    - **Model Comparison:** Modern small models (`SmolLM`, `Qwen`) provide a much stronger prior than `gpt2`, significantly reducing correction costs.
+    - **Model Scaling:** Decompressing ability scales clearly with model size. `Qwen2.5-3B` reached **~66%** Top-1 accuracy on 800-token sequences, compared to **~60%** for `SmolLM-135M`.
+    - **Compression Efficiency:** We achieved **~3.6x** compression on long sequences (800 tokens) even with high overhead 100-token prompts.
+    - **Quantization Gap:** Even with deep optimization (Loss < 0.00001), discrete accuracy remains significantly lower than soft accuracy, confirming the "Translation Loss" from continuous embeddings to discrete tokens.
+    - **Correction bits:** Modern base models significantly reduce the information needed for error correction by providing a much stronger natural prior.
     - **Deep Dive:** See [Analyse détaillée des premières expériences](dev_notes/analysis_first_experiments.md) for a technical breakdown of the "55% accuracy wall" and the "Quantization Gap".
 - **Environment:** Use the `thinker` conda environment.
 - **Usage:**
