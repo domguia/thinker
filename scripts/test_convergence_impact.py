@@ -15,14 +15,14 @@ def run_deep_convergence_test():
     target_ids = wrapper.encode(text)
     n_prompt = 10
     
-    thresholds = [0.1, 0.01, 0.001, 0.0001, 0.00005]
+    thresholds = [0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000005]
     results = []
     
     print(f"\n--- Deep Convergence Test ---")
     print(f"Text: '{text}'")
     print(f"Target Length: {target_ids.shape[1]} tokens")
     print(f"Prompt Length: {n_prompt} tokens")
-    print(f"Estimated total time: ~5-10 minutes on CPU")
+    print(f"Estimated total time: ~10-20 minutes on CPU (much faster on GPU)")
     
     start_all = time.time()
     
@@ -31,7 +31,7 @@ def run_deep_convergence_test():
         start_stage = time.time()
         
         # Optimize
-        soft_prompt, final_loss = optimizer.optimize(text, n_prompt_tokens=n_prompt, n_steps=1000, 
+        soft_prompt, final_loss = optimizer.optimize(text, n_prompt_tokens=n_prompt, n_steps=2000, 
                                                      loss_threshold=thresh, verbose=True)
         
         # Eval Discrete
