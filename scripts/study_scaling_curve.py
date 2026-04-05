@@ -95,11 +95,11 @@ def main():
             metrics = CompressionMetrics.summary(discrete_prompt_ids, ranks, wrapper.model.config.vocab_size, target_ids[0].tolist())
             
             # Log
-            log_experiment(date_str, args.model, target_len, n_prompt, args.steps, metrics['accuracy'], metrics['compression_ratio'], args.exp_name, run_id)
+            log_experiment(date_str, model_name, target_len, n_prompt, args.steps, metrics['accuracy'], metrics['compression_ratio'], args.exp_name, run_id)
             
             # Save artifacts with full config
             config = {
-                "model": args.model,
+                "model": model_name,
                 "steps": args.steps,
                 "n_prompt": n_prompt,
                 "text_key": text_key,

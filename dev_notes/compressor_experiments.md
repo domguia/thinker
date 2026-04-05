@@ -47,3 +47,4 @@ The goal is to quantify the relationship between prompt length, text length, and
 | 2026-04-05 | HuggingFaceTB/SmolLM-135M | 31 | 5 | 100 | 61.3% | 3.31x | Exp: smollm_hierarchical, Run: short_p5 |
 | 2026-04-05 | HuggingFaceTB/SmolLM-135M | 107 | 31 | 100 | 59.8% | 2.25x | Exp: smollm_hierarchical, Run: medium_p31 |
 | 2026-04-05 | HuggingFaceTB/SmolLM-135M | 245 | 51 | 100 | 52.2% | 2.50x | Exp: smollm_hierarchical, Run: long_p51 |
+| 2026-04-05 | gpt2 | 42 | 20 | 30 | 19.0% | 1.32x | Exp: test_wiki_load, Run: gpt2_short_p20 |
