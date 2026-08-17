@@ -3,8 +3,8 @@
 The Thinker model is a recurrent, latent-based transformer that decouples computational steps from fixed architectural depth. Unlike standard transformers, Thinker utilizes a constant number of latent vectors that iteratively "read" from a high-dimensional input and "write" to a persistent memory cache.
 
 #figure(
-  image("../../visual-explanation.png", width: 80%),
-  caption: [System overview: The Thinker architecture utilizes iterative cross-attention to maintain a dynamic proof state, selectively reading from premises and writing to a persistent latent memory cache.],
+  image("figures/architecture-diagram.svg", width: 90%),
+  caption: [One thinking step: the latent state $Z_{t-1}$ produces a query $Q_t$ that cross-attends over the static input cache and the growing memory cache, producing $Z_t$, which is both the next latent state and the newest entry appended to the memory cache.],
 )
 
 == Formal Formulation

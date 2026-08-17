@@ -1,6 +1,6 @@
 
 = Introduction
-Modern Large Language Models (LLMs) have demonstrated remarkable capabilities in pattern recognition and sequence generation. However, they frequently struggle with multi-step algorithmic reasoning and formal logic, often requiring explicit "Chain-of-Thought" (CoT) prompting to perform complex, iterative computations. This reliance on fixed architectural depth and token-level reasoning represents a significant limitation for tasks whose complexity scales independently of the input sequence length, such as mathematical theorem proving and formal verification.
+Modern Large Language Models (LLMs) such as GPT-3 [18] have demonstrated remarkable capabilities in pattern recognition and sequence generation. However, they frequently struggle with multi-step algorithmic reasoning and formal logic, often requiring explicit "Chain-of-Thought" (CoT) prompting to perform complex, iterative computations. This reliance on fixed architectural depth and token-level reasoning represents a significant limitation for tasks whose complexity scales independently of the input sequence length, such as mathematical theorem proving and formal verification.
 
 Automated theorem proving requires a model to iteratively transform a *proof state* by applying logical primitives or "tactics." To address this, we introduce the *Thinker* model—a recurrent, latent-based transformer designed to internalize these computational steps within a hidden "thinking" process. Thinker operates at the intersection of three key research frontiers relevant to automated reasoning:
 
