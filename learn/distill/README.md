@@ -107,6 +107,43 @@ cp -r /tmp/distill_data ~/thinker/data/distill_cluster_run
 Then release the CPU node (`oardel <job_id>`) as soon as data prep is done —
 don't hold a reservation idle.
 
+## Teacher download & inference benchmark
+
+`download_teacher.py` and `bench_teacher.py` prepare the next phase (logit
+KD with a real Teacher) without running anything automatically -- you launch
+these yourself on Grid'5000.
+
+Candidate Teacher checked (metadata only, no download performed by the
+assistant): **`Qwen/Qwen3.8-27B`** -- a Qwen3.5 **vision-language** model
+(`image-text-to-text`, `Qwen3_5ForConditionalGeneration`), used here purely
+as a text Teacher (image/video inputs are never passed). Key facts from the
+Hub API:
+- **~55.6 GB** total (18 bf16 safetensors shards) -- confirms ~27-28B params.
+- Needs a GPU with **≥ ~56 GB free VRAM** at bf16 (H100 94 GiB fits; a 40 GB
+  A100 does not without quantization).
+- Released 2026-08-14, so genuinely new -- verified live via the HF API, not
+  from prior knowledge.
+
+Staged workflow (matches the `grid5000` skill's CPU-download / GPU-compute
+split):
+
+```bash
+# 1. Download on the existing CPU reservation (paradoxe-7) -- no GPU needed
+python learn/distill/download_teacher.py \
+  --repo_id Qwen/Qwen3.8-27B --local_dir /tmp/teachers/Qwen3.8-27B
+# then copy the snapshot to persistent storage (home or Group Storage) before
+# the CPU job's walltime ends, since /tmp is wiped at job end.
+
+# 2. On a separate GPU reservation (same site, to avoid a cross-site transfer):
+oarsub -I -n "distill-teacher-bench" -l gpu=1,walltime=2:00:00 -p "gpu_model = 'H100'"
+python learn/distill/bench_teacher.py \
+  --model_dir /path/to/Qwen3.8-27B --top_k 32 --out_file teacher_bench_results.json
+```
+
+`bench_teacher.py` reports tokens/sec generation throughput on a few sample
+prompts, and measures actual Top-K=32 logit storage bytes/token to check
+against the ~194 bytes/token formula above.
+
 ## Next steps
 
 - Validate `prepare_general_data.py` / `prepare_retrieval_data.py` end-to-end
