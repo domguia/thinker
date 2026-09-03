@@ -47,7 +47,7 @@ import time
 import numpy as np
 import torch
 
-from bench_teacher import load_model_and_tokenizer
+from bench_teacher import describe_gpus, load_model_and_tokenizer
 
 
 def topk_with_residual(logits, k):
@@ -130,6 +130,21 @@ def main():
              "-- one full hidden_dim vector per token per layer is much heavier than Top-K logits.",
     )
     parser.add_argument("--max_length", type=int, default=4096)
+    parser.add_argument(
+        "--num_gpus", type=int, default=None,
+        help="limit to the first N visible GPUs for device_map=\"auto\" sharding "
+             "(default: use every visible GPU)",
+    )
+    parser.add_argument(
+        "--attn_implementation", default="auto", choices=["auto", "flash_attention_2", "sdpa", "eager"],
+        help="\"auto\" tries flash_attention_2 then falls back to sdpa",
+    )
+    parser.add_argument(
+        "--quantization", default="none", choices=["none", "bnb-4bit", "bnb-8bit"],
+        help="on-the-fly bitsandbytes quantization (needs pip install bitsandbytes); "
+             "use with a bf16 repo (vendor or Unsloth), not with the already-quantized "
+             "FP8 checkpoint -- see qwen3.8-27b-notes.md",
+    )
     parser.add_argument("--out_file", required=True)
     args = parser.parse_args()
 
@@ -138,10 +153,15 @@ def main():
     print(f"Loaded {len(examples)} examples from {args.input_file}", flush=True)
 
     dtype = getattr(torch, args.dtype)
+    print("Detected GPU(s):", flush=True)
+    describe_gpus()
     print(f"Loading Teacher {args.model_dir} in {args.dtype} ...", flush=True)
     print("  (shard-loading progress is printed by transformers itself below)", flush=True)
     t0 = time.time()
-    model, tokenizer = load_model_and_tokenizer(args.model_dir, dtype)
+    model, tokenizer = load_model_and_tokenizer(
+        args.model_dir, dtype, num_gpus=args.num_gpus, attn_implementation=args.attn_implementation,
+        quantization=args.quantization,
+    )
     print(f"Loaded in {time.time() - t0:.1f}s", flush=True)
 
     hidden_layer_indices = parse_hidden_layers(args.hidden_layers, model.config.num_hidden_layers)
