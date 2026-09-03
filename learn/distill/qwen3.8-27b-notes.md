@@ -255,7 +255,7 @@ version and the `busy_besteffort` vs genuinely-busy distinction.
 
 ## See also
 
-[`benchmark_plan.md`](./benchmark_plan.md) — the concrete experiment matrix
+[`qwen3.8-benchmark-plan.md`](./qwen3.8-benchmark-plan.md) — the concrete experiment matrix
 and GPU-specific instructions to actually validate this Teacher's setup on
 Grid'5000, built from the findings above.
 

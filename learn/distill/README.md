@@ -118,7 +118,7 @@ VRAM). Model-specific details (architecture, VRAM/quantization notes,
 reasoning-effort behavior relevant to `bench_teacher.py`) live in
 [`qwen3.8-27b-notes.md`](./qwen3.8-27b-notes.md); the concrete experiment
 matrix and GPU-specific instructions to validate it on Grid'5000 are in
-[`benchmark_plan.md`](./benchmark_plan.md).
+[`qwen3.8-benchmark-plan.md`](./qwen3.8-benchmark-plan.md).
 
 Staged workflow (matches the `grid5000` skill's CPU-download / GPU-compute
 split):
