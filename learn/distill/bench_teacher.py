@@ -2,7 +2,7 @@
 
 Loads a downloaded Teacher snapshot (see download_teacher.py) as a text-only
 causal LM -- image/video inputs are never used, even for a vision-language
-checkpoint like Qwen/Qwen3.8-27B -- and:
+checkpoint like Qwen/Qwen3.8-27B-FP8 -- and:
   1. Times generation on a few prompts to get tokens/sec, per the sizing
      discussion in raw/Distill-getting-start.md.
   2. Runs a forward pass on the same prompts and extracts the actual Top-K
@@ -10,8 +10,8 @@ checkpoint like Qwen/Qwen3.8-27B -- and:
      (~194 bytes/token at K=32, int32 indices + fp16 values + fp16 renorm
      scalar) from learn/distill/README.md against real measured bytes.
 
-Needs a GPU with enough VRAM for the checkpoint (~56GB+ for Qwen3.8-27B at
-bf16) -- run on a GPU reservation, not the CPU node used for downloading.
+Needs a GPU with enough VRAM for the checkpoint (~31GB+ for Qwen3.8-27B-FP8)
+-- run on a GPU reservation, not the CPU node used for downloading.
 """
 import argparse
 import json
@@ -41,7 +41,8 @@ def load_model_and_tokenizer(model_dir, dtype):
 
 def benchmark_generation(model, tokenizer, prompts, max_new_tokens):
     results = []
-    for prompt in prompts:
+    for i, prompt in enumerate(prompts, 1):
+        print(f"  [generation {i}/{len(prompts)}] starting ...", flush=True)
         messages = [{"role": "user", "content": prompt}]
         inputs = tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, return_tensors="pt", return_dict=True
@@ -57,11 +58,17 @@ def benchmark_generation(model, tokenizer, prompts, max_new_tokens):
         elapsed = time.time() - t0
 
         num_generated = out.shape[1] - inputs["input_ids"].shape[1]
+        tokens_per_sec = num_generated / elapsed if elapsed > 0 else float("nan")
+        print(
+            f"  [generation {i}/{len(prompts)}] prompt_tokens={inputs['input_ids'].shape[1]} "
+            f"generated={num_generated} time={elapsed:.2f}s throughput={tokens_per_sec:.1f} tok/s",
+            flush=True,
+        )
         results.append({
             "prompt_tokens": inputs["input_ids"].shape[1],
             "generated_tokens": num_generated,
             "seconds": elapsed,
-            "tokens_per_sec": num_generated / elapsed if elapsed > 0 else float("nan"),
+            "tokens_per_sec": tokens_per_sec,
         })
     return results
 
@@ -69,7 +76,8 @@ def benchmark_generation(model, tokenizer, prompts, max_new_tokens):
 def extract_topk_logits(model, tokenizer, texts, k):
     records = []
     total_bytes = 0
-    for text in texts:
+    for i, text in enumerate(texts, 1):
+        t0 = time.time()
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
         with torch.no_grad():
             logits = model(**inputs).logits[0]  # (seq_len, vocab)
@@ -78,6 +86,7 @@ def extract_topk_logits(model, tokenizer, texts, k):
         bytes_for_seq = num_tokens * (k * (4 + 2) + 2)  # int32 idx + fp16 val + fp16 renorm scalar
         total_bytes += bytes_for_seq
         records.append({"num_tokens": num_tokens, "bytes": bytes_for_seq})
+        print(f"  [top-k {i}/{len(texts)}] {num_tokens} tokens in {time.time() - t0:.2f}s", flush=True)
     return records, total_bytes
 
 
@@ -92,20 +101,16 @@ def main():
 
     dtype = getattr(torch, args.dtype)
 
-    print(f"Loading {args.model_dir} in {args.dtype} ...")
+    print(f"Loading {args.model_dir} in {args.dtype} ...", flush=True)
+    print("  (shard-loading progress is printed by transformers itself below)", flush=True)
     t0 = time.time()
     model, tokenizer = load_model_and_tokenizer(args.model_dir, dtype)
-    print(f"Loaded in {time.time() - t0:.1f}s")
+    print(f"Loaded in {time.time() - t0:.1f}s", flush=True)
 
-    print("Benchmarking generation ...")
+    print("Benchmarking generation ...", flush=True)
     gen_results = benchmark_generation(model, tokenizer, SAMPLE_PROMPTS, args.max_new_tokens)
-    for r in gen_results:
-        print(
-            f"  prompt_tokens={r['prompt_tokens']} generated={r['generated_tokens']} "
-            f"time={r['seconds']:.2f}s throughput={r['tokens_per_sec']:.1f} tok/s"
-        )
 
-    print(f"Extracting Top-{args.top_k} logits on sample prompts ...")
+    print(f"Extracting Top-{args.top_k} logits on sample prompts ...", flush=True)
     topk_records, total_bytes = extract_topk_logits(model, tokenizer, SAMPLE_PROMPTS, args.top_k)
     total_tokens = sum(r["num_tokens"] for r in topk_records)
     measured_bytes_per_token = total_bytes / total_tokens if total_tokens else float("nan")

@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import random
+import time
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -38,14 +39,26 @@ def collect_from_source(source, tokenizer, n_samples, max_length, min_length):
     ds = load_dataset(source["dataset"], source["config"], split=source["split"], streaming=True)
 
     examples, skipped = [], 0
+    seen = 0
+    start_time = time.time()
+    progress_every = max(1, n_samples // 100)
     for ex in ds:
         if len(examples) >= n_samples:
             break
+        seen += 1
         built = build_example(ex, source["name"], tokenizer, max_length, min_length)
         if built is None:
             skipped += 1
-            continue
-        examples.append(built)
+        else:
+            examples.append(built)
+        if seen % progress_every == 0:
+            elapsed = time.time() - start_time
+            rate = seen / elapsed if elapsed > 0 else 0
+            print(
+                f"  [progress:{source['name']}] seen={seen} kept={len(examples)} "
+                f"skipped={skipped} elapsed={elapsed:.1f}s rate={rate:.1f} ex/s",
+                flush=True,
+            )
     print(f"  -> collected {len(examples)} docs ({skipped} skipped: out of length range).")
     return examples
 

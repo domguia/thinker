@@ -4,11 +4,12 @@ Meant to run on a Grid'5000 CPU reservation (no GPU needed just to download).
 huggingface_hub resumes partial downloads automatically, so re-running this
 after a walltime cutoff or a network drop just continues where it left off.
 
-Example (Qwen/Qwen3.8-27B, ~55.6 GB, a Qwen3.5 vision-language model used
-here purely as a text Teacher -- see learn/distill/README.md):
+Example (Qwen/Qwen3.8-27B-FP8, ~30.9 GB, the FP8-quantized version of a
+Qwen3.5 vision-language model used here purely as a text Teacher -- see
+learn/distill/README.md):
 
     python learn/distill/download_teacher.py \
-      --repo_id Qwen/Qwen3.8-27B --local_dir /tmp/teachers/Qwen3.8-27B
+      --repo_id Qwen/Qwen3.8-27B-FP8 --local_dir /tmp/teachers/Qwen3.8-27B-FP8
 """
 import argparse
 import os

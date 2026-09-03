@@ -114,31 +114,70 @@ KD with a real Teacher) without running anything automatically -- you launch
 these yourself on Grid'5000.
 
 Candidate Teacher checked (metadata only, no download performed by the
-assistant): **`Qwen/Qwen3.8-27B`** -- a Qwen3.5 **vision-language** model
+assistant): **`Qwen/Qwen3.8-27B-FP8`** -- the FP8-quantized version of a Qwen3.5 **vision-language** model
 (`image-text-to-text`, `Qwen3_5ForConditionalGeneration`), used here purely
 as a text Teacher (image/video inputs are never passed). Key facts from the
 Hub API:
-- **~55.6 GB** total (18 bf16 safetensors shards) -- confirms ~27-28B params.
-- Needs a GPU with **≥ ~56 GB free VRAM** at bf16 (H100 94 GiB fits; a 40 GB
-  A100 does not without quantization).
+- **~30.9 GB** total (FP8-quantized; the unquantized bf16 checkpoint,
+  `Qwen/Qwen3.8-27B`, is ~55.6 GB for the same ~27-28B params).
+- Needs a GPU with **≥ ~31 GB free VRAM** to load -- fits a 40 GB A100
+  comfortably. Native FP8 tensor-core compute (the actual speed benefit, not
+  just the VRAM saving) requires Hopper/Ada (H100, H200, L40S -- `abacus27`,
+  `hydra`, `abacus26` on Grid'5000); Ampere (A100 and older) can still load
+  and run the checkpoint but dequantizes to bf16/fp16 for compute.
 - Released 2026-08-14, so genuinely new -- verified live via the HF API, not
   from prior knowledge.
+- Within the Qwen3.8 line, 27B is actually the *smallest* dense-ish option --
+  the alternatives are `Qwen3.8-Flash-Next` (360 GB) and `Qwen3.8-2.4T-A95B`
+  (4.9 TB). The separate Qwen3.5 generation has real small dense sizes
+  (0.8B/2B/4B/9B) if a lighter Teacher is ever needed for faster iteration.
 
 Staged workflow (matches the `grid5000` skill's CPU-download / GPU-compute
 split):
 
 ```bash
-# 1. Download on the existing CPU reservation (paradoxe-7) -- no GPU needed
+# 1. Download on the existing CPU reservation (paradoxe-7, Rennes) -- no GPU needed
 python learn/distill/download_teacher.py \
-  --repo_id Qwen/Qwen3.8-27B --local_dir /tmp/teachers/Qwen3.8-27B
+  --repo_id Qwen/Qwen3.8-27B-FP8 --local_dir /tmp/teachers/Qwen3.8-27B-FP8
 # then copy the snapshot to persistent storage (home or Group Storage) before
 # the CPU job's walltime ends, since /tmp is wiped at job end.
 
-# 2. On a separate GPU reservation (same site, to avoid a cross-site transfer):
+# 2. GPU reservation for the benchmark -- pick a site, see availability note below.
 oarsub -I -n "distill-teacher-bench" -l gpu=1,walltime=2:00:00 -p "gpu_model = 'H100'"
 python learn/distill/bench_teacher.py \
-  --model_dir /path/to/Qwen3.8-27B --top_k 32 --out_file teacher_bench_results.json
+  --model_dir /path/to/Qwen3.8-27B-FP8 --top_k 32 --out_file teacher_bench_results.json
 ```
+
+### GPU site choice (checked 2026-09-03, availability changes constantly -- re-check before reserving)
+
+`Qwen3.8-27B-FP8` (~31 GB) just needs a GPU that can hold it; native FP8
+tensor-core speed additionally needs Hopper/Ada (H100/H200/L40S).
+
+| Cluster (site) | GPU | Native FP8 | Status when checked |
+|---|---|---|---|
+| `hydra` (Lyon) | H200, 96 GB | ✅ | **free** (2/4 nodes) |
+| `sirius` (Lyon) | A100×8, 40 GB | loadable only | **free** |
+| `grouille` (Nancy) | A100×2, 40 GB | loadable only | **free** (1/2 nodes) |
+| `abacus27` (Rennes) | H100×4, 94 GB | ✅ | `busy_besteffort` -- only besteffort jobs on it, a normal reservation preempts them, so effectively available |
+| `abacus21` (Rennes) | A100, 40 GB | loadable only | `busy_besteffort`, same as above |
+| `chuc` (Lille, 8 nodes) | A100×4, 40 GB | loadable only | mixed: 3/8 nodes `busy_besteffort` (available), rest genuinely busy |
+| `abacus26` (Rennes) | L40S, 45 GB | ✅ | genuinely busy (real job running) |
+
+Trade-off: staying at **Rennes** (`abacus27`) avoids transferring the ~31 GB
+snapshot across sites after downloading it on `paradoxe-7` (also Rennes).
+Going to **Lyon** (`hydra`) gets a currently-idle H200 but requires an
+inter-site transfer of the downloaded snapshot (`Group_Storage`/`rsync`),
+which the `grid5000` skill flags as a potential bottleneck for large volumes.
+For a one-off ~31 GB transfer this is likely fine either way; prefer Rennes
+if in doubt, to keep everything on one site's storage server.
+
+Availability check command (run from any site's frontend, no netrc needed):
+```bash
+curl -s https://api.grid5000.fr/stable/sites/rennes/status.json \
+  | jq -r '.nodes | to_entries[] | select(.key | test("^abacus(27|26|21)")) | "\(.key)\t\(.value.soft)"'
+```
+See `.claude/skills/grid5000/references/doc-map.md` for the multi-site
+version and the `busy_besteffort` vs genuinely-busy distinction.
 
 `bench_teacher.py` reports tokens/sec generation throughput on a few sample
 prompts, and measures actual Top-K=32 logit storage bytes/token to check

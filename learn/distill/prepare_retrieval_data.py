@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import random
+import time
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -74,14 +75,26 @@ def main():
 
     examples = []
     skipped = 0
+    seen = 0
+    start_time = time.time()
+    progress_every = max(1, args.n_samples // 200)
     for ex in ds:
         if len(examples) >= args.n_samples:
             break
+        seen += 1
         built = build_example(ex, tokenizer, args.max_length)
         if built is None:
             skipped += 1
-            continue
-        examples.append(built)
+        else:
+            examples.append(built)
+        if seen % progress_every == 0:
+            elapsed = time.time() - start_time
+            rate = seen / elapsed if elapsed > 0 else 0
+            print(
+                f"[progress] seen={seen} kept={len(examples)} skipped={skipped} "
+                f"elapsed={elapsed:.1f}s rate={rate:.1f} ex/s",
+                flush=True,
+            )
 
     print(f"Collected {len(examples)} examples ({skipped} skipped: missing fields or too long).")
 
