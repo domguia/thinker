@@ -183,6 +183,33 @@ version and the `busy_besteffort` vs genuinely-busy distinction.
 prompts, and measures actual Top-K=32 logit storage bytes/token to check
 against the ~194 bytes/token formula above.
 
+## Top-K logit precomputation
+
+`precompute_topk_logits.py` turns a prepared JSONL (any of the three
+categories) into a Top-K logit dataset for offline logit KD: one forward
+pass per example through the Teacher, storing per-token Top-K indices/values
+plus a residual log-sum-exp scalar (the aggregated mass of every non-Top-K
+token) so the full softmax denominator is still exactly reconstructable for
+the KL loss. Output is one compressed `.npz` per input file (flat
+`(total_tokens, K)` arrays + an `offsets` array marking example boundaries).
+
+Validated locally (`gpt2` fallback path in `load_model_and_tokenizer`, K=8,
+3 tiny examples): measured storage exactly matched the formula (50.0
+bytes/token for K=8, i.e. `K*6+2`), and the residual reconstructs the
+softmax denominator correctly (spot-checked: `logsumexp(topk_values) +
+exp(residual)` recovers the same log-denominator used to produce it).
+
+```bash
+python learn/distill/precompute_topk_logits.py \
+  --input_file /tmp/distill_data/reasoning/train.jsonl \
+  --model_dir /path/to/Qwen3.8-27B-FP8 \
+  --top_k 32 --out_file /tmp/distill_data/reasoning/train_topk32.npz
+```
+
+No batching yet (one example at a time) -- run `bench_teacher.py` first to
+get real per-example latency on the Teacher, and only add batching if that
+throughput turns out to be a bottleneck for the full dataset size.
+
 ## Next steps
 
 - Validate `prepare_general_data.py` / `prepare_retrieval_data.py` end-to-end
