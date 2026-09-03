@@ -258,11 +258,10 @@ Pascal/Volta and an unoptimized training loop: P100/V100 ~15-20%, A100/A40
 
 ❌ = exceeds Grid'5000's ~1-week single-reservation limit. ⚠️ = right at it.
 
-**Recommendation (pending confirmation)**: the **50M-150M** range for the
-first full cycle -- minutes to a few hours on A100/H100, a real model (not a
-toy), well inside a single reservation. 1B+ is feasible but commits a
-week-long H100 reservation, better saved for once the pipeline is fully
-validated at small scale.
+**Decision (2026-09-03)**: start with **10M** to validate the full pipeline
+end-to-end (seconds to ~16 min depending on GPU tier -- cheap to iterate on
+and to redo if something's wrong), before moving up to the 50M-150M range
+and eventually 1B+ once everything is confirmed working.
 
 ## Next steps
 
