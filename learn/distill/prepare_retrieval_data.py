@@ -78,25 +78,30 @@ def main():
     seen = 0
     start_time = time.time()
     progress_every = max(1, args.n_samples // 200)
-    for ex in ds:
-        if len(examples) >= args.n_samples:
-            break
-        seen += 1
-        built = build_example(ex, tokenizer, args.max_length)
-        if built is None:
-            skipped += 1
-        else:
-            examples.append(built)
-        if seen % progress_every == 0:
-            elapsed = time.time() - start_time
-            rate = seen / elapsed if elapsed > 0 else 0
-            print(
-                f"[progress] seen={seen} kept={len(examples)} skipped={skipped} "
-                f"elapsed={elapsed:.1f}s rate={rate:.1f} ex/s",
-                flush=True,
-            )
+    raw_path = os.path.join(args.out_dir, "raw.jsonl")
+    with open(raw_path, "w") as raw_f:
+        for ex in ds:
+            if len(examples) >= args.n_samples:
+                break
+            seen += 1
+            built = build_example(ex, tokenizer, args.max_length)
+            # unfiltered original record, written as we go (not held in memory)
+            raw_f.write(json.dumps({"kept": built is not None, **ex}, ensure_ascii=False) + "\n")
+            if built is None:
+                skipped += 1
+            else:
+                examples.append(built)
+            if seen % progress_every == 0:
+                elapsed = time.time() - start_time
+                rate = seen / elapsed if elapsed > 0 else 0
+                print(
+                    f"[progress] seen={seen} kept={len(examples)} skipped={skipped} "
+                    f"elapsed={elapsed:.1f}s rate={rate:.1f} ex/s",
+                    flush=True,
+                )
 
     print(f"Collected {len(examples)} examples ({skipped} skipped: missing fields or too long).")
+    print(f"Wrote {seen} unfiltered raw rows to {raw_path}")
 
     random.seed(args.seed)
     random.shuffle(examples)

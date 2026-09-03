@@ -183,32 +183,86 @@ version and the `busy_besteffort` vs genuinely-busy distinction.
 prompts, and measures actual Top-K=32 logit storage bytes/token to check
 against the ~194 bytes/token formula above.
 
-## Top-K logit precomputation
+## Teacher target precomputation (Top-K logits + optional hidden states)
 
-`precompute_topk_logits.py` turns a prepared JSONL (any of the three
-categories) into a Top-K logit dataset for offline logit KD: one forward
-pass per example through the Teacher, storing per-token Top-K indices/values
-plus a residual log-sum-exp scalar (the aggregated mass of every non-Top-K
-token) so the full softmax denominator is still exactly reconstructable for
-the KL loss. Output is one compressed `.npz` per input file (flat
-`(total_tokens, K)` arrays + an `offsets` array marking example boundaries).
+`precompute_teacher_targets.py` turns a prepared JSONL (any of the three
+categories) into a Teacher-targets dataset for offline KD: one forward pass
+per example through the Teacher, storing:
+- per-token Top-K logit indices/values plus a residual log-sum-exp scalar
+  (the aggregated mass of every non-Top-K token) so the full softmax
+  denominator is still exactly reconstructable for the KL loss.
+- optionally, per-token hidden states for one or more layers
+  (`--hidden_layers none|last|all|<comma-separated indices>`, decided at
+  inference time) for feature-level distillation -- meant for small samples
+  only, exact training use still open, this just makes extraction available
+  to experiment with. Much heavier than Top-K logits (one full hidden_dim
+  vector per token per layer vs. K values).
 
-Validated locally (`gpt2` fallback path in `load_model_and_tokenizer`, K=8,
-3 tiny examples): measured storage exactly matched the formula (50.0
-bytes/token for K=8, i.e. `K*6+2`), and the residual reconstructs the
-softmax denominator correctly (spot-checked: `logsumexp(topk_values) +
-exp(residual)` recovers the same log-denominator used to produce it).
+Output is one compressed `.npz` per input file (flat `(total_tokens, ...)`
+arrays + an `offsets` array marking example boundaries, shared across logits
+and any extracted hidden-state layers).
+
+Validated locally (`gpt2` fallback path in `load_model_and_tokenizer`):
+- Top-K only, K=8, 3 tiny examples: measured storage exactly matched the
+  formula (50.0 bytes/token, i.e. `K*6+2`), and the residual reconstructs
+  the softmax denominator correctly (spot-checked: `logsumexp(topk_values)
+  + exp(residual)` recovers the same log-denominator used to produce it).
+- `--hidden_layers last` and `--hidden_layers all`: correct shapes
+  (`(num_tokens, 768)` per layer for gpt2, 13 layers for `all` = 12 blocks +
+  the embedding output at index 0).
 
 ```bash
-python learn/distill/precompute_topk_logits.py \
+# Top-K logits only
+python learn/distill/precompute_teacher_targets.py \
   --input_file /tmp/distill_data/reasoning/train.jsonl \
   --model_dir /path/to/Qwen3.8-27B-FP8 \
   --top_k 32 --out_file /tmp/distill_data/reasoning/train_topk32.npz
+
+# + last hidden layer, on a small sample
+python learn/distill/precompute_teacher_targets.py \
+  --input_file /tmp/distill_data/reasoning/sample.jsonl \
+  --model_dir /path/to/Qwen3.8-27B-FP8 \
+  --top_k 32 --hidden_layers last \
+  --out_file /tmp/distill_data/reasoning/sample_targets.npz
 ```
 
 No batching yet (one example at a time) -- run `bench_teacher.py` first to
 get real per-example latency on the Teacher, and only add batching if that
 throughput turns out to be a bottleneck for the full dataset size.
+
+## Student size vs. training duration (to decide the target model size)
+
+Since Top-K logits are precomputed offline, student training compute is the
+same as a from-scratch pretraining run of the student alone (only the loss
+changes: KL instead of plain CE) -- so the standard `FLOPs ≈ 6 × N × D`
+approximation applies (N = params, D = training tokens). Distillation
+typically needs fewer tokens than pure CE pretraining thanks to the Teacher's
+denser signal, so **D = 10 × N** is used below as a moderate assumption
+(vs. the Chinchilla-standard 20×N) -- not rigorously established from the
+literature reviewed so far, treat as a starting point. Duration scales
+linearly with D: double every number below for a 20×N (Chinchilla-like)
+budget, or halve for a more aggressive 5×N bet.
+
+MFU (achieved vs. peak FLOPs) assumptions, given no FlashAttention on
+Pascal/Volta and an unoptimized training loop: P100/V100 ~15-20%, A100/A40
+~30%, H100 ~35%.
+
+| Student size | P100×2 | V100×4 | A100×3 (`abacus21`) | A40×2 | H100×4 (`abacus27`) |
+|---|---|---|---|---|---|
+| 10M | ~15.7 min | ~1 min | ~21 s | ~1.1 min | ~4 s |
+| 50M | ~6.6 h | ~25 min | ~9 min | ~28 min | ~1.8 min |
+| 150M | ~59 h (2.5d) | ~3.75 h | ~1.3 h | ~4.2 h | ~16 min |
+| 500M | ~655 h (27d) ❌ | ~42 h (1.7d) | ~14.8 h | ~46 h (1.9d) | ~3 h |
+| 1B | impractical | ~167 h (7d) ⚠️ | ~59 h (2.5d) | ~185 h (7.7d) ❌ | ~12 h |
+| 3B | impractical | impractical | ~22.3 d ❌ | impractical | ~4.5 d |
+
+❌ = exceeds Grid'5000's ~1-week single-reservation limit. ⚠️ = right at it.
+
+**Recommendation (pending confirmation)**: the **50M-150M** range for the
+first full cycle -- minutes to a few hours on A100/H100, a real model (not a
+toy), well inside a single reservation. 1B+ is feasible but commits a
+week-long H100 reservation, better saved for once the pipeline is fully
+validated at small scale.
 
 ## Next steps
 

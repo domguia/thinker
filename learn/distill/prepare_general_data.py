@@ -34,7 +34,7 @@ def build_example(ex, source_name, tokenizer, max_length, min_length):
     return {"text": text, "num_tokens": num_tokens, "source": source_name}
 
 
-def collect_from_source(source, tokenizer, n_samples, max_length, min_length):
+def collect_from_source(source, tokenizer, n_samples, max_length, min_length, raw_path):
     print(f"Streaming {source['dataset']}/{source['config']} split={source['split']} (pulling only {n_samples} docs) ...")
     ds = load_dataset(source["dataset"], source["config"], split=source["split"], streaming=True)
 
@@ -42,11 +42,14 @@ def collect_from_source(source, tokenizer, n_samples, max_length, min_length):
     seen = 0
     start_time = time.time()
     progress_every = max(1, n_samples // 100)
+    raw_f = open(raw_path, "w")
     for ex in ds:
         if len(examples) >= n_samples:
             break
         seen += 1
         built = build_example(ex, source["name"], tokenizer, max_length, min_length)
+        # unfiltered original record, written as we go (not held in memory)
+        raw_f.write(json.dumps({"kept": built is not None, "source": source["name"], **ex}, ensure_ascii=False) + "\n")
         if built is None:
             skipped += 1
         else:
@@ -59,7 +62,9 @@ def collect_from_source(source, tokenizer, n_samples, max_length, min_length):
                 f"skipped={skipped} elapsed={elapsed:.1f}s rate={rate:.1f} ex/s",
                 flush=True,
             )
+    raw_f.close()
     print(f"  -> collected {len(examples)} docs ({skipped} skipped: out of length range).")
+    print(f"  -> wrote {seen} unfiltered raw rows to {raw_path}")
     return examples
 
 
@@ -81,7 +86,8 @@ def main():
 
     examples = []
     for source in SOURCES:
-        examples.extend(collect_from_source(source, tokenizer, args.n_samples, args.max_length, args.min_length))
+        raw_path = os.path.join(args.out_dir, f"raw_{source['name']}.jsonl")
+        examples.extend(collect_from_source(source, tokenizer, args.n_samples, args.max_length, args.min_length, raw_path))
 
     print(f"Collected {len(examples)} documents total across {len(SOURCES)} sources.")
 
