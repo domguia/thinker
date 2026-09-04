@@ -178,6 +178,54 @@ def build_mup_param_groups(model, base_lr, width_mult):
     ]
 
 
+def apply_depth_mup_scaling(model, depth_mult):
+    """Depth-muP-lite: scale each residual branch's OUTPUT (attention and
+    MLP, before it's added back to the residual stream) by 1/sqrt(depth_mult).
+
+    Motivation (found empirically 2026-09-04, see experiment.log.md): this
+    project's model-size tiers scale n_layer *and* n_embd together (e.g.
+    4->12->25 layers alongside the width jump), but width-only muP
+    (apply_mup_init/build_mup_param_groups above) says nothing about depth --
+    a deeper residual stream accumulates more per-layer contributions
+    regardless of width, and empirically the LR that transferred fine at a
+    fixed depth broke badly once depth also grew (lr=0.01, optimal at
+    4-layer/40M-core, gave a 6x WORSE loss at 12-layer/150M-core than the
+    untuned lr=0.003 baseline). This is the standard fix from the Depth-muP
+    line of work (Tensor Programs VI / Bordelon-Noci-Pehlevan-style residual
+    branch scaling): multiplying each block's branch output by 1/sqrt(L)
+    (relative to a --mup_base_depth reference, so depth_mult=1 at the base
+    tier leaves behavior unchanged) keeps the residual stream's per-layer
+    update magnitude comparable as more layers are stacked.
+
+    Implemented via forward hooks on each block's .attn/.mlp submodules
+    rather than monkeypatching GPT2Block.forward -- GPT2Attention returns
+    (attn_output, present) and GPT2MLP returns a plain tensor (verified
+    against the installed transformers version), so hooks can rescale the
+    branch output without touching the block's internal residual-add logic,
+    which is less likely to break across transformers versions than copying
+    and patching the block's forward source.
+
+    "Lite" because it does NOT also rescale the branch's own weight init or
+    add a corresponding LR term the way width-muP does for width -- this is
+    the single largest-effect piece (matching how muP-lite above only did
+    width init+LR, not the attention 1/d patch); revisit if this alone
+    doesn't fully restore transfer.
+    """
+    scale = depth_mult ** -0.5
+
+    def scale_attn_output(module, inputs, output):
+        if isinstance(output, tuple):
+            return (output[0] * scale,) + output[1:]
+        return output * scale
+
+    def scale_mlp_output(module, inputs, output):
+        return output * scale
+
+    for block in model.transformer.h:
+        block.attn.register_forward_hook(scale_attn_output)
+        block.mlp.register_forward_hook(scale_mlp_output)
+
+
 def topk_kd_loss(student_logits, teacher_indices, teacher_values, teacher_residual, teacher_mask):
     """KL(teacher || student) over the (K+1)-way categorical formed by the
     Teacher's Top-K token indices plus one merged "everything else" bucket.
@@ -257,6 +305,13 @@ def main():
         "--mup_untie_head", action="store_true",
         help="use canonical muP (untied LM head, zero-init) instead of this project's tied-head compromise",
     )
+    parser.add_argument(
+        "--depth_mup", action="store_true",
+        help="also scale each block's residual branch output by 1/sqrt(n_layer / mup_base_depth) -- "
+             "Depth-muP-lite, addresses depth (not covered by width-only --mup) when tiers scale n_layer "
+             "alongside n_embd. Requires --mup and --n_layer. See apply_depth_mup_scaling()'s docstring.",
+    )
+    parser.add_argument("--mup_base_depth", type=int, default=4, help="reference n_layer the depth-muP scaling is computed against")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -285,6 +340,13 @@ def main():
         apply_mup_init(model, width_mult, tied_head=not args.mup_untie_head)
         head_desc = "untied+zero-init" if args.mup_untie_head else "TIED (project compromise, not canonical muP -- see --help)"
         print(f"muP enabled: width_mult={width_mult:.2f} (n_embd={args.n_embd} / base {args.mup_base_width}), LM head {head_desc}")
+    depth_mult = 1.0
+    if args.depth_mup:
+        if not args.mup or args.n_layer is None:
+            raise ValueError("--depth_mup requires --mup and --n_layer")
+        depth_mult = args.n_layer / args.mup_base_depth
+        apply_depth_mup_scaling(model, depth_mult)
+        print(f"Depth-muP enabled: depth_mult={depth_mult:.2f} (n_layer={args.n_layer} / base {args.mup_base_depth}), residual branches scaled by {depth_mult ** -0.5:.3f}")
     model.to(device)
     num_params = sum(p.numel() for p in model.parameters())
     # Core (transformer blocks + positional embedding) vs. head (vocab-sized embedding/lm_head) --
