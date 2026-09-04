@@ -15,3 +15,9 @@ skills-lock.json
 env/
 venv/
 .env
+wandb/
+mlruns/
+mlartifacts/
+mlflow.db
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
