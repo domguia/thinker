@@ -19,6 +19,22 @@ as a text Teacher (image/video inputs are never passed).
   (H100, H200, L40S — `abacus27`, `hydra`, `abacus26` on Grid'5000); Ampere
   (A100 and older) can still load and run the checkpoint but dequantizes to
   bf16/fp16 for compute.
+
+**Real bottleneck found on Ampere (verified 2026-09-04, `abacus21`/A100 40GB)**:
+`bench_teacher.py`'s current `load_model_and_tokenizer` loads with `dtype=bfloat16`
+regardless of the checkpoint's native FP8 format, which **dequantizes the
+whole model to ~55.6 GB bf16 before it even touches VRAM** — too big for a
+40 GB A100. `transformers` silently offloads the overflow to CPU ("Some
+parameters are on the meta device because they were offloaded to the cpu"),
+and that CPU↔GPU traffic per token is the actual cause of the ~0.3-0.6 tok/s
+throughput seen — **not** missing `causal-conv1d`/`flash-linear-attention`
+kernels (installing both changed nothing: same throughput, just without the
+"falling back to reference implementation" warnings). On Ampere, loading the
+FP8 checkpoint *without* forcing bf16 (so it dequantizes only as needed per
+layer, or stays FP8-stored with on-the-fly upcast) should avoid the CPU
+offload entirely — worth fixing in `bench_teacher.py` before trusting any
+Ampere throughput number. On Hopper (94-96 GB), this isn't an issue: the
+55.6 GB bf16 model fits with headroom to spare.
 - Released 2026-08-14.
 - Within the Qwen3.8 line, 27B is actually the *smallest* dense-ish option —
   the alternatives are `Qwen3.8-Flash-Next` (360 GB) and
@@ -120,6 +136,15 @@ tokenizer doesn't accept it, e.g. the local gpt2 smoke-test). With
 (`--reasoning_effort model_default`, i.e. xhigh) is almost certainly cut
 off mid-reasoning — a warning is printed in that case. Use
 `--reasoning_effort none` to measure post-thinking throughput.
+
+**Correction (verified on real hardware, 2026-09-04, `abacus21`/A100)**: the
+Unsloth docs' 4-level claim above is **not what this checkpoint's actual chat
+template accepts**. `--reasoning_effort none` raises a hard
+`jinja2.exceptions.TemplateError: Unexpected reasoning effort none. Supported
+types are xhigh (default), medium, and low.` — it is **not** a silent
+fallback, it's a crash. Only `xhigh`/`medium`/`low` are valid on this
+snapshot. Use `--reasoning_effort low` as the closest available proxy for
+"fastest, least reasoning" rather than `none`.
 
 `precompute_teacher_targets.py` does a plain forward pass (no
 `generate()`, no chat template), so it is **not** affected by this
