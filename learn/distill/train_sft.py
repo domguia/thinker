@@ -111,6 +111,73 @@ def collate(batch, pad_id, k=None):
     return out
 
 
+def is_mup_hidden_weight(name):
+    """True for the "hidden" matmul weights muP treats as width-scaling:
+    attention/MLP projections inside each transformer block. False for
+    embeddings, the (untied) readout, biases, and LayerNorm params -- those
+    keep the base init/LR regardless of width, per the muP table.
+
+    GPT-2-arch-specific name matching (transformer.h.{i}.attn.c_attn/c_proj,
+    transformer.h.{i}.mlp.c_fc/c_proj) -- would need adjusting for a
+    different --base_config architecture.
+    """
+    return name.endswith(".weight") and any(s in name for s in (".attn.c_attn", ".attn.c_proj", ".mlp.c_fc", ".mlp.c_proj"))
+
+
+def apply_mup_init(model, width_mult, base_std=0.02, tied_head=True):
+    """Re-initializes a freshly-constructed model per the muP recipe (Yang et
+    al., Tensor Programs V): hidden matmul weights get variance scaled down
+    by width_mult (std = base_std / sqrt(width_mult)) so their contribution
+    to the forward pass stays width-independent in expectation. Embeddings,
+    LayerNorm, and biases are left at the framework's default init --
+    input-like weights don't scale with width under muP.
+
+    tied_head=False (canonical muP): the readout (lm_head, untied from the
+    embedding) is zero-init, since its output is separately rescaled by
+    1/width_mult at the loss (see main()'s logits scaling).
+    tied_head=True (project's deliberate compromise, see README.md's
+    student-size notes): keeps the embedding/lm_head SHARED, at its default
+    init, to avoid doubling the vocab-sized table when the vocabulary is
+    large relative to the core (this project's Teacher-aligned vocab is
+    248,077 tokens -- untying would make the head dominate the model at
+    small-to-mid core sizes, defeating the point of tracking core size
+    separately from vocab size). The 1/width_mult logit rescaling at the
+    loss is still applied either way -- that's the part of muP's readout
+    treatment that actually controls update dynamics; skipping only the
+    zero-init/untie is a narrower deviation from the paper than it might
+    look, but is still a deviation, not canonical muP -- revisit if
+    transfer doesn't hold up empirically with tying.
+
+    Note: this covers init + LR scaling, the two components of muP with the
+    largest empirical effect on hyperparameter transfer in the original
+    paper's ablations. It does NOT patch attention's 1/sqrt(d) logit scaling
+    to muP's 1/d convention (that requires reaching into the specific
+    attention implementation's internals in a version-fragile way) -- treat
+    this as "muP-lite"; revisit the attention scaling if transfer doesn't
+    hold up empirically across the widths actually used.
+    """
+    hidden_std = base_std / (width_mult ** 0.5)
+    for name, p in model.named_parameters():
+        if is_mup_hidden_weight(name):
+            torch.nn.init.normal_(p, mean=0.0, std=hidden_std)
+    if not tied_head:
+        readout = model.get_output_embeddings()
+        torch.nn.init.zeros_(readout.weight)
+
+
+def build_mup_param_groups(model, base_lr, width_mult):
+    """Adam-under-muP LR rule: hidden matmul weights get base_lr / width_mult,
+    everything else (embeddings, readout, biases, LayerNorm) keeps base_lr.
+    """
+    hidden, other = [], []
+    for name, p in model.named_parameters():
+        (hidden if is_mup_hidden_weight(name) else other).append(p)
+    return [
+        {"params": hidden, "lr": base_lr / width_mult},
+        {"params": other, "lr": base_lr},
+    ]
+
+
 def topk_kd_loss(student_logits, teacher_indices, teacher_values, teacher_residual, teacher_mask):
     """KL(teacher || student) over the (K+1)-way categorical formed by the
     Teacher's Top-K token indices plus one merged "everything else" bucket.
@@ -177,6 +244,19 @@ def main():
              "on top of the plain CE loss. --tokenizer must match the one used to produce it.",
     )
     parser.add_argument("--kd_alpha", type=float, default=0.5, help="weight on the KD/KL term; (1-alpha) on CE")
+    parser.add_argument(
+        "--mup", action="store_true",
+        help="use muP (Yang et al., Tensor Programs V) init + Adam-LR scaling by width, so --lr tuned "
+             "at --mup_base_width transfers to a wider --n_embd without retuning. Requires --n_embd. "
+             "By default keeps the LM head TIED to the embedding (see --mup_untie_head to use canonical "
+             "muP instead) -- a deliberate project compromise since untying doubles an already-large "
+             "vocab-sized table; see apply_mup_init()'s docstring.",
+    )
+    parser.add_argument("--mup_base_width", type=int, default=64, help="reference n_embd the LR/init multipliers are computed against")
+    parser.add_argument(
+        "--mup_untie_head", action="store_true",
+        help="use canonical muP (untied LM head, zero-init) instead of this project's tied-head compromise",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -190,11 +270,27 @@ def main():
         if val is not None:
             setattr(config, attr, val)
     config.vocab_size = len(tokenizer)  # base_config's own vocab size is wrong whenever --tokenizer differs
+    width_mult = 1.0
+    if args.mup:
+        if args.n_embd is None:
+            raise ValueError("--mup requires --n_embd (the width multiplier is computed from it)")
+        if args.mup_untie_head:
+            config.tie_word_embeddings = False  # canonical muP: readout scaled independently of the input embedding
+        width_mult = args.n_embd / args.mup_base_width
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = AutoModelForCausalLM.from_config(config)  # random init: architecture only, no pretrained weights
+    core_params = sum(p.numel() for n, p in model.named_parameters() if "wte" not in n and "lm_head" not in n)
+    head_params = sum(p.numel() for n, p in model.named_parameters() if "wte" in n or "lm_head" in n)
+    if args.mup:
+        apply_mup_init(model, width_mult, tied_head=not args.mup_untie_head)
+        head_desc = "untied+zero-init" if args.mup_untie_head else "TIED (project compromise, not canonical muP -- see --help)"
+        print(f"muP enabled: width_mult={width_mult:.2f} (n_embd={args.n_embd} / base {args.mup_base_width}), LM head {head_desc}")
     model.to(device)
     num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {num_params / 1e6:.1f}M params (random init, arch={args.base_config}), device={device}")
+    # Core (transformer blocks + positional embedding) vs. head (vocab-sized embedding/lm_head) --
+    # the vocab-driven head can dominate at small core sizes; report both so tier comparisons stay
+    # meaningful (see README.md's "Student size" notes on why this split matters more at small scale).
+    print(f"Model: {num_params / 1e6:.1f}M params total = {core_params / 1e6:.1f}M core + {head_params / 1e6:.1f}M head (random init, arch={args.base_config}), device={device}")
 
     train_ds = JsonlTextDataset(args.train_file, tokenizer, args.block_size, teacher_targets=args.teacher_targets)
     print(f"Train examples: {len(train_ds)}" + (f" (KD against {args.teacher_targets}, K={train_ds.k})" if args.teacher_targets else ""))
@@ -204,7 +300,10 @@ def main():
         collate_fn=lambda b: collate(b, tokenizer.pad_token_id, k=k),
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    if args.mup:
+        optimizer = torch.optim.AdamW(build_mup_param_groups(model, args.lr, width_mult))
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     model.train()
 
     start = time.time()
@@ -219,9 +318,15 @@ def main():
                 teacher_residual = batch.pop("teacher_residual")
                 teacher_mask = batch.pop("teacher_mask")
                 logits = model(**batch).logits
+                if args.mup:
+                    logits = logits / width_mult  # muP readout output scaling
                 ce = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
                 kd = topk_kd_loss(logits, teacher_indices, teacher_values, teacher_residual, teacher_mask)
                 loss = (1 - args.kd_alpha) * ce + args.kd_alpha * kd
+            elif args.mup:
+                labels = batch.pop("labels")
+                logits = model(**batch).logits / width_mult  # muP readout output scaling
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
             else:
                 loss = model(**batch).loss
             loss.backward()
