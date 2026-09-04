@@ -164,7 +164,10 @@ def main():
     )
     print(f"Loaded in {time.time() - t0:.1f}s", flush=True)
 
-    hidden_layer_indices = parse_hidden_layers(args.hidden_layers, model.config.num_hidden_layers)
+    # VLM wrapper configs (e.g. Qwen3_5Config) nest the LM's own config under
+    # text_config -- num_hidden_layers lives there, not on the top-level config.
+    text_config = getattr(model.config, "text_config", model.config)
+    hidden_layer_indices = parse_hidden_layers(args.hidden_layers, text_config.num_hidden_layers)
     if hidden_layer_indices:
         print(f"Also extracting hidden states for layers: {hidden_layer_indices}", flush=True)
 
