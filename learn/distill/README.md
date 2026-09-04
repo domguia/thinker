@@ -208,10 +208,9 @@ MFU (achieved vs. peak FLOPs) assumptions, given no FlashAttention on
 Pascal/Volta and an unoptimized training loop: P100/V100 ~15-20%, A100/A40
 ~30%, H100 ~35%.
 
-| Student size | P100×2 | V100×4 | A100×3 (`abacus21`) | A40×2 | H100×4 (`abacus27`) |
+| Student size (core) | P100×2 | V100×4 | A100×3 (`abacus21`) | A40×2 | H100×4 (`abacus27`) |
 |---|---|---|---|---|---|
-| 10M | ~15.7 min | ~1 min | ~21 s | ~1.1 min | ~4 s |
-| 50M | ~6.6 h | ~25 min | ~9 min | ~28 min | ~1.8 min |
+| 40M | ~15.7 min | ~1 min | ~21 s | ~1.1 min | ~4 s |
 | 150M | ~59 h (2.5d) | ~3.75 h | ~1.3 h | ~4.2 h | ~16 min |
 | 500M | ~655 h (27d) ❌ | ~42 h (1.7d) | ~14.8 h | ~46 h (1.9d) | ~3 h |
 | 1B | impractical | ~167 h (7d) ⚠️ | ~59 h (2.5d) | ~185 h (7.7d) ❌ | ~12 h |
@@ -219,10 +218,62 @@ Pascal/Volta and an unoptimized training loop: P100/V100 ~15-20%, A100/A40
 
 ❌ = exceeds Grid'5000's ~1-week single-reservation limit. ⚠️ = right at it.
 
-**Decision (2026-09-03)**: start with **10M** to validate the full pipeline
-end-to-end (seconds to ~16 min depending on GPU tier -- cheap to iterate on
-and to redo if something's wrong), before moving up to the 50M-150M range
-and eventually 1B+ once everything is confirmed working.
+**Not yet corrected**: these estimates used `N` = the *total* size implied by
+the old (misleading, gpt2-vocab) numbers, not `N` = core + the real ~254M
+tied-head table now measured with the Teacher's vocabulary. Real compute
+scales with the total, so actual wall-clock at each tier will be higher than
+shown here (e.g. the 150M-core row's real total is 406M, ~2.7× the FLOPs
+this row assumes) — revisit this table with real per-tier totals before
+using it to plan a long reservation.
+
+**Sizing methodology (settled 2026-09-04): tiers are core size, not total
+size.** Once the student's vocabulary is aligned with the Teacher's
+(`Qwen3.8-27B-FP8`'s tokenizer, **248,077** tokens — not the ~151,936 figure
+that's correct for plain Qwen3 *text* models; this checkpoint is a larger-
+vocab Qwen3.5 VLM), the embedding/lm_head table becomes large enough to
+distort what a tier label means. What we actually care about evaluating is
+the **core** (the transformer blocks + positional embedding — the part that
+does the actual reasoning/computation and that scaling decisions are really
+about), not the vocab-sized table, whose size is basically fixed once the
+tokenizer is chosen and has nothing to do with model capacity in the sense
+we're scaling. So: **tier labels below refer to core params.** The
+embedding/lm_head ("head") size is reported alongside per run (see
+`train_sft.py`'s startup line, e.g. "406.2M params total = 152.2M core +
+254.0M head") because it's the *majority* of the model at small core sizes
+(dominant enough to be misleading if ignored) but becomes proportionally
+negligible as core size grows (a fixed ~254M-token table, tied, is ~62% of a
+406M total but would be under 10% of a 3B-core model) — not worth a
+per-tier breakdown once it stops being the majority.
+
+**muP and the tied-head compromise**: canonical muP (Yang et al., *Tensor
+Programs V*) requires untying the LM head from the input embedding so each
+can get its own init/scaling rule (see `learning_journal.md`'s "Weight
+tying" entry for why). With this project's large Teacher-aligned
+vocabulary, untying would **double** the head table, making it dominate
+even more at small-to-mid core sizes — directly working against the point
+of tracking core size separately. Deliberate compromise: `train_sft.py`'s
+`--mup` keeps the head **tied** by default (pass `--mup_untie_head` for
+canonical muP instead), still applies muP's init/LR scaling to the core and
+the logit/`width_mult` rescaling at the loss, but skips the readout
+zero-init/untie step. Not canonical muP — a documented, deliberate
+deviation.
+
+**Decision (2026-09-03, methodology settled 2026-09-04)**: validated the
+pipeline at the **40M-core** tier (`n_layer=4, n_embd=160, n_head=4`; ~1.4M
+core + ~39.7M tied head with the Teacher's vocab, ~41.1M total measured),
+then the **150M-core** tier (`n_layer=12, n_embd=1024, n_head=16`; 152.2M
+core + 254.0M tied head, 406.2M total measured, `logs/EXP-004-*`) — the LR
+found for muP's base width (40) transferred unchanged (no retuning) across
+a 25.6× width jump, converging cleanly (best combined loss 0.29 vs. the
+40M-core run's 0.67, on the same 200-example validation slice), then the
+**500M-core** tier (`n_layer=25, n_embd=1280, n_head=16`; 493.2M core +
+317.5M tied head, 810.8M total measured, `logs/EXP-005-*`) — same LR reused
+again unchanged, 80× width jump from the tuning base, still no instability
+(best combined loss 0.38 on the same 200-example slice). Old "50M"
+tier dropped (too close to the corrected 40M figure to be a distinct step).
+Next: continue up through the remaining core tiers (1B, 3B core) once
+there's a reason to move past pipeline validation into a real training
+budget.
 
 ## Next steps
 
