@@ -26,6 +26,7 @@ of the repo's experiment scripts.
 """
 import argparse
 import json
+import os
 import time
 
 import numpy as np
@@ -325,6 +326,11 @@ def main():
     parser.add_argument("--run_name", default=None, help="shared run name for W&B/MLflow; defaults to an auto-generated one")
     parser.add_argument("--wandb_group", default=None, help="W&B group tag, e.g. to cluster a sweep's runs together on the dashboard")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="AdamW weight decay (was previously hardcoded to the torch default, not sweepable)")
+    parser.add_argument(
+        "--save_dir", default=None,
+        help="if set, save the final model (state_dict + reconstruction args) to <save_dir>/checkpoint.pt "
+             "for later evaluation (see eval_agreement.py)",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -457,6 +463,15 @@ def main():
     if args.mlflow:
         mlflow.log_metrics(final_metrics)
         mlflow.end_run()
+
+    if args.save_dir:
+        os.makedirs(args.save_dir, exist_ok=True)
+        ckpt_path = os.path.join(args.save_dir, "checkpoint.pt")
+        torch.save(
+            {"state_dict": model.state_dict(), "args": vars(args), "width_mult": width_mult, "depth_mult": depth_mult},
+            ckpt_path,
+        )
+        print(f"Saved checkpoint to {ckpt_path}")
 
 
 if __name__ == "__main__":
