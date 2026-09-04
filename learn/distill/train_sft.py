@@ -312,6 +312,19 @@ def main():
              "alongside n_embd. Requires --mup and --n_layer. See apply_depth_mup_scaling()'s docstring.",
     )
     parser.add_argument("--mup_base_depth", type=int, default=4, help="reference n_layer the depth-muP scaling is computed against")
+    parser.add_argument("--wandb", action="store_true", help="log this run to Weights & Biases")
+    parser.add_argument("--wandb_project", default="thinker-distill")
+    parser.add_argument("--mlflow", action="store_true", help="log this run to a local/file-based MLflow tracking store")
+    parser.add_argument(
+        "--mlflow_tracking_uri", default="sqlite:////home/jdomguia/thinker/mlflow.db",
+        help="MLflow tracking URI -- defaults to a local SQLite DB on the Grid'5000 home (plain file:// store is "
+             "deprecated/maintenance-mode in current MLflow). No server process needed; consult later with "
+             "`mlflow ui --backend-store-uri <this>` run interactively on the frontend.",
+    )
+    parser.add_argument("--mlflow_experiment", default="thinker-distill")
+    parser.add_argument("--run_name", default=None, help="shared run name for W&B/MLflow; defaults to an auto-generated one")
+    parser.add_argument("--wandb_group", default=None, help="W&B group tag, e.g. to cluster a sweep's runs together on the dashboard")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="AdamW weight decay (was previously hardcoded to the torch default, not sweepable)")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -354,6 +367,24 @@ def main():
     # meaningful (see README.md's "Student size" notes on why this split matters more at small scale).
     print(f"Model: {num_params / 1e6:.1f}M params total = {core_params / 1e6:.1f}M core + {head_params / 1e6:.1f}M head (random init, arch={args.base_config}), device={device}")
 
+    run_config = {
+        "base_config": args.base_config, "n_layer": config.n_layer, "n_embd": config.n_embd, "n_head": config.n_head,
+        "block_size": args.block_size, "batch_size": args.batch_size, "lr": args.lr, "max_steps": args.max_steps,
+        "kd_alpha": args.kd_alpha if args.teacher_targets else None, "mup": args.mup, "mup_base_width": args.mup_base_width if args.mup else None,
+        "width_mult": width_mult, "num_params_M": num_params / 1e6, "core_params_M": core_params / 1e6, "head_params_M": head_params / 1e6,
+        "depth_mup": args.depth_mup, "mup_base_depth": args.mup_base_depth if args.depth_mup else None, "depth_mult": depth_mult,
+        "weight_decay": args.weight_decay,
+    }
+    if args.wandb:
+        import wandb
+        wandb.init(project=args.wandb_project, name=args.run_name, group=args.wandb_group, config=run_config)
+    if args.mlflow:
+        import mlflow
+        mlflow.set_tracking_uri(args.mlflow_tracking_uri)
+        mlflow.set_experiment(args.mlflow_experiment)
+        mlflow.start_run(run_name=args.run_name)
+        mlflow.log_params(run_config)
+
     train_ds = JsonlTextDataset(args.train_file, tokenizer, args.block_size, teacher_targets=args.teacher_targets)
     print(f"Train examples: {len(train_ds)}" + (f" (KD against {args.teacher_targets}, K={train_ds.k})" if args.teacher_targets else ""))
     k = train_ds.k if args.teacher_targets else None
@@ -363,9 +394,9 @@ def main():
     )
 
     if args.mup:
-        optimizer = torch.optim.AdamW(build_mup_param_groups(model, args.lr, width_mult))
+        optimizer = torch.optim.AdamW(build_mup_param_groups(model, args.lr, width_mult), weight_decay=args.weight_decay)
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     model.train()
 
     start = time.time()
@@ -399,8 +430,14 @@ def main():
             if step % args.log_every == 0 or step == 1:
                 if args.teacher_targets:
                     print(f"step {step} loss {loss.item():.4f} (ce {ce.item():.4f} kd {kd.item():.4f})")
+                    step_metrics = {"loss": loss.item(), "ce": ce.item(), "kd": kd.item()}
                 else:
                     print(f"step {step} loss {loss.item():.4f}")
+                    step_metrics = {"loss": loss.item()}
+                if args.wandb:
+                    wandb.log(step_metrics, step=step)
+                if args.mlflow:
+                    mlflow.log_metrics(step_metrics, step=step)
             elapsed_min = (time.time() - start) / 60
             if step >= args.max_steps or elapsed_min >= args.max_time_minutes:
                 done = True
@@ -412,6 +449,14 @@ def main():
     print(f"training_seconds: {elapsed:.1f}")
     print(f"num_steps:        {step}")
     print(f"num_params_M:     {num_params / 1e6:.2f}")
+
+    final_metrics = {"best_loss": min(losses), "training_seconds": elapsed, "num_steps": step}
+    if args.wandb:
+        wandb.log(final_metrics)
+        wandb.finish()
+    if args.mlflow:
+        mlflow.log_metrics(final_metrics)
+        mlflow.end_run()
 
 
 if __name__ == "__main__":
