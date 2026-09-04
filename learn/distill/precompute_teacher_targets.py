@@ -121,7 +121,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input_file", required=True, help="JSONL from a prepare_*_data.py script (needs a 'text' field)")
     parser.add_argument("--model_dir", required=True, help="local Teacher snapshot dir, or a Hub repo id")
-    parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    parser.add_argument(
+        "--dtype", default="auto", choices=["auto", "bfloat16", "float16", "float32"],
+        help="\"auto\" (default) keeps the checkpoint's own stored dtype -- required for the FP8 checkpoint: "
+             "forcing bfloat16 dequantizes the whole model before it touches VRAM (~55.6 GB vs. ~30.9 GB "
+             "native FP8), which silently triggers CPU offload and a ~50-100x throughput collapse on GPUs "
+             "with less than ~56 GB VRAM (found 2026-09-04 on an A100 40GB; see qwen3.8-27b-notes.md). Only "
+             "override this to a concrete dtype when using --quantization (bnb needs a real compute dtype).",
+    )
     parser.add_argument("--top_k", type=int, default=32)
     parser.add_argument(
         "--hidden_layers", default="none",
@@ -152,7 +159,12 @@ def main():
         examples = [json.loads(line) for line in f]
     print(f"Loaded {len(examples)} examples from {args.input_file}", flush=True)
 
-    dtype = getattr(torch, args.dtype)
+    if args.dtype == "auto":
+        if args.quantization != "none":
+            raise ValueError("--dtype auto is only valid with --quantization none (bnb needs a concrete compute dtype, e.g. --dtype bfloat16)")
+        dtype = "auto"
+    else:
+        dtype = getattr(torch, args.dtype)
     print("Detected GPU(s):", flush=True)
     describe_gpus()
     print(f"Loading Teacher {args.model_dir} in {args.dtype} ...", flush=True)
