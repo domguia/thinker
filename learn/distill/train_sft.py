@@ -227,6 +227,23 @@ def apply_depth_mup_scaling(model, depth_mult):
         block.mlp.register_forward_hook(scale_mlp_output)
 
 
+def save_checkpoint(path, model, optimizer, step, losses, args, width_mult, depth_mult):
+    """Saves everything needed to exactly resume training (state_dict +
+    optimizer state, so Adam's momentum/variance isn't reset) or to later
+    evaluate the model (args + width_mult/depth_mult, as eval_agreement.py
+    needs to reconstruct the architecture and reapply depth-muP's hooks).
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    torch.save(
+        {
+            "state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
+            "step": step, "losses": losses, "args": vars(args),
+            "width_mult": width_mult, "depth_mult": depth_mult,
+        },
+        path,
+    )
+
+
 def topk_kd_loss(student_logits, teacher_indices, teacher_values, teacher_residual, teacher_mask):
     """KL(teacher || student) over the (K+1)-way categorical formed by the
     Teacher's Top-K token indices plus one merged "everything else" bucket.
@@ -328,8 +345,24 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=0.01, help="AdamW weight decay (was previously hardcoded to the torch default, not sweepable)")
     parser.add_argument(
         "--save_dir", default=None,
-        help="if set, save the final model (state_dict + reconstruction args) to <save_dir>/checkpoint.pt "
-             "for later evaluation (see eval_agreement.py)",
+        help="if set, save the final model (state_dict + optimizer state + reconstruction args) to "
+             "<save_dir>/checkpoint.pt, for later evaluation (see eval_agreement.py) or resuming (--resume_from).",
+    )
+    parser.add_argument(
+        "--checkpoint_every", type=int, default=0,
+        help="if set (and --save_dir is set), also save a checkpoint every N steps, overwriting the same "
+             "<save_dir>/checkpoint.pt -- besteffort jobs on Grid'5000 can be preempted with no warning at any "
+             "time (observed within ~25 minutes in this project), so a real training run of any real length "
+             "should set this rather than relying on the final-only save.",
+    )
+    parser.add_argument(
+        "--resume_from", default=None,
+        help="path to a checkpoint.pt (from --save_dir/--checkpoint_every) to resume training from -- restores "
+             "model + optimizer state and the step counter/loss history, so muP's Adam momentum isn't reset "
+             "and best_loss/num_steps in the final report reflect the FULL run, not just this invocation. "
+             "Does NOT restore the DataLoader's exact shuffle position (a new epoch/shuffle order starts on "
+             "resume) -- a known simplification, fine for the short validation-slice runs this project uses "
+             "so far, revisit if resuming mid-epoch on a full-size dataset ever matters.",
     )
     args = parser.parse_args()
 
@@ -405,8 +438,17 @@ def main():
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     model.train()
 
+    step, losses = 0, []
+    if args.resume_from:
+        ckpt = torch.load(args.resume_from, map_location=device)
+        model.load_state_dict(ckpt["state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        step = ckpt["step"]
+        losses = ckpt["losses"]
+        print(f"Resumed from {args.resume_from} at step {step} (best_loss so far: {min(losses):.6f})")
+
     start = time.time()
-    step, losses, done = 0, [], False
+    done = False
     while not done:
         for batch in train_loader:
             batch = {k: v.to(device) for k, v in batch.items()}
@@ -444,6 +486,8 @@ def main():
                     wandb.log(step_metrics, step=step)
                 if args.mlflow:
                     mlflow.log_metrics(step_metrics, step=step)
+            if args.save_dir and args.checkpoint_every and step % args.checkpoint_every == 0:
+                save_checkpoint(os.path.join(args.save_dir, "checkpoint.pt"), model, optimizer, step, losses, args, width_mult, depth_mult)
             elapsed_min = (time.time() - start) / 60
             if step >= args.max_steps or elapsed_min >= args.max_time_minutes:
                 done = True
@@ -465,12 +509,8 @@ def main():
         mlflow.end_run()
 
     if args.save_dir:
-        os.makedirs(args.save_dir, exist_ok=True)
         ckpt_path = os.path.join(args.save_dir, "checkpoint.pt")
-        torch.save(
-            {"state_dict": model.state_dict(), "args": vars(args), "width_mult": width_mult, "depth_mult": depth_mult},
-            ckpt_path,
-        )
+        save_checkpoint(ckpt_path, model, optimizer, step, losses, args, width_mult, depth_mult)
         print(f"Saved checkpoint to {ckpt_path}")
 
 
