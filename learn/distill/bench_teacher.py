@@ -111,8 +111,16 @@ def load_model_and_tokenizer(model_dir, dtype, num_gpus=None, attn_implementatio
     for attn_impl in attn_candidates:
         kwargs = dict(
             torch_dtype=dtype, device_map="auto", max_memory=max_memory, attn_implementation=attn_impl,
-            quantization_config=quantization_config,
         )
+        # Only pass quantization_config when we actually want on-the-fly
+        # (bnb) quantization. Passing quantization_config=None explicitly
+        # was suspected (2026-09-05) to suppress transformers' own
+        # auto-detection of a checkpoint's *native* quantization scheme
+        # (e.g. the FP8 Teacher's quant_method=fp8/fmt=e4m3) -- omit the key
+        # entirely instead so that auto-detection from the checkpoint's own
+        # config.json can still kick in.
+        if quantization_config is not None:
+            kwargs["quantization_config"] = quantization_config
         try:
             try:
                 model = AutoModelForImageTextToText.from_pretrained(model_dir, **kwargs)
@@ -128,6 +136,29 @@ def load_model_and_tokenizer(model_dir, dtype, num_gpus=None, attn_implementatio
             model = None
     if model is None:
         raise last_error
+
+    # Guard against a real silent-corruption failure mode found 2026-09-05
+    # (see qwen3.8-27b-notes.md's "CRITICAL" section): if the checkpoint's
+    # own config declares a quantization scheme but the loaded model wasn't
+    # actually wired up with a quantizer, transformers has discarded the
+    # dequantization scale tensors (e.g. *.weight_scale_inv) and loaded the
+    # raw quantized bytes reinterpreted as the compute dtype -- numerically
+    # wrong, not just unoptimized. Fail loudly instead of returning a model
+    # that looks fine but produces meaningless outputs.
+    declared_quant = getattr(model.config, "quantization_config", None) or getattr(
+        getattr(model.config, "text_config", None), "quantization_config", None
+    )
+    if declared_quant and not getattr(model, "is_quantized", False):
+        raise RuntimeError(
+            f"{model_dir}'s config declares quantization_config={declared_quant!r} but the "
+            "loaded model reports is_quantized=False -- this transformers version is silently "
+            "discarding the dequantization scale tensors and loading raw quantized bytes "
+            "reinterpreted as the compute dtype (numerically wrong, not just unoptimized). "
+            "See qwen3.8-27b-notes.md's 'CRITICAL' section (found 2026-09-05). Use the "
+            "checkpoint's bf16 counterpart instead, or fix/upgrade the transformers quantizer "
+            "support before trusting outputs from this checkpoint."
+        )
+
     model.eval()
     return model, tokenizer
 
