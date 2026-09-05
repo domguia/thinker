@@ -382,3 +382,36 @@ Depth-muP-lite substantially restores transfer at both deeper tiers, and at the 
 
 **Practical upshot (current)**: `--mup --depth_mup --mup_base_depth 4 --lr 0.01` is now a credible candidate default for the model-size-tier roadmap — tune once at the smallest/shallowest tier as originally intended, transfer to both width and depth increases together. Given the remaining (if reduced) gap at 150M, this isn't yet a slam-dunk "always use this" result off a single 200-example slice; worth confirming on a larger validation slice (or the real training set) before committing it as the new default for the next tiers (1B/3B-core), but it's a real, working fix for the depth confound identified above, not just a diagnosis this time.
 
+### ⚠️ Critical correctness bug found (2026-09-05): the FP8 Teacher's weights were never actually dequantized
+
+While validating the FP8-vs-bf16 evaluation methodology (comparing Top-K
+outputs from `Qwen/Qwen3.8-27B-FP8` against `Qwen/Qwen3.8-27B` bf16 on the
+same 40-example slice), found **0% top-1 agreement** — nowhere near the
+expected ~96-99% from the reference quantization literature. Root cause,
+confirmed directly by inspecting the loaded model: `transformers`
+(5.17.0.dev0) never applies the FP8 `weight_scale_inv` dequantization scale
+for this checkpoint (`quant_method: fp8`, `fmt: e4m3`) — every scale tensor
+is loaded then discarded as `UNEXPECTED`, `model.is_quantized` is `None`,
+and every linear module is a plain `nn.Linear` holding the raw FP8 bytes
+reinterpreted as bf16. Full writeup and evidence in
+`learn/distill/qwen3.8-27b-notes.md`'s new "CRITICAL" section.
+
+**This means every KD run above (`EXP-003/004/005`, the LR/kd_alpha/weight_decay
+sweep, the Depth-muP-lite results in this same section) trained against
+Top-K Teacher targets precomputed from this broken FP8 load path** — the
+loss numbers are real, but the "Teacher signal" being distilled was
+numerically incoherent, not real Qwen3.8-27B knowledge. The muP/Depth-muP
+transfer conclusions (about LR/optimizer behavior across width and depth)
+are probably still valid as relative comparisons — the targets were
+garbage but *consistently* garbage across all three tiers, and the question
+being tested was whether a given LR/depth-correction transfers, not how
+good the resulting student is. But no number here should be read as
+evidence of real distillation quality, and the combined-loss magnitudes
+(0.19-2.36 across these tables) don't mean what they were assumed to mean.
+
+**Not yet fixed.** Practical path forward: regenerate Teacher targets from
+the bf16 checkpoint (verified correct — confident, structured logits) for
+any new precompute run; decide separately whether `EXP-003/004/005` are
+worth rerunning against real targets before trusting any Teacher-signal-
+quality conclusion from them.
+
