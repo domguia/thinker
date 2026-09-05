@@ -204,6 +204,42 @@ literature reviewed so far, treat as a starting point. Duration scales
 linearly with D: double every number below for a 20×N (Chinchilla-like)
 budget, or halve for a more aggressive 5×N bet.
 
+**Updated 2026-09-05 with real measured throughput** (superseding the FLOP/MFU-assumption table below): `EXP-003/004/005` give one real single-GPU wall-clock data point per tier, using the actual Teacher-vocab-aligned total param count (core + tied head) and the real `train_sft.py` KD loop (`--batch_size 4 --block_size 512`, no `torch.compile`, no multi-GPU):
+
+| Student size (core) | Total params (core+head) | GPU (single) | Measured throughput | D = 10×N (tokens) | Wall-clock @ D |
+|---|---|---|---|---|---|
+| 40M | 41.1M | L40S (`abacus26`) | 10,807 tok/s (409,600 tok / 37.9s) | 411M | ~10.6 h |
+| 150M | 406.2M | A100 40GB (`abacus21`) | 4,491 tok/s (409,600 tok / 91.2s) | 4.06B | ~251 h (10.5d) ❌ |
+| 500M | 810.8M | L40S (`abacus26`) | 5,300 tok/s (409,600 tok / 77.3s) | 8.11B | ~425 h (17.7d) ❌ |
+
+❌ = exceeds Grid'5000's ~1-week single-reservation limit (would need checkpoint/resume across multiple besteffort reservations, now implemented — see `--checkpoint_every`/`--resume_from`).
+
+**Why these numbers are much higher than the old table below**: backing out
+achieved TFLOPS from these measurements (`6 × N × tok/s`) gives roughly
+1.5% MFU at 40M-core, 3.5% at 150M-core (A100), 14% at 500M-core (L40S) —
+far below the 15-35% assumed in the old table, because `--batch_size 4
+--block_size 512` (2048 tokens/step) is tiny: too small to keep the GPU
+compute-bound, especially at low param counts where per-step Python/kernel-
+launch overhead dominates. MFU clearly improves with model size here (more
+work per launched kernel), so these single-point measurements shouldn't be
+read as a fixed hardware ceiling — a larger batch size (untested so far)
+would very likely close much of this gap, and is worth trying before
+committing to a long real training reservation.
+
+**Not measured yet, deliberately not estimated**: 1B/3B-core rows, and every
+GPU type other than the two above (P100, V100, A40, H100, multi-GPU
+configurations). The old table's numbers for those cells came from a fixed
+MFU assumption now shown to be wrong by ~2-20×, and `train_sft.py` has no
+multi-GPU/distributed support yet, so a "×N GPUs" column would need that
+implemented (and benchmarked) before it means anything. Given the trend of
+increasing MFU with model size, 1B/3B-core would likely fare better than a
+naive linear extrapolation from the 40M-core point — but that's a guess,
+not a measurement. Get a real batch-size sweep and a real 1B-core data point
+before trusting any duration estimate at that scale.
+
+<details>
+<summary>Old table (2026-09-03, FLOP/MFU-assumption based — superseded above, kept for history)</summary>
+
 MFU (achieved vs. peak FLOPs) assumptions, given no FlashAttention on
 Pascal/Volta and an unoptimized training loop: P100/V100 ~15-20%, A100/A40
 ~30%, H100 ~35%.
@@ -218,13 +254,12 @@ Pascal/Volta and an unoptimized training loop: P100/V100 ~15-20%, A100/A40
 
 ❌ = exceeds Grid'5000's ~1-week single-reservation limit. ⚠️ = right at it.
 
-**Not yet corrected**: these estimates used `N` = the *total* size implied by
-the old (misleading, gpt2-vocab) numbers, not `N` = core + the real ~254M
-tied-head table now measured with the Teacher's vocabulary. Real compute
-scales with the total, so actual wall-clock at each tier will be higher than
-shown here (e.g. the 150M-core row's real total is 406M, ~2.7× the FLOPs
-this row assumes) — revisit this table with real per-tier totals before
-using it to plan a long reservation.
+This table also used `N` = the *total* size implied by the old (misleading,
+gpt2-vocab) numbers, not the real Teacher-vocab-aligned totals — both errors
+(wrong N, and an MFU assumption ~2-20× too optimistic) compounded to make
+every cell here far too fast.
+
+</details>
 
 **Sizing methodology (settled 2026-09-04): tiers are core size, not total
 size.** Once the student's vocabulary is aligned with the Teacher's
