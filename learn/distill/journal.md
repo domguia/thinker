@@ -63,3 +63,23 @@ methodology that are worth remembering later but don't belong in any of those.
   (4) missing `pillow`/`torchvision` in the Nantes `teacher311` env causing
   `AutoProcessor.from_pretrained` to fail (Rennes' copy of the env had them,
   Nantes' didn't — per-site envs can drift).
+- **Fixed and verified the FP8 bug same day.** Root cause:
+  `load_model_and_tokenizer` passed `quantization_config=None` *explicitly*,
+  which suppressed transformers' auto-detection of the checkpoint's native
+  FP8 scheme. Fix: omit the kwarg entirely unless bnb quantization is
+  requested. Re-ran the FP8-vs-bf16 comparison: **98.92% top-1 agreement**,
+  matching the ~98.9% (8-bit) literature reference almost exactly — real
+  confirmation, not just a plausible-looking fix. A load-time guard
+  (`model.is_quantized` check) was tried as defense-in-depth but had to be
+  removed: transformers clears that flag on a *correct* dequantization too
+  (compute capability < 8.9 legitimately dequantizes to bf16), so it
+  couldn't distinguish correct from corrupted — no reliable generic
+  load-time invariant found. Full writeup in `qwen3.8-27b-notes.md`'s
+  "RESOLVED" section.
+- Besteffort preemption was aggressive today across Rennes and Nantes —
+  lost 4-5 separate GPU reservations mid-debug (some after 20-90 min of
+  slow shard loading, wasting the work). A Grid5000-wide scan for a free
+  Ampere+/Hopper node repeatedly came up empty; ended up submitting a
+  besteffort job with a broad `cluster='X' OR cluster='Y' OR cluster='Z'`
+  property and letting OAR auto-start it once resources freed, rather than
+  manually re-polling/re-submitting each time.

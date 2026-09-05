@@ -409,9 +409,14 @@ good the resulting student is. But no number here should be read as
 evidence of real distillation quality, and the combined-loss magnitudes
 (0.19-2.36 across these tables) don't mean what they were assumed to mean.
 
-**Not yet fixed.** Practical path forward: regenerate Teacher targets from
-the bf16 checkpoint (verified correct — confident, structured logits) for
-any new precompute run; decide separately whether `EXP-003/004/005` are
-worth rerunning against real targets before trusting any Teacher-signal-
-quality conclusion from them.
+**Fixed and verified same day.** Root cause: `load_model_and_tokenizer`
+passed `quantization_config=None` explicitly, suppressing transformers'
+auto-detection of the checkpoint's native FP8 scheme. Fix: omit the kwarg
+unless bnb quantization is requested. Re-ran the comparison after the fix:
+**98.92% top-1 agreement** vs bf16 (matches the ~98.9% 8-bit literature
+reference) — confirms the fix and validates the comparison methodology.
+Full writeup in `learn/distill/qwen3.8-27b-notes.md`'s "RESOLVED" section.
+`EXP-003/004/005` above still predate the fix and used the broken load path
+— still worth deciding whether to rerun them against real Teacher targets
+before trusting any Teacher-signal-quality conclusion from them.
 
