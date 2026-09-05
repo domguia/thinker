@@ -5,7 +5,38 @@ Notes specific to the Teacher model chosen for distillation
 `README.md` (`prepare_*`, `train_sft.py`, `precompute_teacher_targets.py`).
 Referenced from the README.
 
-## ⚠️ CRITICAL (2026-09-05): the FP8 checkpoint has been loading corrupted weights all along
+## ✅ RESOLVED (2026-09-05, same day): FP8 loading bug fixed and re-verified
+
+**Root cause confirmed and fixed.** `bench_teacher.py`'s `load_model_and_tokenizer`
+was passing `quantization_config=None` *explicitly* to `from_pretrained()`,
+which suppressed `transformers`' own auto-detection of the checkpoint's
+native FP8 scheme entirely. Fix: only pass `quantization_config` when
+on-the-fly bnb quantization is actually requested; omit the kwarg otherwise
+so auto-detection from the checkpoint's own `config.json` can run. Verified
+directly: `transformers` now prints `"FP8 quantized models is only
+supported on GPUs with compute capability >= 8.9 ... We will default to
+dequantizing the model to bf16"` on load (A100, compute capability 8.0) —
+i.e. it now recognizes the scheme and performs a real (scale-applied)
+dequantization to bf16, rather than silently discarding the scale tensors.
+`model.is_quantized == False` after this is *expected and correct* (the
+model has been converted to a real bf16 model in memory), not a bug
+indicator — the earlier guard's use of that flag as the sole check was
+based on a wrong assumption; the actual proof is output quality.
+
+**Re-ran the FP8-vs-bf16 comparison with the fix**: **98.92% top-1
+agreement**, **100% "reference top-1 appears in test's top-32"** — matching
+almost exactly the ~98.9% (8-bit) reference point from the quantization
+literature cited below. This both confirms the fix works and validates the
+comparison methodology itself (the original point of this exercise).
+
+**Still true**: `EXP-003/004/005` and the LR/kd_alpha/weight_decay sweep
+predate this fix and used the broken load path — their Teacher targets are
+still not trustworthy as real Teacher signal (see the original finding
+below, kept for the record).
+
+---
+
+### Original finding (2026-09-05, now fixed above): the FP8 checkpoint had been loading corrupted weights all along
 
 **`transformers` (5.17.0.dev0, the version installed in `teacher311`) does
 not apply FP8 dequantization for this checkpoint.** Confirmed by inspecting
@@ -48,28 +79,32 @@ was about optimizer/LR behavior, not target quality) — but no result from
 these runs should be read as evidence about how well the student tracks the
 *real* Teacher's knowledge. That question is still completely open.
 
-**Not yet fixed — next steps**:
-1. Regenerate Teacher targets from the **bf16 checkpoint** (`Qwen/Qwen3.8-27B`,
-   confirmed working) instead of the FP8 one, for any new precompute run.
-   Costs ~55.6 GB VRAM instead of ~31 GB and loads/runs noticeably slower on
-   the storage seen this session, but is the only currently-verified-correct
-   option.
-2. Investigate whether a newer/different `transformers` version (or an
-   explicit `quantization_config` passed to `from_pretrained`, rather than
-   relying on auto-detection) adds real support for this exact quant method
-   (`quant_method: fp8`, `fmt: e4m3`, dynamic activation scaling) on
-   `Qwen3_5ForConditionalGeneration` — would restore the ~31GB VRAM / faster
-   FP8 native-tensor-core benefit on Hopper/Ada if fixed.
-3. Update `bench_teacher.py`/`precompute_teacher_targets.py` to default to
-   the bf16 repo, or at minimum hard-fail (not silently proceed) when loading
-   a checkpoint whose `config.json` declares `quantization_config` but the
-   loaded model reports `is_quantized != True` — this exact silent-corruption
-   failure mode should never pass without at least a loud warning.
-4. Decide whether `EXP-003/004/005` are worth rerunning against real bf16
-   Teacher targets before drawing any conclusions that depend on Teacher
-   signal quality (muP/Depth-muP transfer conclusions about LR/optimizer
-   behavior are probably fine as-is; anything about KD loss *magnitude* or
-   "how well the student learned" is not).
+**Original next-steps list (superseded by the RESOLVED section above for
+item 3 — kept for the parts still open)**:
+1. ~~Regenerate Teacher targets from the bf16 checkpoint instead of FP8~~ —
+   no longer necessary: the FP8 checkpoint now loads correctly (98.92%
+   top-1 agreement vs bf16, verified above) and stays at its native ~31GB
+   footprint on Hopper/Ada, or dequantizes correctly to ~55.6GB bf16 on
+   older GPUs (A100 and below) — both paths now produce real outputs.
+2. Native FP8 tensor-core compute (the speed benefit beyond just correctness)
+   still requires compute capability ≥ 8.9 (Hopper/Ada: H100, L40S) per
+   transformers' own reported message; Ampere and older always dequantize to
+   bf16 for compute (now correctly, just not faster).
+3. ~~Add a load-time guard~~ — tried and removed (see the `NOTE` in
+   `bench_teacher.py`'s `load_model_and_tokenizer`): `model.is_quantized`
+   and `model.config.quantization_config` both get cleared by transformers
+   on a *correct* dequantization too, so they can't distinguish "correct"
+   from "silently corrupted" — no reliable generic load-time invariant was
+   found. The real prevention is the `quantization_config` kwarg fix; any
+   future change to quantization loading should be re-verified with
+   `compare_teacher_precision.py` against a known-good reference, not a
+   model attribute check.
+4. `EXP-003/004/005` and the LR/kd_alpha/weight_decay sweep still predate
+   this fix and used the broken load path — still worth deciding whether to
+   rerun them against real Teacher targets before trusting any conclusion
+   that depends on Teacher signal quality (muP/Depth-muP transfer
+   conclusions about LR/optimizer behavior are probably fine as-is; anything
+   about KD loss *magnitude* or "how well the student learned" is not).
 
 ## Model identity
 

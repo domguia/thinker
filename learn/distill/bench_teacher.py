@@ -137,27 +137,23 @@ def load_model_and_tokenizer(model_dir, dtype, num_gpus=None, attn_implementatio
     if model is None:
         raise last_error
 
-    # Guard against a real silent-corruption failure mode found 2026-09-05
-    # (see qwen3.8-27b-notes.md's "CRITICAL" section): if the checkpoint's
-    # own config declares a quantization scheme but the loaded model wasn't
-    # actually wired up with a quantizer, transformers has discarded the
-    # dequantization scale tensors (e.g. *.weight_scale_inv) and loaded the
-    # raw quantized bytes reinterpreted as the compute dtype -- numerically
-    # wrong, not just unoptimized. Fail loudly instead of returning a model
-    # that looks fine but produces meaningless outputs.
-    declared_quant = getattr(model.config, "quantization_config", None) or getattr(
-        getattr(model.config, "text_config", None), "quantization_config", None
-    )
-    if declared_quant and not getattr(model, "is_quantized", False):
-        raise RuntimeError(
-            f"{model_dir}'s config declares quantization_config={declared_quant!r} but the "
-            "loaded model reports is_quantized=False -- this transformers version is silently "
-            "discarding the dequantization scale tensors and loading raw quantized bytes "
-            "reinterpreted as the compute dtype (numerically wrong, not just unoptimized). "
-            "See qwen3.8-27b-notes.md's 'CRITICAL' section (found 2026-09-05). Use the "
-            "checkpoint's bf16 counterpart instead, or fix/upgrade the transformers quantizer "
-            "support before trusting outputs from this checkpoint."
-        )
+    # NOTE (2026-09-05): a real bug existed here where transformers silently
+    # discarded the FP8 checkpoint's *.weight_scale_inv dequantization scale
+    # tensors instead of applying them -- see qwen3.8-27b-notes.md's
+    # "RESOLVED" section for the full story. Root cause: this function used
+    # to pass quantization_config=None *explicitly*, which suppressed
+    # transformers' own auto-detection of the checkpoint's native scheme;
+    # fixed above by omitting the kwarg entirely instead. A load-time guard
+    # checking model.is_quantized/model.config.quantization_config was tried
+    # here as defense-in-depth but had to be removed: transformers clears
+    # both of those *even on a correct, real dequantization* (compute
+    # capability < 8.9 legitimately triggers "dequantizing to bf16" with the
+    # scale properly applied), so the attribute can't distinguish "correct"
+    # from "silently corrupted" -- it was dead code that never fired either
+    # way. No reliable generic load-time invariant was found; the real
+    # prevention is the kwarg fix above. If touching quantization loading
+    # again, re-verify with compare_teacher_precision.py against a known-good
+    # reference (bf16) rather than trusting a model attribute.
 
     model.eval()
     return model, tokenizer
