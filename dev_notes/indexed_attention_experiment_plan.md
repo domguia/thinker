@@ -319,6 +319,20 @@ Réutiliser `learn/distill/precompute_teacher_targets.py` et `topk_kd_loss()` (d
 | Comportement d'assistant cohérent maintenu | Le design "sans FF" n'a pas sacrifié la fluidité de base |
 | Dégradation nette de fluidité/grammaire | Revenir sur le résultat de Phase 1bis "avec/sans FF" — probable que la capacité de calcul non-linéaire manquante affecte aussi la génération de surface, pas seulement le raisonnement multi-sauts |
 
+## Phase 10 — KB persistante apprise (Product-Key-Memory-style) — nouvelle capacité, pas encore implémentée
+
+**Décision de l'utilisateur (2026-09-13)** : au-delà de la récupération par épisode déjà testée (Phase 1bis/2), le modèle doit aussi pouvoir **construire sa propre KB long-terme avec des embeddings appris** — accumuler de la connaissance à travers les exemples d'entraînement, pas seulement récupérer ce qui est donné en contexte. Cf. spec §8bis pour la proposition d'implémentation (niveau de mémoire additionnel, $(K,V)$ appris comme paramètres, façon Product-Key Memory — Lample et al. 2019 / "Memory Layers at Scale", Meta 2024).
+
+**Hypothèse** : sur un corpus où les faits **récurrent réellement à travers les exemples** (contrairement à `kb_retrieval`/`kb_chain_retrieval`, délibérément à faits uniques par épisode), le modèle apprend à écrire dans la mémoire persistante l'information réutilisable plutôt que de la re-dériver à chaque fois — testable en mesurant si la performance sur des faits récurrents s'améliore avec le nombre de fois qu'ils ont été vus en entraînement (signature d'accumulation), à distinguer d'une performance plate qui indiquerait que tout passe par la KB par épisode sans accumulation réelle.
+
+**Corpus proposés (question de l'utilisateur)** : `TinyStories` (déjà dans `learn/distill/prepare_general_data.py`, faits/relations simples récurrents) pour un premier test peu coûteux, puis `open-r1/OpenR1-Math-220k` (déjà dans le pipeline) pour un test plus proche de la thèse (formules/identités factuelles réutilisables, pas seulement du vocabulaire général).
+
+**Protocole (esquisse, à affiner)** : entraîner sur un sous-ensemble à faits limités (nombre contrôlé de faits/relations distincts, répétés across exemples avec une fréquence variable), comparer accuracy/perplexité par fréquence d'occurrence du fait en entraînement (bucket rare/moyen/fréquent), ≥3 seeds. Diagnostic d'attribution causale (déjà standard dans ce plan) adapté : vérifier que l'attention se concentre sur les slots de la mémoire persistante pour les faits récurrents fréquents, pas sur la KB par épisode ni sur le registre.
+
+**Dépendance** : nécessite que `IndexedThinker` (pas le transformer dense de `train_sft.py`, qui ne sert qu'à valider le pipeline de distillation) soit le modèle réellement entraîné — cette phase est donc postérieure au branchement effectif de l'architecture Indexed Attention dans le pipeline de distillation, pas bloquante pour les phases 0-9 qui testent le mécanisme indépendamment de ce branchement.
+
+**Ne remplace aucune phase existante** : la KB par épisode (Phase 1bis/2) reste le bon banc d'essai pour la récupération ; cette phase teste l'**accumulation**, une capacité distincte et complémentaire.
+
 ## Ce que ce plan laisse volontairement de côté
 
 No-Op/largeur adaptative, curriculum de largeur "large→étroit" — reportées après la Phase 7. Les introduire plus tôt ajouterait des variables libres avant d'avoir une base fiable pour juger si elles aident.
