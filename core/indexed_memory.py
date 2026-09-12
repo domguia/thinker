@@ -28,14 +28,15 @@ class LevelCompressor(nn.Module):
     """
     Pools blocks of `block_size` children (K, V) pairs into `n_slots` parent
     (K, V) pairs via learned queries (Perceiver-style cross-attention pooling,
-    M=1 by default — spec §5.1), followed by a residual feed-forward on each
-    of the pooled K and V (a real Perceiver block is attention *and* FF — the
-    first version of this module only had the attention half, which limited a
-    parent node to a convex combination of its children with no nonlinear
-    transform capacity; caught in review, see spec §11bis). The *same*
-    instance is reused at every level of the hierarchy, i.e. all weights
-    (pooling query and both FFs) are shared across levels ("share weight of
-    the compressor no matter the stage" — spec §1/§5.1).
+    M=1 by default — spec §5.1). Pure attention-weighted pooling, no
+    feed-forward: per spec §-1, the compressor's job is to summarize what is
+    already stored in the KB's leaves, not to hold learned factual content of
+    its own — a FF here would let the compressor's weights start encoding
+    facts about specific compressed patterns rather than just recombining
+    whatever content came from the KB itself (an earlier version added a
+    residual FF; removed after review, see spec §11bis). The *same* instance
+    is reused at every level of the hierarchy, i.e. weights are shared across
+    levels ("share weight of the compressor no matter the stage" — spec §1/§5.1).
 
     A single attention score (query vs. children keys) is used to pool both K
     and V: this is what makes the parent key a genuine summary of "what this
@@ -43,35 +44,19 @@ class LevelCompressor(nn.Module):
     weighting.
     """
 
-    def __init__(self, d_model: int, n_slots: int = 1, d_hid: int = None):
+    def __init__(self, d_model: int, n_slots: int = 1):
         super().__init__()
-        d_hid = d_hid or 4 * d_model
         self.n_slots = n_slots
         self.query = nn.Parameter(torch.randn(n_slots, d_model) * d_model ** -0.5)
 
-        self.norm_k = RMSNorm(d_model)
-        self.ff_k_in = nn.Linear(d_model, d_hid)
-        self.ff_k_out = nn.Linear(d_hid, d_model)
-
-        self.norm_v = RMSNorm(d_model)
-        self.ff_v_in = nn.Linear(d_model, d_hid)
-        self.ff_v_out = nn.Linear(d_hid, d_model)
-
-    def pool(self, children_k: torch.Tensor, children_v: torch.Tensor):
-        """Attention-weighted pooling only (no FF) — exposed separately for testing."""
-        # children_k, children_v: (B, P, C, d) -> pooled_k, pooled_v: (B, P, M, d)
+    def forward(self, children_k: torch.Tensor, children_v: torch.Tensor):
+        # children_k, children_v: (B, P, C, d) -> parent_k, parent_v: (B, P, M, d)
         B, P, C, d = children_k.shape
         q = self.query.view(1, 1, self.n_slots, d).expand(B, P, self.n_slots, d)
         scores = torch.einsum('bpmd,bpcd->bpmc', q, children_k) / math.sqrt(d)
         weights = F.softmax(scores, dim=-1)
-        pooled_k = torch.einsum('bpmc,bpcd->bpmd', weights, children_k)
-        pooled_v = torch.einsum('bpmc,bpcd->bpmd', weights, children_v)
-        return pooled_k, pooled_v
-
-    def forward(self, children_k: torch.Tensor, children_v: torch.Tensor):
-        pooled_k, pooled_v = self.pool(children_k, children_v)
-        parent_k = pooled_k + self.ff_k_out(F.gelu(self.ff_k_in(self.norm_k(pooled_k))))
-        parent_v = pooled_v + self.ff_v_out(F.gelu(self.ff_v_in(self.norm_v(pooled_v))))
+        parent_k = torch.einsum('bpmc,bpcd->bpmd', weights, children_k)
+        parent_v = torch.einsum('bpmc,bpcd->bpmd', weights, children_v)
         return parent_k, parent_v
 
 

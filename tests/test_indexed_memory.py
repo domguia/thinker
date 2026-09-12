@@ -68,11 +68,6 @@ class TestGradientFlow(unittest.TestCase):
         self.assertIsNotNone(mem.compressor.query.grad)
         self.assertTrue(torch.any(mem.compressor.query.grad != 0))
 
-        for name in ['ff_k_in', 'ff_k_out', 'ff_v_in', 'ff_v_out']:
-            w = getattr(mem.compressor, name).weight
-            self.assertIsNotNone(w.grad, f"compressor.{name} got no gradient")
-            self.assertTrue(torch.any(w.grad != 0), f"compressor.{name} gradient is all-zero")
-
         self.assertIsNotNone(mem.source_bias.weight.grad)
         self.assertTrue(torch.all(mem.source_bias.weight.grad.abs().sum(dim=-1) > 0),
                          "both source_bias rows (input=0, kb=1) must receive gradient")
@@ -100,21 +95,17 @@ class TestGradientFlow(unittest.TestCase):
 
 
 class TestNumericalReference(unittest.TestCase):
-    def test_compressor_pooling_matches_manual_reference(self):
-        # Tests the attention-weighted pooling in isolation (LevelCompressor.pool),
-        # independently of the residual FF added on top of it (see the dedicated
-        # FF test below) — keeps this check focused on the highest-risk part
-        # (indexing/transpose bugs in the einsum-based pooling).
+    def test_compressor_matches_manual_reference(self):
+        # explicit python loops, no einsum/view, using the exact same learned
+        # query parameter — catches indexing/transpose bugs in the pooling.
         torch.manual_seed(0)
         d, C, P, B = 4, 3, 2, 1
         compressor = LevelCompressor(d, n_slots=1)
         children_k = torch.randn(B, P, C, d)
         children_v = torch.randn(B, P, C, d)
 
-        pooled_k, pooled_v = compressor.pool(children_k, children_v)
+        parent_k, parent_v = compressor(children_k, children_v)
 
-        # manual reference: explicit python loops, no einsum/view, using the
-        # exact same learned query parameter.
         q = compressor.query[0]  # (d,)
         ref_k = torch.zeros(B, P, 1, d)
         ref_v = torch.zeros(B, P, 1, d)
@@ -132,28 +123,8 @@ class TestNumericalReference(unittest.TestCase):
                 ref_k[b, p, 0] = acc_k
                 ref_v[b, p, 0] = acc_v
 
-        torch.testing.assert_close(pooled_k, ref_k, atol=1e-5, rtol=1e-5)
-        torch.testing.assert_close(pooled_v, ref_v, atol=1e-5, rtol=1e-5)
-
-    def test_compressor_applies_residual_ff_on_top_of_pooling(self):
-        torch.manual_seed(0)
-        d, C, P, B = 4, 3, 2, 1
-        compressor = LevelCompressor(d, n_slots=1)
-        children_k = torch.randn(B, P, C, d)
-        children_v = torch.randn(B, P, C, d)
-
-        pooled_k, pooled_v = compressor.pool(children_k, children_v)
-        parent_k, parent_v = compressor(children_k, children_v)
-
-        expected_k = pooled_k + compressor.ff_k_out(F.gelu(compressor.ff_k_in(compressor.norm_k(pooled_k))))
-        expected_v = pooled_v + compressor.ff_v_out(F.gelu(compressor.ff_v_in(compressor.norm_v(pooled_v))))
-        torch.testing.assert_close(parent_k, expected_k, atol=1e-6, rtol=1e-6)
-        torch.testing.assert_close(parent_v, expected_v, atol=1e-6, rtol=1e-6)
-
-        # sanity: the FF must actually change the output (not a no-op), and the
-        # residual connection means output stays close-ish to the pooled input.
-        self.assertFalse(torch.allclose(parent_k, pooled_k))
-        self.assertFalse(torch.allclose(parent_v, pooled_v))
+        torch.testing.assert_close(parent_k, ref_k, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(parent_v, ref_v, atol=1e-5, rtol=1e-5)
 
     def test_unified_attention_matches_manual_reference(self):
         torch.manual_seed(0)
@@ -322,8 +293,6 @@ class TestOutputStreamsIndependence(unittest.TestCase):
         for i, layer in enumerate(stream.layers):
             self.assertIsNotNone(layer.q_proj.weight.grad, f"layer {i} q_proj got no gradient")
             self.assertTrue(torch.any(layer.q_proj.weight.grad != 0), f"layer {i} q_proj gradient is all-zero")
-            self.assertIsNotNone(layer.ff_in.weight.grad, f"layer {i} ff_in got no gradient")
-            self.assertTrue(torch.any(layer.ff_in.weight.grad != 0), f"layer {i} ff_in gradient is all-zero")
 
 
 if __name__ == '__main__':

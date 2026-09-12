@@ -2,7 +2,7 @@
 Minimal end-to-end model wiring HierarchicalMemory (core/indexed_memory.py) into
 the "Indexed Attention" main loop described in dev_notes/indexed_attention_spec.md §2:
 
-    R_t = R_{t-1} + MLP([O_kb_t ; O_sm_t ; R_{t-1}])
+    R_t = R_{t-1} + Linear([O_kb_t ; O_sm_t ; R_{t-1}])   (no FF — spec §-1)
     O_kb_t = HierarchicalMemory.attend(R_{t-1})          (input ∪ KB, hierarchical)
     O_sm_t = Attn(Q_sm(R_{t-1}), K^s, V^s)                (short-term memory, flat)
     new_K, new_V = split(W_sm(R_t))  -> appended to SM     (no stop-gradient, spec §4.1 reading B)
@@ -35,21 +35,23 @@ from core.layers import RMSNorm
 
 
 class OutputStreamLayer(nn.Module):
-    """One cross-attention + FF block of an OutputStream (pre-norm residual)."""
+    """
+    One cross-attention block of an OutputStream (pre-norm residual). No FF:
+    per spec §-1, a stream's job is to read out what the core already
+    extracted into SM, not to hold its own learned factual content — an FF
+    here would give the stream a place to memorize associations independently
+    of what is actually present in SM (an earlier version had one; removed
+    after review, see spec §11bis).
+    """
 
-    def __init__(self, d_model: int, d_hid: int = None):
+    def __init__(self, d_model: int):
         super().__init__()
-        d_hid = d_hid or 4 * d_model
         self.norm1 = RMSNorm(d_model)
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
-        self.norm2 = RMSNorm(d_model)
-        self.ff_in = nn.Linear(d_model, d_hid)
-        self.ff_out = nn.Linear(d_hid, d_model)
 
     def forward(self, x: torch.Tensor, sm_k: torch.Tensor, sm_v: torch.Tensor) -> torch.Tensor:
         q = self.q_proj(self.norm1(x))
         x = x + F.scaled_dot_product_attention(q, sm_k, sm_v)
-        x = x + self.ff_out(F.gelu(self.ff_in(self.norm2(x))))
         return x
 
 
@@ -65,11 +67,11 @@ class OutputStream(nn.Module):
     up with anything.
     """
 
-    def __init__(self, d_model: int, out_dim: int, n_layers: int = 1, d_hid: int = None):
+    def __init__(self, d_model: int, out_dim: int, n_layers: int = 1):
         super().__init__()
         assert 1 <= n_layers <= 3, "output streams are meant to stay lightweight (1-3 layers)"
         self.query_seed = nn.Parameter(torch.randn(1, d_model) * d_model ** -0.5)
-        self.layers = nn.ModuleList([OutputStreamLayer(d_model, d_hid) for _ in range(n_layers)])
+        self.layers = nn.ModuleList([OutputStreamLayer(d_model) for _ in range(n_layers)])
         self.head = nn.Linear(d_model, out_dim)
 
     def forward(self, sm_k: torch.Tensor, sm_v: torch.Tensor) -> torch.Tensor:
@@ -83,10 +85,9 @@ class OutputStream(nn.Module):
 class IndexedThinker(nn.Module):
     def __init__(self, vocab_size: int, d_model: int, n_register: int,
                  block_size: int, depth: int, n_slots: int = 1, n_head: int = 1,
-                 d_hid: int = None, sm_cap: int = None, stream_dims: dict = None,
+                 sm_cap: int = None, stream_dims: dict = None,
                  stream_n_layers: dict = None):
         super().__init__()
-        d_hid = d_hid or 4 * d_model
         self.d_model = d_model
         self.n_register = n_register
         self.sm_cap = sm_cap
@@ -99,9 +100,11 @@ class IndexedThinker(nn.Module):
         self.sm_q_proj = nn.Linear(d_model, d_model, bias=False)
         self.sm_write_proj = nn.Linear(d_model, 2 * d_model, bias=False)  # -> new K, new V
 
+        # Register update: a single linear recombination of [O_kb; O_sm; R],
+        # no hidden-expansion FF (spec §-1) — the core recombines what it
+        # retrieved, it does not hold its own learned factual associations.
         self.fuse_norm = RMSNorm(3 * d_model)
-        self.fuse_in = nn.Linear(3 * d_model, d_hid)
-        self.fuse_out = nn.Linear(d_hid, d_model)
+        self.fuse_proj = nn.Linear(3 * d_model, d_model, bias=False)
 
         stream_dims = stream_dims if stream_dims is not None else {'answer': vocab_size}
         stream_n_layers = stream_n_layers or {}
@@ -147,7 +150,7 @@ class IndexedThinker(nn.Module):
                 o_sm = torch.zeros_like(R)
 
             fused = torch.cat([o_kb, o_sm, R], dim=-1)
-            delta = self.fuse_out(F.gelu(self.fuse_in(self.fuse_norm(fused))))
+            delta = self.fuse_proj(self.fuse_norm(fused))
             R = R + delta
 
             new_k, new_v = self.sm_write_proj(R).chunk(2, dim=-1)
