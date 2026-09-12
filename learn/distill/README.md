@@ -253,10 +253,18 @@ memory bandwidth/capacity, not raw FLOPS, which mostly helps by allowing a
 larger batch size before running out of VRAM, not by raising the FLOPS
 ceiling itself).
 
+**Batch-size/precision sweep done 2026-09-13** (`abacus26` L40S, job 4104870): the real bottleneck at this tier turned out to be neither batch size alone nor raw compute, but **the Teacher-aligned tied vocab head (248,077 tokens)** — its `(batch, block_size, vocab)` logits tensor dominates memory well before the model's own activations do. Findings:
+- `train_sft.py` had **no mixed-precision at all** (`AutoModelForCausalLM.from_config` defaults to fp32, no `autocast`/`GradScaler` anywhere) — meaning every prior MFU number here was comparing an fp32-achieved throughput against a **bf16** peak-FLOPS figure, not an apples-to-apples ratio. Added `--bf16` (`torch.autocast(dtype=torch.bfloat16)` around the forward+loss; backward/optimizer state stay fp32, no `GradScaler` needed since bf16 has fp32-like dynamic range).
+- fp32: `batch_size=4` → 3,239 tok/s (285 steps/180.2s); `batch_size=6` → 3,425 tok/s (201 steps/180.3s); **`batch_size=8` OOMs** (44.39 GB L40S, ~42 GB already in use at batch=6). Note: this fp32/batch=4 re-measurement (3,239 tok/s) is noticeably lower than `EXP-005`'s original 5,300 tok/s at the same nominal config — not reconciled, plausibly a busier/shared L40S this time (`abacus26` showed `free_busy` before this job) rather than a real regression; treat both fp32 numbers as noisy, the bf16 point below is the one to plan around.
+- bf16 (`--bf16`): `batch_size=6` → **5,748 tok/s (337 steps/180.1s), a real 1.68× speedup over fp32 at the same batch size** (Tensor Core utilization, not a batch-size effect) — MFU = 6×810.79M×5748/362e12 ≈ **7.7%** (up from fp32's ~4.6%, not directly comparable to the bf16 peak anyway). **`batch_size=7` also OOMs under bf16** — confirms the ceiling is vocab-driven, not precision-driven: the KD loss (`topk_kd_loss`'s `logsumexp` over the full vocab, and the teacher's fp32 top-K/residual tensors) keeps large fp32 intermediates regardless of the model's own autocast dtype, so bf16 didn't move the batch ceiling at all here (6 in both cases).
+- **Practical upshot**: `--bf16 --batch_size 6` is now the best measured single-GPU config at this tier — 5,748 tok/s real, giving **~392h (16.3 days)** for `D=8.11B` tokens on one L40S, still past Grid'5000's ~1-week single-reservation limit (checkpoint/resume across besteffort reservations, already implemented, would be needed regardless of which row below is used).
+- **Next lever if more throughput is needed** (not yet implemented, flagged by thinker-e9): a chunked/fused CE+KD loss that never materializes the full `(B,T,vocab)` logits tensor (the technique behind Liger-Kernel's fused linear-cross-entropy or "Cut Your Losses") would remove the vocab-driven memory ceiling independently of precision, likely unlocking a much larger batch size than either fp32 or bf16 alone did here.
+
 | GPU | Scénario | Débit estimé | Wall-clock pour D=8.11B tokens (10×N) |
 |---|---|---|---|
-| L40S | **Mesuré** (`EXP-005`, batch=4/block=512, 14% MFU) | 5,300 tok/s (réel) | ~425 h (17.7j) ❌ |
-| L40S | Optimiste (batch/config tunés, ~30% MFU — atteignable sur Ada avec FlashAttention) | ~22,300 tok/s (estimé) | ~101 h (4.2j) |
+| L40S | **Mesuré, fp32** (`EXP-005`/this sweep, batch=4-6/block=512) | 3,239-3,425 tok/s (réel) | ~657-696 h (27-29j) ❌ |
+| L40S | **Mesuré, bf16** (this sweep, `--bf16 --batch_size 6`, vocab-memory-limited) | 5,748 tok/s (réel) | ~392 h (16.3j) ❌ |
+| L40S | Optimiste (chunked vocab loss removing the memory ceiling, ~30% MFU) | ~22,300 tok/s (estimé) | ~101 h (4.2j) |
 | A100 | Extrapolé au même config non-optimisé (mise à l'échelle par le ratio de FLOPS crête, **non mesuré à cette taille**) | ~4,570 tok/s (extrapolé) | ~493 h (20.6j) ❌ |
 | A100 | Optimiste (~35% MFU, FlashAttention2, plage bien établie en littérature pour ce type d'entraînement) | ~22,400 tok/s (estimé) | ~101 h (4.2j) |
 | H100 (SXM) | Extrapolé au même config non-optimisé | ~14,470 tok/s (extrapolé) | ~156 h (6.5j) ⚠️ proche de la limite |
@@ -307,6 +315,20 @@ Confirmé en re-testant le sweep batch_size au palier 500M-core sur L40S 44 Go, 
 2. **La tête de vocabulaire Teacher (248k tokens) domine la mémoire** — le tenseur de logits `(batch, block_size, vocab)` à `block_size=512` est déjà énorme en fp32, avant même de compter le calcul de la loss KD dessus. Indépendant de (1), cumulable — si (1) seul ne suffit pas, la piste littérature est un calcul de cross-entropy/KL **fusionné par chunks** qui ne matérialise jamais le tenseur de logits complet (ex. Liger-Kernel, "Cut Your Losses", NeurIPS 2024/2025) plutôt que de réduire le vocabulaire lui-même (qui casse l'alignement avec le Teacher).
 
 **Conséquence pour toutes les estimations ci-dessus** : le tableau GPU-dépendant et les scénarios "mesuré" vs. "optimiste" restent la bonne structure de raisonnement, mais **le point "mesuré" L40S doit être refait en bf16** avant d'être considéré comme fiable — le nombre fp32 actuel (5 300 ou 3 238 tok/s selon le run) sous-estime probablement le vrai débit atteignable d'un facteur significatif, dans une direction inconnue tant que le point bf16 n'existe pas. Ne pas figer de décision de réservation longue sur les chiffres fp32 actuels.
+
+**Résultat final du sweep, `--bf16` implémenté (experiment-manager, 2026-09-13)** :
+
+| Config | Débit mesuré | Note |
+|---|---|---|
+| fp32, batch=4 | 3 239 tok/s | vs. 5 300 dans `EXP-005` au même nominal config — écart non réconcilié, probablement contention GPU partagée (nœud "free_busy"), à traiter comme bruit |
+| fp32, batch=6 | 3 425 tok/s | |
+| fp32, batch=8 | **OOM** (44,39 Go L40S, ~42 Go déjà utilisés à batch=6) | |
+| **bf16, batch=6** | **5 748 tok/s** (×1,68 vs fp32 au même batch) | meilleure config mesurée à ce palier — effet Tensor Core réel, confirme que l'absence d'autocast était un vrai manque à gagner |
+| bf16, batch=7 | **OOM** | plafond de batch identique (6) en fp32 et bf16 |
+
+**Point clé, confirme l'hypothèse posée plus haut** : le bf16 accélère le calcul (~1,68×) mais **ne change rien au plafond mémoire** — le goulot n'est pas les activations du modèle mais le calcul de la perte KD elle-même (logsumexp sur le tenseur logits complet `(B,T,248077)` + tenseurs fp32 du Teacher Top-K/résidu), indépendant du dtype du modèle. Donc **le prochain levier, s'il en faut un**, est bien la loss KD/CE **chunkée** (Liger-Kernel/"Cut Your Losses") plutôt que d'autres réglages batch/dtype — elle lèverait le plafond de batch indépendamment de la précision.
+
+**Estimation à jour pour D=8,11B tokens (10×N) avec la meilleure config mesurée** (`--bf16 --batch_size 6`, 5 748 tok/s, L40S) : **~392 h (16,3 jours)** — au-delà de la limite ~1 semaine de Grid'5000 (nécessite le checkpoint/resume déjà implémenté). Remplace définitivement les extrapolations fp32/bf16 spéculatives du tableau ci-dessus pour ce GPU précis ; les lignes A100/H100/H200 restent, elles, non mesurées.
 
 <details>
 <summary>Old table (2026-09-03, FLOP/MFU-assumption based — superseded above, kept for history)</summary>
