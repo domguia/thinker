@@ -10,6 +10,7 @@ Ce document a été révisé après un audit critique (3 agents indépendants, a
 - **Généralisation obligatoire** : split train/held-out dès la Phase 0 — la KB et les paires clé/valeur de l'évaluation sont régénérées avec un seed disjoint de l'entraînement, jamais vues pendant l'entraînement. Le test de sur-apprentissage CPU actuel (`tests/test_indexed_memory.py`, même batch fixe train=eval) reste un test de **plomberie** (le pipeline tourne), pas un test de **mécanisme** — ne pas confondre les deux, et ne pas répéter cette faiblesse aux échelles GPU.
 - **Diagnostic d'attribution causale** : en plus de l'accuracy, logguer où se concentre le poids d'attention du softmax unifié pour l'exemple cible (le nœud de la hiérarchie contenant la bonne réponse doit recevoir le poids dominant). Sans ça, une accuracy élevée peut venir d'un raccourci (le registre ou la SM mémorisant l'info sans jamais passer par la KB) plutôt que du mécanisme qu'on prétend valider.
 - **Résultat ambigu** : si l'intervalle ± écart-type de deux conditions se chevauche, la règle par défaut est **+3 seeds supplémentaires, ou +1 palier d'échelle**, jamais conclure sur un signal ambigu.
+- **Résultat contradictoire à une hypothèse (consigne explicite de l'utilisateur, s'applique à toutes les phases)** : un résultat qui contredit une hypothèse de départ est un signal diagnostique sur **comment** atteindre l'objectif du projet (séparer raisonnement et connaissance, cf. spec §-1), pas un référendum sur **si** on continue dans cette direction. Ne pas abandonner la direction générale à cause d'un résultat isolé — investiguer d'abord ce qui, dans l'implémentation actuelle, empêche le résultat attendu, avant de remettre en cause la thèse elle-même. Exemple concret déjà traité : Phase 1bis, "avec-FF gagne" ne réfute pas §-1 (voir la table de décision de cette phase et la nuance ajoutée dans la spec).
 
 ## Parallélisation — comment aller plus vite
 
@@ -125,11 +126,13 @@ Répartition des rôles : cette session (design) identifie quelles tâches sont 
 
 **Raisonnement** : c'est exactement le point que l'audit scientifique a identifié comme jamais testé — la prémisse §-1 (FF = stockage de faits, donc à bannir partout) conflate "stocker des faits" et "disposer d'une capacité de calcul non-linéaire générale". Le modèle actuel n'a plus aucune non-linéarité apprise hors du softmax ; cette expérience est le premier test empirique de si c'est un problème réel ou juste théorique.
 
+**Précision importante (retour de l'utilisateur, à ne pas perdre de vue — voir spec §-1 "Comment interpréter un résultat avec-FF gagne")** : un résultat où `use_ff=True` gagne significativement **n'est pas un référendum sur la thèse de §-1** — il ne doit pas conduire à l'abandonner ni à remettre des FF partout par défaut. La question n'est pas "présence vs absence de non-linéarité" mais "où et à quelle échelle statistique" : un FF appliqué au contenu déjà récupéré pour l'exemple courant (composition/calcul) n'est pas la même chose qu'un FF qui mémoriserait des associations génériques à travers la distribution d'entraînement (stockage de faits). On a une direction ; la question posée par cette expérience est *comment* y arriver (quelle forme de capacité de calcul ajouter, où, sous quelle contrainte), pas *si* on continue dans cette direction.
+
 | Observation | Action |
 |---|---|
 | avec-FF ≈ sans-FF sur récupération pure ET sur une tâche demandant un calcul simple sur les valeurs récupérées | Prémisse §-1 supportée, garder sans-FF |
-| sans-FF nettement pire sur la tâche de calcul mais pas sur la récupération pure | Prémisse partiellement supportée — réintroduire un FF minimal dans la **boucle principale seulement** (pas le compresseur, pas les streams), pour la composition, pas le stockage |
-| sans-FF pire même sur récupération pure | Remettre en question §-1 dans son ensemble avant d'aller plus loin |
+| sans-FF nettement pire sur la tâche de calcul mais pas sur la récupération pure | Prémisse supportée dans son principe — réintroduire un FF minimal dans la **boucle principale seulement** (pas le compresseur, pas les streams), pour la composition, pas le stockage. Ajouter un diagnostic de non-mémorisation (le FF répond-il différemment selon le contenu de $O_{kb}$ pour deux exemples de même structure, ou converge-t-il vers une fonction fixe ?) avant de le considérer validé |
+| sans-FF pire même sur récupération pure | Ne pas abandonner §-1 — investiguer d'abord si le problème vient d'ailleurs (dimensionnement, LR, profondeur du compresseur) avant de conclure que la thèse elle-même est en cause ; ne remettre en question l'architecture complète qu'après avoir épuisé ces pistes |
 
 **Autres variantes déjà câblées, zéro code à ajouter :**
 - **$M=1$ vs $M>1$** (`n_slots`). Hypothèse : $M>1$ aide si les blocs contiennent plusieurs "aspects" distincts (littérature Slot Attention). Observation nulle → ambigu à cette échelle (cf. clause de résultat ambigu ci-dessus), pas "aucun bénéfice".
@@ -142,6 +145,24 @@ Répartition des rôles : cette session (design) identifie quelles tâches sont 
 **Reportées à une comparaison dédiée plus lourde** : softmax unifié vs gating façon NSA, routeur explicite vs implicite (nécessiteraient une seconde implémentation quasi complète).
 
 **Protocole** : tâche de la **Phase 0** (pas Phase 2 — correction d'une erreur de séquencement de la version précédente de ce plan, qui référençait une phase pas encore atteinte), 3 seeds par variante.
+
+## Phase 1quater — Balayage de $N_{\text{step}}$ (nombre d'itérations), à tester dès maintenant
+
+**Décision de l'utilisateur** : tester l'effet d'un nombre important d'itérations dès le début plutôt que d'attendre — c'est le mécanisme central de la thèse du projet (extraction itérative KB→SM puis traitement sur ce qui a été retenu, permettant un raisonnement plus long à budget de calcul inférieur puisque le core reste léger). L'utilisateur anticipe que plusieurs expériences seront nécessaires pour stabiliser ce balayage — ne pas s'arrêter à un premier résultat instable ou peu concluant.
+
+**Hypothèse** : l'accuracy sur une tâche qui *nécessite* du chaînage (Phase 2, multi-sauts) croît avec $N_{\text{step}}$ jusqu'à un plateau correspondant au nombre de sauts réels de la tâche ; au-delà, pas de dégradation. Sur la tâche à un seul saut (Phase 0/1bis), $N_{\text{step}}$ au-delà de 2 ne devrait apporter aucun gain — ce n'est **pas** le bon banc d'essai pour cette question (la tâche sature déjà à $N_{\text{step}}$ faible), Phase 2 est le vrai test.
+
+**Raisonnement** : le nombre d'itérations n'est pas un hyperparamètre secondaire ici — c'est directement ce que la séparation raisonnement/mémoire est censée permettre (§-1). Un échec à en tirer un bénéfice mesurable serait un signal important sur la thèse centrale, pas un détail d'optimisation.
+
+**Point de vigilance, déjà rencontré empiriquement dans cette session** : la fenêtre de LR stable s'est révélée étroite et sensible (plateau autour de `lr=3e-4` à `n_step=2`, cf. Phase -1) — rien ne garantit que cette même fenêtre reste valide à `n_step` plus grand (chaque itération ajoute un résidu supplémentaire à $R$, la dynamique d'accumulation change). **Balayer le LR à chaque valeur de $N_{\text{step}}$ testée, ne pas réutiliser un LR trouvé bon à un autre $N_{\text{step}}$ sans le revérifier** — exactement la leçon déjà tirée en Phase -1 pour `d_model`/`n_register`, applicable ici à l'identique.
+
+**Protocole** : sur la tâche multi-sauts de la Phase 2 (2 à 4 sauts), balayer $N_{\text{step}} \in \{1, 2, 4, 8, 16\}$ (au moins), avec un balayage LR fin à chaque valeur (pas un LR fixe reporté d'un autre point), ≥3 seeds par point une fois une fenêtre de LR stable identifiée.
+
+| Observation | Action |
+|---|---|
+| Accuracy croît avec $N_{\text{step}}$ jusqu'au nombre de sauts réels, plateau ensuite, LR stable trouvé à chaque palier | Confirme le mécanisme central — utiliser cette relation ($N_{\text{step}}$ ≈ nombre de sauts + marge) comme règle de dimensionnement pour les phases suivantes |
+| Pas de LR stable trouvé à grand $N_{\text{step}}$ malgré un balayage fin | **Ne pas conclure à un échec du mécanisme** — c'est potentiellement l'hypothèse d'instabilité du looped transformer (spec §11bis, déjà rencontrée puis écartée pour le cas `n_facts`, mais jamais testée spécifiquement pour un grand `n_step`) qui redevient pertinente ici. Tester la supervision intermédiaire (même section) avant d'abandonner |
+| Accuracy plafonne bien en-dessous du nombre de sauts réels même avec LR stable | La fusion $\Delta$ (projection linéaire, §6.1) ou la capacité du registre (`n_register`) sont candidats — revoir Phase 1bis (avec-FF) et Phase -1 (dimensionnement) en conjonction, pas isolément |
 
 ## Phase 1ter — Stream `thinking` en embedding (alignement Teacher, avancé plus tôt sur demande explicite)
 
