@@ -38,25 +38,40 @@ class LevelCompressor(nn.Module):
     is reused at every level of the hierarchy, i.e. weights are shared across
     levels ("share weight of the compressor no matter the stage" — spec §1/§5.1).
 
-    A single attention score (query vs. children keys) is used to pool both K
-    and V: this is what makes the parent key a genuine summary of "what this
-    block is about" while the parent value stays consistent with the same
-    weighting.
+    An intra-block position embedding is added to children K/V *before*
+    pooling (NSA-style — cross-checked against lucidrains/native-sparse-attention-pytorch,
+    see spec §11bis): pure content-weighted pooling is a set function, blind to
+    the order of children within a block, so two blocks with the same content
+    in a different order would compress to the exact same parent. This is a
+    genuine correctness gap (not a "no FF" violation — an additive embedding
+    holds no associative-memory capacity), caught by comparing against a
+    reference implementation rather than found by any test written from the
+    spec alone.
+
+    A single attention score (query vs. position-biased children keys) is
+    used to pool both K and V: this is what makes the parent key a genuine
+    summary of "what this block is about" while the parent value stays
+    consistent with the same weighting.
     """
 
-    def __init__(self, d_model: int, n_slots: int = 1):
+    def __init__(self, d_model: int, block_size: int, n_slots: int = 1):
         super().__init__()
         self.n_slots = n_slots
         self.query = nn.Parameter(torch.randn(n_slots, d_model) * d_model ** -0.5)
+        self.intrablock_pos = nn.Embedding(block_size, d_model)
 
     def forward(self, children_k: torch.Tensor, children_v: torch.Tensor):
         # children_k, children_v: (B, P, C, d) -> parent_k, parent_v: (B, P, M, d)
         B, P, C, d = children_k.shape
+        pos = self.intrablock_pos.weight[:C].view(1, 1, C, d)
+        biased_k = children_k + pos
+        biased_v = children_v + pos
+
         q = self.query.view(1, 1, self.n_slots, d).expand(B, P, self.n_slots, d)
-        scores = torch.einsum('bpmd,bpcd->bpmc', q, children_k) / math.sqrt(d)
+        scores = torch.einsum('bpmd,bpcd->bpmc', q, biased_k) / math.sqrt(d)
         weights = F.softmax(scores, dim=-1)
-        parent_k = torch.einsum('bpmc,bpcd->bpmd', weights, children_k)
-        parent_v = torch.einsum('bpmc,bpcd->bpmd', weights, children_v)
+        parent_k = torch.einsum('bpmc,bpcd->bpmd', weights, biased_k)
+        parent_v = torch.einsum('bpmc,bpcd->bpmd', weights, biased_v)
         return parent_k, parent_v
 
 
@@ -92,7 +107,7 @@ class HierarchicalMemory(nn.Module):
         # priority-bias: 0 = input, 1 = KB (spec §6.2)
         self.source_bias = nn.Embedding(2, d_model)
 
-        self.compressor = LevelCompressor(d_model, n_slots=n_slots)
+        self.compressor = LevelCompressor(d_model, block_size, n_slots=n_slots)
         self.level_norms = nn.ModuleList([RMSNorm(d_model) for _ in range(depth + 1)])
 
         self._levels_k = None

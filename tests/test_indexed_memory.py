@@ -100,31 +100,52 @@ class TestNumericalReference(unittest.TestCase):
         # query parameter — catches indexing/transpose bugs in the pooling.
         torch.manual_seed(0)
         d, C, P, B = 4, 3, 2, 1
-        compressor = LevelCompressor(d, n_slots=1)
+        compressor = LevelCompressor(d, block_size=C, n_slots=1)
         children_k = torch.randn(B, P, C, d)
         children_v = torch.randn(B, P, C, d)
 
         parent_k, parent_v = compressor(children_k, children_v)
 
         q = compressor.query[0]  # (d,)
+        pos = compressor.intrablock_pos.weight  # (C, d)
         ref_k = torch.zeros(B, P, 1, d)
         ref_v = torch.zeros(B, P, 1, d)
         for b in range(B):
             for p in range(P):
+                biased_k = [children_k[b, p, c] + pos[c] for c in range(C)]
+                biased_v = [children_v[b, p, c] + pos[c] for c in range(C)]
                 scores = torch.stack([
-                    (q * children_k[b, p, c]).sum() / math.sqrt(d) for c in range(C)
+                    (q * biased_k[c]).sum() / math.sqrt(d) for c in range(C)
                 ])
                 w = torch.softmax(scores, dim=0)
                 acc_k = torch.zeros(d)
                 acc_v = torch.zeros(d)
                 for c in range(C):
-                    acc_k += w[c] * children_k[b, p, c]
-                    acc_v += w[c] * children_v[b, p, c]
+                    acc_k += w[c] * biased_k[c]
+                    acc_v += w[c] * biased_v[c]
                 ref_k[b, p, 0] = acc_k
                 ref_v[b, p, 0] = acc_v
 
         torch.testing.assert_close(parent_k, ref_k, atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(parent_v, ref_v, atol=1e-5, rtol=1e-5)
+
+    def test_compressor_is_not_permutation_invariant(self):
+        # The exact bug class this fix addresses: without intra-block position
+        # info, shuffling the children within a block would leave the pooled
+        # output unchanged (a pure content-weighted sum is a set function).
+        torch.manual_seed(0)
+        d, C, P, B = 4, 3, 1, 1
+        compressor = LevelCompressor(d, block_size=C, n_slots=1)
+        children_k = torch.randn(B, P, C, d)
+        children_v = torch.randn(B, P, C, d)
+
+        parent_k, parent_v = compressor(children_k, children_v)
+
+        perm = torch.randperm(C)
+        parent_k_perm, parent_v_perm = compressor(children_k[:, :, perm], children_v[:, :, perm])
+
+        self.assertFalse(torch.allclose(parent_k, parent_k_perm, atol=1e-6),
+                          "compressor output must depend on intra-block order, not just content")
 
     def test_unified_attention_matches_manual_reference(self):
         torch.manual_seed(0)
