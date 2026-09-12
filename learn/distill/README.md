@@ -372,6 +372,109 @@ Next: continue up through the remaining core tiers (1B, 3B core) once
 there's a reason to move past pipeline validation into a real training
 budget.
 
+## Techniques to reduce training cost / facilitate learning (2026-09-13)
+
+Question raised: rather than only tuning batch size/MFU on the same fixed
+recipe, can we combine techniques from the "low-resource-compute
+distillation" literature to genuinely shrink the token/compute budget
+needed, so the first "credibility" checkpoint at a relevant scale
+(500M-core, §above) is reached faster? Literature review below, ranked by
+expected value vs. implementation cost for **this specific project**.
+
+### 1. Initialize the tied embedding/head from the Teacher's own table (cheap, high value, do first)
+
+The tied embedding+lm_head is already the **majority** of total params at
+small-to-mid core sizes (up to ~62% at 150M-core, per the sizing section
+above) — currently random-initialized like everything else. Since our
+tokenizer *is* the Teacher's own (248,077-token vocab, chosen specifically
+for alignment), the Teacher's own embedding matrix is a free, directly
+compatible source of a much better starting point than random init for a
+huge fraction of our parameters. Concretely: project the Teacher's
+`d_model`-wide embedding rows down to our student's (smaller) embedding
+dimension (a random projection or a truncated SVD/PCA over the Teacher's
+embedding matrix, computed once, offline, on CPU) instead of initializing
+that table from scratch. This doesn't require the student and Teacher to
+share an architecture — it only reuses the token representation, which is
+architecture-agnostic. Cheap (one offline matrix operation, no GPU
+training needed to produce it) and directly reduces the *effective* work
+the embedding/head must learn from data.
+
+### 2. Structured pruning + distillation of the *reasoning core* itself — does NOT apply here, flagged explicitly
+
+The highest-profile "facilitation" technique in the literature is NVIDIA's
+**Minitron** (pruning + light distillation retraining, up to **40x fewer
+tokens** than training from scratch) and **Sheared LLaMA** — both derive
+the student's weights *structurally* from the teacher's own weight
+matrices (depth or width pruning), then use a comparatively short
+distillation pass to recover accuracy. **This only works when student and
+teacher share the same architecture family** (the student literally is a
+subset of the teacher's layers/matmuls). Our Thinker core (recurrent
+weight-shared loop, no FF, external hierarchical KV memory) is a
+deliberately different architecture from the Teacher's own dense/hybrid
+gated-DeltaNet stack — there is no substructure of the Teacher's weights
+that *is* a Thinker. So the core 40x-fewer-tokens result **does not
+transfer to our reasoning core**, only to the embedding/head (point 1
+above, which shares no architectural assumption). Worth stating explicitly
+so this isn't chased as a false hope for the core itself.
+
+### 3. Data quality over quantity — Teacher-generated "textbook-quality" + on-policy data (high value, moderate cost)
+
+Two literature threads converge on the same actionable idea:
+- **Phi / "Textbooks Are All You Need"** (Gunasekar et al. 2023): phi-1
+  (1.3B) reached strong code-benchmark performance (50.6% HumanEval)
+  training on **~7B tokens** (a mix of filtered web + LLM-synthesized
+  "textbook-quality" exercises), ~100x less data than typical models of
+  similar capability at the time — the reported driver is data quality,
+  not scale.
+- **On-policy distillation (GKD, Agarwal et al. 2024; MiniLLM, Gu et al.
+  2023)**: training the student on its own (or the Teacher's) generated
+  sequences with Teacher feedback, rather than only static-corpus
+  logit-matching, gives a reported **1.7-2.1x sample-efficiency gain**
+  over standard KD across several task types.
+- **Combined, concrete plan for this project**: since the Teacher
+  (27B) is available locally, use it to *generate* task-aligned synthetic
+  training data — reasoning traces and retrieval/multi-hop examples
+  specifically shaped like the capabilities Thinker's architecture targets
+  (cf. `data/kb_chain_retrieval.py`-style structure, but real text) —
+  instead of relying only on generic scraped corpora (wikitext,
+  TinyStories) that don't specifically exercise the KB-retrieval mechanism
+  at all. This is both "textbook-quality" (curated/synthesized, not raw
+  web noise) and "on-policy" (the exact model whose knowledge we're
+  distilling produced it), and directly reduces the token budget needed
+  versus a generic corpus by concentrating supervision on what the
+  architecture actually needs to learn.
+
+### 4. Sequence-length curriculum (cheap, proven precedent, low risk)
+
+"Dataset Decomposition" (Pouransari et al., NeurIPS 2024): a variable
+sequence-length curriculum (short sequences first) reports **up to 6x
+faster training to target accuracy**, and instability is empirically
+correlated with long sequences especially early in training. Directly
+combinable with the curriculum-learning practice already validated
+elsewhere in this project (`n_facts`, `n_hops`) — same idea, applied to
+`--block_size` instead of task difficulty: start `train_sft.py` at a
+short `block_size`, increase once the model is past its early unstable
+phase, rather than fixed length throughout. Cheap to implement, no new
+data or architecture change needed.
+
+### Priority for this project, given limited time
+
+1. **Embedding/head init from the Teacher's own table** — do this first,
+   it's a pure offline preprocessing step, no training-loop change, and
+   the head is disproportionately expensive to learn from scratch at our
+   scale.
+2. **Teacher-generated task-aligned synthetic data** (reasoning +
+   retrieval) — moderate effort (need a generation pass through the
+   Teacher, already have `bench_teacher.py`/`precompute_teacher_targets.py`
+   plumbing to build on) but likely the single highest-leverage change to
+   the actual token budget `D`.
+3. **Sequence-length curriculum on `block_size`** — cheap add to the
+   training loop, low risk, do alongside the batch-size sweep already
+   requested from experiment-manager.
+4. Do **not** pursue core-architecture weight transfer/pruning from the
+   Teacher (point 2 above) — confirmed non-applicable given the
+   architectural mismatch, not worth the implementation time.
+
 ## Reference target: same-family smaller models (2026-09-12)
 
 The project's actual end goal is to demonstrate **reliable** distillation of
