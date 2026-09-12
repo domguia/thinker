@@ -21,9 +21,10 @@ implementation as ground truth. This keeps the new mechanism testable in
 isolation.
 
 Not implemented (out of MVP scope, see spec §7, §11bis): No-Op / adaptive
-width, decoupled Q_KB vs Q_SM projections, stochastic level dropping, SM
-capacity eviction beyond an optional hard cap, embedding-valued "thinking"
-streams (need a real Teacher, not available for the synthetic kb_retrieval task).
+width, stochastic level dropping, SM capacity eviction beyond an optional hard
+cap, embedding-valued "thinking" streams (need a real Teacher, not available
+for the synthetic kb_retrieval task). Q_KB vs Q_SM are already decoupled
+(`HierarchicalMemory.q_proj` vs `sm_q_proj` below are separate weights).
 """
 
 import torch
@@ -114,11 +115,14 @@ class IndexedThinker(nn.Module):
         })
 
     def forward(self, kb_tokens: torch.Tensor, kb_source_ids: torch.Tensor,
-                query_tokens: torch.Tensor, n_step: int):
+                query_tokens: torch.Tensor, n_step: int, kb_leaf_mask: torch.Tensor = None):
         """
         kb_tokens: (B, N) leaf token ids for the unified input∪KB sequence
             (N must equal block_size ** depth when depth > 0).
         kb_source_ids: (B, N) in {0, 1} (0 = input, 1 = KB).
+        kb_leaf_mask: optional (B, N) bool, True = real leaf, False = padding —
+            enables a curriculum over the number of real facts while keeping
+            `block_size`/`depth` fixed (see HierarchicalMemory.build).
         query_tokens: (B, Tq) token ids used to seed the register (mean-pooled
             embedding added to the learned initial register — a default choice,
             not specified by the spec).
@@ -132,7 +136,7 @@ class IndexedThinker(nn.Module):
         device = kb_tokens.device
 
         leaf_emb = self.embed(kb_tokens)
-        self.memory.build(leaf_emb, kb_source_ids)
+        self.memory.build(leaf_emb, kb_source_ids, leaf_mask=kb_leaf_mask)
 
         q_emb = self.embed(query_tokens).mean(dim=1, keepdim=True)  # (B, 1, d)
         R = self.register_init.unsqueeze(0).expand(B, -1, -1) + q_emb

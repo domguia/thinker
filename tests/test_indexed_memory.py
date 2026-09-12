@@ -48,6 +48,99 @@ class TestHierarchicalMemoryShapes(unittest.TestCase):
             mem.build(leaves, source_ids)
 
 
+class TestLeafPaddingMask(unittest.TestCase):
+    def test_no_nan_with_fully_masked_blocks(self):
+        # curriculum use case: only the first block is real, the rest is padding
+        # (an entire block masked out at the leaf level, and therefore at every
+        # level above it too) — must not produce NaN anywhere.
+        d, block_size, depth, B = 8, 4, 2, 2
+        N = block_size ** depth  # 16
+        mem = HierarchicalMemory(d, block_size, depth)
+        leaves = torch.randn(B, N, d)
+        source_ids = torch.ones(B, N, dtype=torch.long)
+        mask = torch.zeros(B, N, dtype=torch.bool)
+        mask[:, :block_size] = True  # only the first block is real
+
+        mem.build(leaves, source_ids, leaf_mask=mask)
+        for i, (k, v) in enumerate(zip(mem._levels_k, mem._levels_v)):
+            self.assertFalse(torch.isnan(k).any(), f"level {i} K has NaN")
+            self.assertFalse(torch.isnan(v).any(), f"level {i} V has NaN")
+
+        out = mem.attend(torch.randn(B, 1, d))
+        self.assertFalse(torch.isnan(out).any(), "attend() output has NaN")
+
+    def test_padded_leaf_content_does_not_affect_output(self):
+        # golden invariance test: attend() output must be identical regardless
+        # of what garbage is stored in masked-out (padding) leaf positions.
+        torch.manual_seed(0)
+        d, block_size, depth, B = 8, 4, 2, 1
+        N = block_size ** depth
+        n_real = block_size  # first block real, rest padded
+        mem = HierarchicalMemory(d, block_size, depth)
+        source_ids = torch.ones(B, N, dtype=torch.long)
+        mask = torch.zeros(B, N, dtype=torch.bool)
+        mask[:, :n_real] = True
+        query = torch.randn(B, 1, d)
+
+        real_leaves = torch.randn(B, n_real, d)
+        pad_a = torch.randn(B, N - n_real, d)
+        pad_b = torch.randn(B, N - n_real, d) * 50.0 + 7.0  # wildly different padding content
+
+        mem.build(torch.cat([real_leaves, pad_a], dim=1), source_ids, leaf_mask=mask)
+        out_a = mem.attend(query)
+
+        mem.build(torch.cat([real_leaves, pad_b], dim=1), source_ids, leaf_mask=mask)
+        out_b = mem.attend(query)
+
+        torch.testing.assert_close(out_a, out_b, atol=1e-5, rtol=1e-5)
+
+    def test_masking_also_correct_with_multihead(self):
+        # audit finding: the n_head>1 path had zero test coverage anywhere.
+        # Closing that gap here since this change touches attend()'s masking
+        # logic on both the n_head==1 and n_head>1 branches.
+        torch.manual_seed(0)
+        d, block_size, depth, B, n_head = 8, 4, 2, 2, 2
+        N = block_size ** depth
+        n_real = block_size
+        mem = HierarchicalMemory(d, block_size, depth, n_head=n_head)
+        source_ids = torch.ones(B, N, dtype=torch.long)
+        mask = torch.zeros(B, N, dtype=torch.bool)
+        mask[:, :n_real] = True
+        query = torch.randn(B, 1, d)
+
+        real_leaves = torch.randn(B, n_real, d)
+        pad_a = torch.randn(B, N - n_real, d)
+        pad_b = torch.randn(B, N - n_real, d) * 50.0 + 7.0
+
+        mem.build(torch.cat([real_leaves, pad_a], dim=1), source_ids, leaf_mask=mask)
+        out_a = mem.attend(query)
+        self.assertFalse(torch.isnan(out_a).any())
+
+        mem.build(torch.cat([real_leaves, pad_b], dim=1), source_ids, leaf_mask=mask)
+        out_b = mem.attend(query)
+
+        torch.testing.assert_close(out_a, out_b, atol=1e-5, rtol=1e-5)
+
+    def test_none_mask_behaves_like_all_real(self):
+        # backward compatibility: omitting leaf_mask must be identical to an
+        # explicit all-True mask.
+        torch.manual_seed(0)
+        d, block_size, depth, B = 8, 4, 2, 2
+        N = block_size ** depth
+        mem = HierarchicalMemory(d, block_size, depth)
+        leaves = torch.randn(B, N, d)
+        source_ids = torch.randint(0, 2, (B, N))
+        query = torch.randn(B, 1, d)
+
+        mem.build(leaves, source_ids)
+        out_none = mem.attend(query)
+
+        mem.build(leaves, source_ids, leaf_mask=torch.ones(B, N, dtype=torch.bool))
+        out_all_true = mem.attend(query)
+
+        torch.testing.assert_close(out_none, out_all_true, atol=1e-6, rtol=1e-6)
+
+
 class TestGradientFlow(unittest.TestCase):
     def test_gradient_reaches_every_level_and_both_source_biases(self):
         d, block_size, depth, B = 8, 2, 3, 2
@@ -202,7 +295,7 @@ class TestOverfitSanityCheck(unittest.TestCase):
         torch.manual_seed(0)
         n_facts, vocab_size = 4, 16
         ds = KBRetrievalDataset(n_facts=n_facts, vocab_size=vocab_size, seed=0)
-        kb_tokens, kb_source_ids, query_tokens, labels = ds.sample_batch(batch_size=8)
+        kb_tokens, kb_source_ids, kb_mask, query_tokens, labels = ds.sample_batch(batch_size=8)
 
         model = IndexedThinker(
             vocab_size=ds.total_vocab_size, d_model=32, n_register=1,
@@ -213,7 +306,7 @@ class TestOverfitSanityCheck(unittest.TestCase):
         losses = []
         for step in range(300):
             opt.zero_grad()
-            _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2)
+            _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2, kb_leaf_mask=kb_mask)
             logits = streams['answer']
             loss = F.cross_entropy(logits[:, 0, :], labels)
             loss.backward()
@@ -221,7 +314,7 @@ class TestOverfitSanityCheck(unittest.TestCase):
             losses.append(loss.item())
 
         with torch.no_grad():
-            _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2)
+            _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2, kb_leaf_mask=kb_mask)
             preds = streams['answer'][:, 0, :].argmax(dim=-1)
             acc = (preds == labels).float().mean().item()
 
@@ -235,7 +328,7 @@ class TestOverfitSanityCheck(unittest.TestCase):
         torch.manual_seed(0)
         n_facts, vocab_size = 4, 16
         ds = KBRetrievalDataset(n_facts=n_facts, vocab_size=vocab_size, seed=1)
-        kb_tokens, kb_source_ids, query_tokens, labels = ds.sample_batch(batch_size=8)
+        kb_tokens, kb_source_ids, kb_mask, query_tokens, labels = ds.sample_batch(batch_size=8)
 
         model = IndexedThinker(
             vocab_size=ds.total_vocab_size, d_model=32, n_register=1,
@@ -246,7 +339,7 @@ class TestOverfitSanityCheck(unittest.TestCase):
         losses = []
         for step in range(300):
             opt.zero_grad()
-            _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2)
+            _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2, kb_leaf_mask=kb_mask)
             logits = streams['answer']
             loss = F.cross_entropy(logits[:, 0, :], labels)
             loss.backward()
@@ -254,7 +347,7 @@ class TestOverfitSanityCheck(unittest.TestCase):
             losses.append(loss.item())
 
         with torch.no_grad():
-            _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2)
+            _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2, kb_leaf_mask=kb_mask)
             preds = streams['answer'][:, 0, :].argmax(dim=-1)
             acc = (preds == labels).float().mean().item()
 
@@ -275,13 +368,13 @@ class TestOutputStreamsIndependence(unittest.TestCase):
     def test_backward_on_one_stream_does_not_touch_the_other(self):
         torch.manual_seed(0)
         ds = KBRetrievalDataset(n_facts=1, vocab_size=8, seed=2)  # n_leaves=4, block_size=4, depth=1
-        kb_tokens, kb_source_ids, query_tokens, labels = ds.sample_batch(batch_size=4)
+        kb_tokens, kb_source_ids, kb_mask, query_tokens, labels = ds.sample_batch(batch_size=4)
 
         model = IndexedThinker(
             vocab_size=ds.total_vocab_size, d_model=16, n_register=1,
             block_size=4, depth=1, stream_dims={'answer': ds.total_vocab_size, 'thinking': 8},
         )
-        _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2)
+        _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2, kb_leaf_mask=kb_mask)
         loss = streams['answer'].sum()
         loss.backward()
 

@@ -12,8 +12,10 @@ CustomFlexDecoder machinery — per the spec, the existing implementation is not
 treated as ground truth here.
 
 Not implemented (out of MVP scope, see spec §7): No-Op / adaptive width, stop-gradient,
-decoupled Q_KB/Q_SM, stochastic level dropping, padding/masking of leaves (caller must
-supply exactly block_size ** depth leaves when depth > 0).
+stochastic level dropping. `build()`'s `leaf_mask` allows padding a variable number of
+real leaves up to a fixed `block_size ** depth` (needed for a curriculum that keeps the
+same hierarchy shape across stages); Q_KB/Q_SM are already decoupled (HierarchicalMemory
+vs IndexedThinker's SM query use separate projections).
 """
 
 import math
@@ -60,8 +62,10 @@ class LevelCompressor(nn.Module):
         self.query = nn.Parameter(torch.randn(n_slots, d_model) * d_model ** -0.5)
         self.intrablock_pos = nn.Embedding(block_size, d_model)
 
-    def forward(self, children_k: torch.Tensor, children_v: torch.Tensor):
+    def forward(self, children_k: torch.Tensor, children_v: torch.Tensor,
+                children_mask: torch.Tensor = None):
         # children_k, children_v: (B, P, C, d) -> parent_k, parent_v: (B, P, M, d)
+        # children_mask (optional): (B, P, C) bool, True = real leaf, False = padding.
         B, P, C, d = children_k.shape
         pos = self.intrablock_pos.weight[:C].view(1, 1, C, d)
         biased_k = children_k + pos
@@ -69,7 +73,15 @@ class LevelCompressor(nn.Module):
 
         q = self.query.view(1, 1, self.n_slots, d).expand(B, P, self.n_slots, d)
         scores = torch.einsum('bpmd,bpcd->bpmc', q, biased_k) / math.sqrt(d)
+        if children_mask is not None:
+            neg_inf = torch.finfo(scores.dtype).min
+            scores = scores.masked_fill(~children_mask.unsqueeze(2), neg_inf)
         weights = F.softmax(scores, dim=-1)
+        if children_mask is not None:
+            # a block that is entirely padding has all -inf scores -> softmax gives NaN;
+            # such a parent is itself masked out one level up, so its content only needs
+            # to be non-NaN (not meaningful) to avoid poisoning gradients through the mask.
+            weights = torch.nan_to_num(weights, nan=0.0)
         parent_k = torch.einsum('bpmc,bpcd->bpmd', weights, biased_k)
         parent_v = torch.einsum('bpmc,bpcd->bpmd', weights, biased_v)
         return parent_k, parent_v
@@ -112,13 +124,23 @@ class HierarchicalMemory(nn.Module):
 
         self._levels_k = None
         self._levels_v = None
+        self._levels_mask = None
 
-    def build(self, leaf_embeddings: torch.Tensor, source_ids: torch.Tensor) -> None:
+    def build(self, leaf_embeddings: torch.Tensor, source_ids: torch.Tensor,
+              leaf_mask: torch.Tensor = None) -> None:
         """
         leaf_embeddings: (B, N, d) raw token embeddings (pre K/V-projection).
         source_ids: (B, N) long tensor in {0, 1} (0 = input, 1 = KB).
-        N must equal block_size ** depth when depth > 0 (no padding/masking
-        implemented — see module docstring).
+        leaf_mask: optional (B, N) bool tensor, True = real leaf, False = padding.
+            Enables a fixed-shape curriculum (same block_size/depth across
+            curriculum stages, fewer real facts padded up to N — the same
+            pattern already used by the original ToyThinker's fixed
+            max_input_len slots, see dev_notes/indexed_attention_experiment_plan.md
+            Phase -1). Padding never contributes to any pooled/attended output
+            (masked before every softmax, at every level) and is never required
+            when leaf_mask is None (all leaves treated as real, prior behavior
+            unchanged).
+        N must equal block_size ** depth when depth > 0.
         """
         B, N, d = leaf_embeddings.shape
         if self.depth > 0:
@@ -131,47 +153,58 @@ class HierarchicalMemory(nn.Module):
         biased = leaf_embeddings + self.source_bias(source_ids)
         cur_k = self.k_proj(biased)
         cur_v = self.v_proj(biased)
+        cur_mask = leaf_mask if leaf_mask is not None else torch.ones(B, N, dtype=torch.bool, device=leaf_embeddings.device)
 
         levels_k = [cur_k]
         levels_v = [cur_v]
+        levels_mask = [cur_mask]
         for _ in range(self.depth):
             Bc, Nc, dc = cur_k.shape
             P = Nc // self.block_size
             children_k = cur_k.view(Bc, P, self.block_size, dc)
             children_v = cur_v.view(Bc, P, self.block_size, dc)
-            parent_k, parent_v = self.compressor(children_k, children_v)
+            children_mask = cur_mask.view(Bc, P, self.block_size)
+            parent_k, parent_v = self.compressor(children_k, children_v, children_mask=children_mask)
             parent_k = parent_k.reshape(Bc, P * self.n_slots, dc)
             parent_v = parent_v.reshape(Bc, P * self.n_slots, dc)
+            parent_mask = children_mask.any(dim=-1)  # (B, P): real if >=1 real child
+            parent_mask = parent_mask.unsqueeze(-1).expand(-1, -1, self.n_slots).reshape(Bc, P * self.n_slots)
             levels_k.append(parent_k)
             levels_v.append(parent_v)
-            cur_k, cur_v = parent_k, parent_v
+            levels_mask.append(parent_mask)
+            cur_k, cur_v, cur_mask = parent_k, parent_v, parent_mask
 
         self._levels_k = levels_k
         self._levels_v = levels_v
+        self._levels_mask = levels_mask
 
     def attend(self, query_input: torch.Tensor) -> torch.Tensor:
         """
         query_input: (B, T, d) raw register state (pre Q-projection).
         Returns (B, T, d): unified softmax attention output over all leaves
-        and all compressed levels (spec §5.2).
+        and all compressed levels (spec §5.2). Padded leaves/nodes (see
+        `build`'s `leaf_mask`) never receive attention weight.
         """
         assert self._levels_k is not None, "call build() before attend()"
 
         normed_k = [self.level_norms[i](k) for i, k in enumerate(self._levels_k)]
         k_all = torch.cat(normed_k, dim=1)
         v_all = torch.cat(self._levels_v, dim=1)
+        mask_all = torch.cat(self._levels_mask, dim=1)  # (B, S) bool, True = attend
 
         B, T, d = query_input.shape
         q = self.q_proj(query_input)
+        S = k_all.shape[1]
 
         if self.n_head > 1:
             hd = d // self.n_head
-            S = k_all.shape[1]
             q_h = q.view(B, T, self.n_head, hd).transpose(1, 2)
             k_h = k_all.view(B, S, self.n_head, hd).transpose(1, 2)
             v_h = v_all.view(B, S, self.n_head, hd).transpose(1, 2)
-            out = F.scaled_dot_product_attention(q_h, k_h, v_h)
+            attn_mask = mask_all.view(B, 1, 1, S)
+            out = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=attn_mask)
             out = out.transpose(1, 2).contiguous().view(B, T, d)
         else:
-            out = F.scaled_dot_product_attention(q, k_all, v_all)
+            attn_mask = mask_all.view(B, 1, S)
+            out = F.scaled_dot_product_attention(q, k_all, v_all, attn_mask=attn_mask)
         return out
