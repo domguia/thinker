@@ -23,6 +23,16 @@ La plupart des runs listés ci-dessous sont mutuellement indépendants (le résu
 
 Référence cluster : skill `grid5000` + `dev_notes/grid5000_usage.log.md`. Paliers déjà validés dans le chantier de distillation (`dev_notes/experiment.log.md`) : **dry-run** (`abacus3/10` A5000, `abacus22` A40), **KD/échelle moyenne** (`abacus26` 2×L40S, `chuc` 4×A100), **à éviter** (`abacus1/2` P100, `drac`, `chiclet` — pas de BF16/FlashAttention).
 
+### Consigne de rythme (temps limité pour ce projet — priorité à la vitesse d'itération)
+
+Les modèles testés à ce stade sont minuscules (`d_model` 32-256, quelques Mo, batch 16-64) — un seul run sur un A100/L40S entier laisse le GPU largement sous-utilisé. Directives concrètes pour l'agent d'exécution (`experiment-manager`) :
+
+- **Empiler plusieurs runs indépendants sur le même GPU.** À cette taille de modèle, rien n'empêche de lancer plusieurs processus Python concurrents sur un seul GPU (mémoire/compute largement disponibles) — ce n'est déconseillé que quand la charge sature déjà la carte, ce qui n'est pas le cas ici. Utiliser ça pour paralléliser les seeds/variantes d'une même phase plutôt que de les faire les uns après les autres sur le même GPU.
+- **Augmenter le batch size pour absorber le temps de calcul inutilisé** plutôt que de le laisser inoccupé — accélère la convergence en wall-clock sans coût matériel supplémentaire, tant que ça ne change pas la dynamique d'apprentissage de façon confondante (garder une trace de quel batch size a été utilisé par run, pour ne pas mélanger ça avec un vrai signal architectural).
+- **Lancer large maintenant plutôt qu'attendre une confirmation "propre" séquentielle avant le prochain lot.** Le temps disponible pour ce projet est limité — préférer lancer en parallèle tout ce qui est déjà spécifié dans ce plan (Phase 0 seeds restants, balayage Phase 1bis, curriculum n_facts, sondage Phase 1ter, diagnostics du blocage n_facts=64) plutôt que d'attendre qu'une phase soit entièrement "verte" avant de démarrer la suivante — les critères d'ambiguïté déjà définis plus haut (±σ, ≥3 seeds) trient le signal du bruit après coup, pas besoin d'attendre avant de lancer.
+- **Réserver activement d'autres nœuds** (pas seulement ceux déjà utilisés) dès qu'un lot de runs supplémentaire est prêt à partir — le palier dry-run est peu demandé, plusieurs réservations simultanées ne se bloquent pas mutuellement.
+- **Pendant les temps morts** (attente de résultats, nœuds en cours de libération) : profiling/optimisation du pipeline de données, tests de configurations plus larges (modèle/`d_model` plus grand, batch plus large) pour préparer les paliers suivants du plan à l'avance plutôt que de les découvrir seulement une fois arrivé dessus.
+
 ---
 
 ## Phase -1 — Dimensionnement (identifier les bonnes dimensions avant de juger l'architecture)
