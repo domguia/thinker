@@ -33,6 +33,32 @@ Les modèles testés à ce stade sont minuscules (`d_model` 32-256, quelques Mo,
 - **Réserver activement d'autres nœuds** (pas seulement ceux déjà utilisés) dès qu'un lot de runs supplémentaire est prêt à partir — le palier dry-run est peu demandé, plusieurs réservations simultanées ne se bloquent pas mutuellement.
 - **Pendant les temps morts** (attente de résultats, nœuds en cours de libération) : profiling/optimisation du pipeline de données, tests de configurations plus larges (modèle/`d_model` plus grand, batch plus large) pour préparer les paliers suivants du plan à l'avance plutôt que de les découvrir seulement une fois arrivé dessus.
 
+### Graphe de dépendances des tâches en cours (ce qui peut tourner maintenant, en parallèle, sans rien attendre)
+
+Répartition des rôles : cette session (design) identifie quelles tâches sont indépendantes et sur quels leviers jouer pour maximiser l'utilisation des ressources ; `experiment-manager` décide de la mécanique (nœuds, nombre de processus par GPU, ordonnancement OAR) — cette session ne maîtrise pas assez l'infrastructure pour trancher ça.
+
+**Totalement indépendantes entre elles, lançables toutes en même temps dès maintenant :**
+1. Phase 0 — seeds `depth=0` restants (déjà en cours).
+2. Phase 1bis — chaque variante × seed est un run isolé : avec/sans FF (priorité #1), `M=1` vs `M>1`, stop-gradient SM on/off, dropout de niveaux on/off. 4 variantes × 3 seeds = 12 runs, tous indépendants les uns des autres et du reste de cette liste.
+3. Curriculum `n_facts` (16→32→64) — thread indépendant du reste, mais **interne au thread : séquentiel** (le palier N+1 dépend de l'accuracy held-out atteinte au palier N, pas question de lancer 64 avant que 16 ait promu).
+4. Diagnostics du blocage `n_facts=64` (balayage `n_register`, batch size) — indépendant de 1-3.
+5. Phase 1ter — le **sondage** (cosinus/CKA couche par couche) peut démarrer **immédiatement**, sans attendre la fin du curriculum : il suffit d'un core déjà entraîné sur le stream `answer` seul (les checkpoints de la Phase 0 conviennent déjà) + un forward pass du Teacher (GPT-2 124M, léger — peut même tourner CPU-only sur un nœud sans GPU pendant que les GPU sont occupés ailleurs).
+
+**Dépendances réelles (à respecter) :**
+- Phase 1ter, étape "brancher le stream" → dépend de la fin du sondage (étape précédente du même thread), pas des autres threads.
+- Phase 2 (multi-sauts) → peut démarrer en parallèle dès maintenant avec la config déjà connue comme fonctionnelle (`lr=3e-4`, `n_facts=16`) plutôt que d'attendre un signal "propre" de Phase 1bis — le risque (mauvais hyperparamètre) est faible vu qu'on a déjà un point de fonctionnement validé.
+- Phase 3 (données réelles) → attend un vrai signal de Phase 2 (changement de tokenizer/vocabulaire, coût de mise en place plus élevé, moins rentable de lancer à l'aveugle).
+- Phase 4 (distillation) → attend Phase 3. Phase 5 (stratégie KB) et Phase 6 (muP) → indépendantes l'une de l'autre et peuvent tourner **en parallèle** de la Phase 4, pas après.
+
+**Leviers pour maximiser l'utilisation (ce que cette session peut spécifier sans connaître l'infra) :**
+- **Batch size** : les runs actuels (16-64) sont petits pour la mémoire disponible sur ces GPU — passer à 128-256+ absorbe du calcul autrement perdu, accélère la convergence en wall-clock. Ne pas mélanger un changement de batch size avec une conclusion architecturale sans le noter explicitement dans le log du run.
+- **Nombre de configs simultanées par GPU** : pas de règle fixe à donner sans mesurer — `experiment-manager` peut tester en pratique (2, puis 4, puis 8 processus concurrents) et reculer dès que le temps par run commence à se dégrader significativement.
+- **Utiliser les leftovers CPU/non-GPU** pour ce qui ne nécessite pas de GPU (sondage Phase 1ter avec un petit Teacher type GPT-2 124M, analyses/agrégation de résultats déjà tombés).
+
+### Protocole de modification de code
+
+`experiment-manager` a les mains libres pour modifier ses propres fichiers (`learn/indexed_attention/*`) sans validation préalable. **Pour toute modification touchant `core/` (architecture du modèle) : proposer d'abord à cette session plutôt que de committer directement** — cette session valide l'alignement avec les décisions de design déjà prises (spec, plan) avant que ça parte en exécution. Motif : `core/` porte les décisions architecturales tracées dans `indexed_attention_spec.md` ; un changement non coordonné là risquerait de créer une divergence entre ce que la spec documente et ce que le code fait réellement — exactement le genre de dérive silencieuse que la discipline `[NOTES]/[CONFIRMÉ]/[DÉFAUT]/[OUVERT]` du document cherche à éviter.
+
 ---
 
 ## Phase -1 — Dimensionnement (identifier les bonnes dimensions avant de juger l'architecture)
