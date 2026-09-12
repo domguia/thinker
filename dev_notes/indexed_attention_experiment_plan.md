@@ -158,6 +158,13 @@ Répartition des rôles : cette session (design) identifie quelles tâches sont 
 
 **Protocole** : sur la tâche multi-sauts de la Phase 2 (2 à 4 sauts), balayer $N_{\text{step}} \in \{1, 2, 4, 8, 16\}$ (au moins), avec un balayage LR fin à chaque valeur (pas un LR fixe reporté d'un autre point), ≥3 seeds par point une fois une fenêtre de LR stable identifiée.
 
+**Extrapolation à l'inférence, à ajouter dès qu'un premier checkpoint multi-sauts existe (précédent direct dans ce projet, `dev_notes/future_experiments.md` §3 : *"Step Extrapolation: demonstrate that increasing N_step at inference time continues to improve accuracy... beyond the steps seen during training"*, déjà prévu pour l'architecture Thinker d'origine)** : entraîner à un $N_{\text{step,train}}$ fixe (ex. 4, le nombre de sauts réels de la tâche), puis évaluer **en inférence seulement** (pas de ré-entraînement — les poids sont partagés entre itérations, donc c'est immédiat) à $N_{\text{step,test}} > N_{\text{step,train}}$ (ex. 8, 16). Peu coûteux (inférence pure) et à lancer en parallèle du reste dès qu'un checkpoint existe, sans attendre la fin du balayage complet ci-dessus.
+
+| Observation (extrapolation) | Action |
+|---|---|
+| Accuracy stable ou continue de s'améliorer au-delà de $N_{\text{step,train}}$ | Signal fort que le mécanisme généralise réellement au-delà de ce qu'il a vu — argument solide pour la thèse "raisonnement plus long à budget de calcul inférieur" |
+| Accuracy se dégrade nettement au-delà de $N_{\text{step,train}}$ | Le modèle a probablement appris une heuristique calée sur le nombre d'itérations d'entraînement plutôt qu'un mécanisme d'extraction généralisable — creuser avant de considérer $N_{\text{step}}$ comme un simple hyperparamètre de budget ajustable librement à l'inférence |
+
 | Observation | Action |
 |---|---|
 | Accuracy croît avec $N_{\text{step}}$ jusqu'au nombre de sauts réels, plateau ensuite, LR stable trouvé à chaque palier | Confirme le mécanisme central — utiliser cette relation ($N_{\text{step}}$ ≈ nombre de sauts + marge) comme règle de dimensionnement pour les phases suivantes |
