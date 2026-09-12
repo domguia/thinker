@@ -189,6 +189,51 @@ Idée de l'utilisateur (ligne 1824) : en début de traitement (itérations basse
 
 Point de vigilance soulevé par Gemini (ligne 1844, non contesté) : un resserrement trop strict interdit le *backtracking* — si une déduction tardive révèle un besoin imprévu d'information, le modèle doit garder la possibilité de rouvrir une fenêtre large ponctuellement. **[OUVERT]** — aucune formalisation mathématique proposée dans la conversation ; hors scope MVP (dépend du mécanisme de largeur adaptative §7.1, lui-même hors MVP).
 
+## 11bis. Output Streams (source : `raw/Distill-reasonning-stream.md`, absent des sections précédentes)
+
+Concept distinct de la hiérarchie KB (§5-6) mais qui touche directement à la question "les poids qui calculent la sortie sont-ils partagés ou indépendants ?" — à traiter dans ce document plutôt que de le laisser implicite.
+
+### Principe **[NOTES]**
+
+Le registre récurrent produit, à chaque itération $t$, un état $h^{(t)}$ qui est empilé dans la mémoire court terme (SM) : $K_{sm}, V_{sm} = \text{Proj}([h^{(1)}, \dots, h^{(T)}])$ — c'est exactement le buffer SM déjà utilisé par `IndexedThinker` (§11). Au lieu de lire l'état final du registre directement, **un ou plusieurs "Output Streams" légers (1-2 couches) interrogent ce buffer par leur propre cross-attention** :
+
+$$
+O_{\text{stream}_i} = \text{Attn}\big(Q_{\text{stream}_i}, K_{sm}, V_{sm}\big), \qquad \text{logits}_i = \text{Head}_i(O_{\text{stream}_i})
+$$
+
+**Point clé (répond directement à la question posée) : $Q_{\text{stream}_i}$ et $\text{Head}_i$ sont des poids propres à chaque stream $i$, non partagés entre streams, ni avec le core récurrent.** Citation directe : *« chaque Stream […] chacun train indépendamment »* ; *« vous pouvez geler le core et entraîner les output streams indépendamment »* (lignes 230, 307). Seul le buffer SM lui-même (une activation, pas un poids) est partagé en entrée de tous les streams.
+
+### Streams envisagés **[NOTES]**
+
+- **Stream Answer** (tokens) : supervisé par cross-entropy + Top-K KL du Teacher sur les logits finaux.
+- **Stream Thinking (embedding)** : auto-génératif sur des embeddings (pas de vocabulaire), aligné sur une couche médiane du Teacher (~40-65% de profondeur) via une perte de similarité/MSE — *« pour laisser le thinker un peu libre sur sa représentation interne »* (ligne 529).
+- **Stream Thinking (tokens)** : décodage explicite d'une chaîne de pensée `<think>...</think>`, introduit plus tard dans le curriculum.
+- Le nombre d'itérations du core **n'a pas besoin de correspondre** au nombre de couches du Teacher — c'est le mécanisme d'attention propre à chaque stream qui apprend à pondérer les pas récurrents pertinents pour sa tâche, pas un alignement pas-à-pas forcé (ligne 304, 478-479).
+
+### Curriculum d'extinction **[NOTES]**
+
+Idée notée (lignes 574-587) : les streams latents (embedding) sont utiles tôt dans l'entraînement pour guider le core, puis **atténués progressivement** (`weight decay sur la perte latente -> 0`) jusqu'à ne garder en inférence finale que les flux textuels visibles (Stream Thinking en tokens + Stream Answer). **[OUVERT]** — non formalisé mathématiquement (juste "atténuation linéaire" mentionnée, pas de fonction de schedule précisée dans le texte lu).
+
+### État d'implémentation
+
+**Corrigé dans cette session.** `IndexedThinker` expose désormais `self.streams: nn.ModuleDict[str, OutputStream]` (`core/indexed_thinker_model.py`) : chaque `OutputStream` a sa propre requête apprise (`query_seed`) + sa propre projection + sa propre tête, et interroge par cross-attention le **SM complet accumulé sur toute la boucle** (pas seulement l'état final `R`). `forward()` retourne `(R, stream_outputs)` — un dict `{nom: sortie}`, un par stream enregistré. Testé (`tests/test_indexed_memory.py::TestOutputStreamsIndependence`) : les paramètres de deux streams sont bien disjoints (aucun tensor partagé) et un `backward()` sur un seul stream ne peuple aucun gradient sur les poids d'un autre stream. Seul un stream `answer` (logits vocabulaire) est branché pour l'instant sur `data/kb_retrieval.py` ; un stream `thinking` en embedding nécessiterait un vrai Teacher (hors scope tant qu'on reste sur la tâche synthétique).
+
+## 11. Implémentation MVP (première version, testée localement sur CPU)
+
+Fichiers : `core/indexed_memory.py` (`HierarchicalMemory`, `LevelCompressor`), `core/indexed_thinker_model.py` (`IndexedThinker`), `data/kb_retrieval.py` (tâche synthétique), `tests/test_indexed_memory.py` (10 tests, tous verts).
+
+Choix concrets faits pendant l'implémentation, non explicitement fixés par la spec ci-dessus — **[DÉFAUT, implémentation]** :
+
+- **`Compress_θ` (§5.1)** : un unique jeu de $M$ requêtes apprises par la même instance à tous les niveaux ; les poids de pooling (un seul softmax sur les enfants) sont réutilisés à la fois pour résumer $K$ et pour agréger $V$ — une instanciation spécifique de "cross-attention Perceiver-style", plus simple qu'une paire de projections $K$/$V$ de sortie séparées. À raffiner si les tests empiriques suggèrent que $K$ et $V$ ont besoin d'être résumés différemment.
+- **Padding/masking** : non implémenté — `HierarchicalMemory.build()` exige `N == block_size**depth` exactement (`AssertionError` sinon). Pas un choix architectural, juste une simplification MVP assumée.
+- **`depth=0` dégénère en attention plate sans hiérarchie** — utilisé directement comme équivalent de la Baseline C (§9) dans les tests, sans code dédié supplémentaire.
+- **SM (§3)** : implémentée comme un simple buffer plat qui grandit par `APPEND` (pas de choix entre Options 1/2/3, qui restent `[OUVERT]`) ; les nouveaux $(K,V)$ sont produits par une unique projection du registre après fusion, pas par une requête $Q_e$ séparée ré-interrogeant la KB.
+- **Fusion $\Delta$ (§6.1, marqué `[OUVERT]` plus haut)** : résolue pour l'implémentation par $R_t = R_{t-1} + \text{MLP}(\text{RMSNorm}([O_{kb}; O_{sm}; R_{t-1}]))$ — concaténation simple suivie d'un MLP à 2 couches (GELU). Pas justifiée par les notes manuscrites, juste le choix le plus direct pour avoir un pipeline dérivable de bout en bout à tester.
+- **Amorçage du registre** : $R_0 = R_{\text{init}} + \bar E(\text{query})$ (embedding moyen de la requête ajouté au registre initial appris) — un choix arbitraire pour permettre au test de sur-apprentissage de fonctionner, pas une décision architecturale mûrie.
+- **Tâche de test (`data/kb_retrieval.py`)** : couvre uniquement le split "récupération pure" du §9 (une KB de faits distracteurs, une clé-requête, une valeur-cible) ; ne couvre pas encore "raisonnement pur" ni "multi-sauts" — répond partiellement à la question ouverte #6 en commençant par le split le plus simple à vérifier mécaniquement.
+
+Résultats des tests (CPU) : les 10 tests passent, y compris le test de sur-apprentissage (accuracy ≥ 90% sur un batch fixe de 8 exemples, hiérarchie profondeur 2) et son équivalent Baseline C (`depth=0`). Le test `TestRMSNormScaleBias` confirme empiriquement que la RMSNorm par niveau réduit un écart d'échelle brut de facteur >5 à un facteur <1.5 (risque identifié en §5.2, maintenant vérifié).
+
 ## Journal des questions ouvertes (à répondre quand vous voulez, je continue en parallèle)
 
 1. **§4.1** : "Plus de stop gradient" = abandon ou renforcement du stop-gradient ?
