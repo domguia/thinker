@@ -310,6 +310,69 @@ Next: continue up through the remaining core tiers (1B, 3B core) once
 there's a reason to move past pipeline validation into a real training
 budget.
 
+## Reference target: same-family smaller models (2026-09-12)
+
+The project's actual end goal is to demonstrate **reliable** distillation of
+the Teacher (`Qwen/Qwen3.8-27B-FP8`) into our custom Thinker architecture —
+"reliable" meaning a credible, honestly-reported quality bar, not
+necessarily matching the Teacher's own performance. Question raised: at what
+student scale is a comparison actually meaningful, and are same-family
+smaller released models a valid reference?
+
+**Confirmed via HF (`huggingface.co/collections/Qwen/qwen35`,
+`Qwen/Qwen3.5-0.8B`)**: within the Qwen3.8 line itself there is no small
+sibling — 27B is the smallest dense-ish option (`qwen3.8-27b-notes.md`
+line 140-144), the next ones jump to 360 GB / 4.9 TB. The **previous**
+generation, Qwen3.5, does have a real small-dense ladder: 0.8B, 2B, 4B, 9B,
+27B, then MoE variants (35B-A3B, 122B-A10B, 397B-A17B) — same lineage,
+same general hybrid-attention design philosophy (gated DeltaNet + regular
+attention, sometimes + MoE), just one generation back. **Using Qwen3.5's
+small siblings (starting with the 0.8B) as reference points is credible and
+is in fact the best available same-family comparison**, precisely because
+Qwen3.8 skips straight past this size range.
+
+**Caveats to keep in mind when actually comparing**:
+- `Qwen3.5-0.8B` is a **VLM** (`Qwen3_5ForConditionalGeneration`,
+  image-text-to-text) — for a fair comparison against our text-only Thinker,
+  only use its text benchmarks (MMLU-Pro 29.7%, C-Eval 46.4%, IFEval 52.1%),
+  ignore vision scores (MMMU, MMBench).
+- One generation back means the training recipe/data are not identical to
+  what produced our 27B Teacher — treat its scores as a **quality bar**
+  (what's achievable at that param count from a broadly comparable
+  lineage/design), not as a hard target or a budget estimate.
+- Our own "core vs. head" accounting (see sizing methodology above) makes
+  raw total-param comparisons slightly apples-to-oranges: our tied,
+  Teacher-vocab-aligned head (248,077 tokens) is a much larger fraction of
+  total params at small core sizes than a typical ~150k-vocab model's own
+  embedding table would be. Report core size alongside total size when
+  comparing, don't just match raw total params.
+
+**On budget** (the actual question asked: what did it cost to produce these
+smaller family siblings, as a reference for our own budget?): Qwen's own
+technical report for the prior Qwen3 generation (arXiv 2505.09388) confirms
+their smaller models (0.6B/1.7B/4B/8B/14B/30B-A3B) are **not** trained from
+scratch at Chinchilla-scale — they're produced via a "Strong-to-Weak
+Distillation" pipeline (off-policy + on-policy phases) from the flagship,
+explicitly to cut the compute needed versus training each size from scratch.
+This is a real precedent for the same bet this project is already making
+(`D = 10×N` instead of Chinchilla's `20×N`, see the sizing table above) —
+it doesn't give us their exact token counts, but it does mean their smaller
+models' training cost is not directly comparable to their own pretraining
+cost either, so it's not usable as a literal budget number regardless of
+generation match.
+
+**Resulting decision — target scale for the first "credibility" checkpoint**:
+the already-validated **500M-core tier** (810.8M total measured, `EXP-005`)
+lands almost exactly on Qwen3.5-0.8B's total footprint, making it the
+natural next comparison point once real training data is in hand — no need
+to invent a new arbitrary tier size for this. Keep the small-scale
+Indexed-Attention-mechanism experiments (`dev_notes/indexed_attention_*`)
+separate from this quality-bar comparison: the former validate the
+*mechanism* at deliberately tiny/controlled scale (and carry the transfer
+caveats documented there), the latter is about a *credible end-to-end
+result* at a scale chosen to match a real external reference — don't
+conflate the two when deciding "is our current scale big enough".
+
 ## Next steps
 
 - Validate `prepare_general_data.py` / `prepare_retrieval_data.py` end-to-end
