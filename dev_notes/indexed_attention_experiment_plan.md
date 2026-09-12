@@ -25,6 +25,30 @@ Référence cluster : skill `grid5000` + `dev_notes/grid5000_usage.log.md`. Pali
 
 ---
 
+## Phase -1 — Dimensionnement (identifier les bonnes dimensions avant de juger l'architecture)
+
+**Pourquoi cette phase existe** : trouvée nécessaire *en direct* pendant cette session — `thinker-e9` a rapporté un échec total à `depth=4`/64 facts (loss bloquée à `ln(vocab)`, accuracy au hasard). Reproduit localement en quelques minutes (CPU, `IndexedThinker`) : avec KB **resamplée à chaque batch** (signal réel, pas mémorisation), 4 facts → apprend (~93% acc), 64 facts → n'apprend plus **du tout**, et ce **indépendamment de la profondeur** (`depth=4` et `depth=2` échouent pareil à 64 facts, à `d_model=64`). Ça élimine "la hiérarchie est cassée" comme explication première et pointe vers un **sous-dimensionnement** (`d_model`, `n_register`) — exactement le type de confusion que l'audit redoutait (attribuer à l'architecture un échec qui est en fait un problème de taille).
+
+**Deux dimensions à distinguer, pas une seule** :
+- **`d_model` (K/V de la mémoire)** : doit rester assez grand pour que les clés soient séparables (a) au niveau des feuilles, en fonction du nombre total de faits, ET (b) à chaque nœud compressé, en fonction de `block_size` (un parent doit rester discriminable parmi ses frères). Sous-dimensionner ici est indiscernable, en accuracy seule, d'un problème d'architecture — d'où l'urgence de cette phase avant Phase 0.
+- **`n_register`** (largeur du registre latent) : doit croître avec le **parallélisme de raisonnement nécessaire** (nombre de sous-objectifs/sauts actifs simultanément), pas directement avec la taille de la KB — l'attention est adressable par contenu, un seul vecteur de requête suffit en principe à cibler n'importe quel fait si `d_model` est suffisant.
+
+**Hypothèse** : à `n_facts` fixé, il existe un `d_model` (et éventuellement un `n_register`) minimal en-dessous duquel l'apprentissage échoue totalement (pas juste dégradé), et au-dessus duquel il réussit — une transition de phase plutôt qu'une dégradation progressive.
+
+**Protocole** : à `n_facts` fixe (ex. 64, resamplé à chaque batch — jamais un seul batch fixe), balayer `d_model` (32/64/128/256) × `n_register` (1/2/4) indépendamment de `depth`/`block_size` (fixés à une valeur qui marche déjà, ex. `depth=2`), 3 seeds par point. Reporter la courbe accuracy vs `d_model` pour trouver le seuil de transition.
+
+| Observation | Action |
+|---|---|
+| Transition nette identifiée (échec en dessous, succès au-dessus) | Utiliser ce `d_model`/`n_register` minimal (+ marge) comme config de référence pour toutes les phases suivantes, y compris Phase 0 — **ne pas** conclure quoi que ce soit sur `depth`/`block_size` avec un `d_model` sous-dimensionné |
+| Pas de transition claire (échec à toutes les tailles testées) | **Déjà observé** (voir note ci-dessous) — le problème n'est pas dimensionnel, passer directement au diagnostic "signal d'entraînement" plutôt que continuer à augmenter `d_model`/`n_register` |
+| Transition très tardive (`d_model` très grand nécessaire même pour 64 facts) | Signal que le compresseur/la mémoire sont peu efficaces en information par dimension — révisateur candidat : le pooling sans aucun poids appris (cf. Phase 1bis "avec/sans FF") |
+
+**Relation avec le reste du plan** : cette phase doit être refaite (ou son résultat revalidé) à chaque fois que `n_facts`/le nombre de leaves change significativement dans une phase ultérieure (Phase 2 multi-sauts, Phase 3 données réelles) — le dimensionnement n'est pas une constante universelle, il dépend de la taille de la tâche.
+
+**Résultat préliminaire obtenu localement pendant cette session (CPU, 1 seed — à refaire dans les règles avec ≥3 seeds avant conclusion finale, mais assez net pour orienter la suite immédiatement)** : la branche "pas de transition dimensionnelle" ci-dessus s'est produite en pratique. À `n_facts=64`, ni `d_model=128`+`n_register=4` ni un LR plus bas (`1e-3`) n'ont débloqué l'apprentissage (loss reste au niveau du hasard). Pire : l'échec apparaît déjà à **`n_facts=16`**, et sur 3000 pas d'entraînement la loss reste plate sans tendance d'amélioration, même lente — un échec net et non-progressif, pas un problème de vitesse de convergence.
+
+**Piste retenue en priorité avant de continuer à balayer les dimensions** (spec §11bis, motivation ajoutée cette session) : ce pattern est cohérent avec le phénomène documenté dans `raw/Distill-reasonning-stream.md` (« les transformers à poids partagés récurrents souffrent d'instabilité dynamique... contraindre les états latents du loop via une supervision intermédiaire agit comme régularisation »). Le stream `answer` seul ne fournit un gradient qu'après $N_{\text{step}}$ itérations + toute la hiérarchie — signal potentiellement trop indirect. **Action concrète à tester avant toute autre chose** : ajouter une supervision intermédiaire sur `kb_retrieval` (on connaît la vérité terrain de la récupération à chaque étape) — ex. une perte auxiliaire sur les poids d'attention du softmax unifié, forçant le nœud contenant la bonne valeur à recevoir le poids dominant à une étape donnée, en plus de la perte finale sur le stream `answer`. C'est une version sans Teacher de l'Option B ("White-Box Trajectory Distillation", déjà documentée dans la conversation source pour un contexte avec Teacher). Si cette supervision intermédiaire débloque l'apprentissage à `n_facts=16-64` sans changer les dimensions, ça confirme que le problème est bien un signal d'entraînement trop indirect, pas un problème de capacité ni un bug de mécanisme.
+
 ## Phase 0 — Sanity check GPU du MVP actuel
 
 **Hypothèse** : `HierarchicalMemory` (depth>0) égale ou dépasse l'attention plate (depth=0) en accuracy, à un coût FLOPs/mémoire inférieur, une fois l'échelle assez grande pour que l'attention plate commence à diluer le signal entre les distracteurs.
