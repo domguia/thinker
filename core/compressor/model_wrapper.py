@@ -17,6 +17,21 @@ class HFModelWrapper:
         """Get the continuous embeddings for a given set of input IDs."""
         return self.model.get_input_embeddings()(input_ids)
 
+    def get_hidden_states(self, input_ids: torch.Tensor) -> List[torch.Tensor]:
+        """
+        All intermediate hidden states for a forward pass, one tensor per layer
+        (index 0 = input embeddings, index N = final layer), each
+        (batch, seq_len, hidden_dim). For picking a "thinking stream" alignment
+        target — dev_notes/indexed_attention_spec.md §11bis: prefer layers at
+        ~40-65% relative depth over the lowest (lexical) or highest (already
+        collapsed toward the output) layers, and validate the choice by
+        measuring which layer gives the most stable/monotonic correlation with
+        the student's own state (probing protocol) rather than fixing it a priori.
+        """
+        with torch.no_grad():
+            outputs = self.model(input_ids, output_hidden_states=True)
+        return list(outputs.hidden_states)
+
     def forward_with_embeddings(self, embeddings: torch.Tensor, past_key_values: Optional[tuple] = None) -> torch.Tensor:
         """Perform a forward pass using continuous embeddings."""
         outputs = self.model(inputs_embeds=embeddings, past_key_values=past_key_values)

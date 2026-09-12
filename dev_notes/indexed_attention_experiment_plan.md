@@ -107,6 +107,28 @@ Référence cluster : skill `grid5000` + `dev_notes/grid5000_usage.log.md`. Pali
 
 **Protocole** : tâche de la **Phase 0** (pas Phase 2 — correction d'une erreur de séquencement de la version précédente de ce plan, qui référençait une phase pas encore atteinte), 3 seeds par variante.
 
+## Phase 1ter — Stream `thinking` en embedding (alignement Teacher, avancé plus tôt sur demande explicite)
+
+**Décision** : initialement prévu en Phase 8 (après données réelles + distillation), avancé ici sur demande explicite de l'utilisateur — tester tôt comment le mécanisme se comporte, avant d'investir dans les phases suivantes.
+
+**Hypothèse** : un stream `thinking` supervisé par alignement (cosinus, pas MSE brute — voir raisonnement plus bas) sur une couche intermédiaire d'un vrai Teacher pré-entraîné donne un signal d'entraînement supplémentaire cohérent (loss qui décroît proprement), sans dégrader la convergence du stream `answer` sur `kb_retrieval`.
+
+**Raisonnement** : §11bis de la spec formalise maintenant le critère de choix de couche (éviter 0-25% et la dernière couche, cibler ~40-65%, valider par un protocole de sonde plutôt qu'un choix a priori) et le risque d'instabilité réel (perte non normalisée + conflit multi-objectif sur des poids partagés, pas "distance à l'initialisation" comme argument invoqué au départ — corrigé après discussion avec l'utilisateur). Les deux causes réelles d'instabilité sont atténuables (perte cosinus normalisée, montée en poids progressive), donc testables sans risque disproportionné.
+
+**Ce qui est déjà en place, aucun changement d'architecture requis** : `IndexedThinker(stream_dims={'answer': ..., 'thinking': teacher_hidden_dim})` fonctionne tel quel. `core/compressor/model_wrapper.py::HFModelWrapper.get_hidden_states()` (ajouté cette session) extrait les couches intermédiaires d'un Teacher HF déjà supporté (GPT-2/SmolLM/Qwen).
+
+**Protocole** :
+1. Choisir un petit Teacher déjà supporté (GPT-2 124M par défaut, le moins cher) et un petit corpus réel (`data/wiki_samples.json`, déjà présent).
+2. Protocole de sonde d'abord (spec §11bis) : entraîner le core avec seulement le stream `answer`, mesurer la corrélation cosinus/CKA entre l'état SM à chaque itération et chaque couche candidate du Teacher (~40-65% de profondeur) — retenir la couche la plus stable/monotone, pas un choix fixé.
+3. Brancher le stream `thinking` sur cette couche, perte cosinus (pas MSE brute), poids de perte croissant progressivement (pas à pleine intensité dès le départ).
+4. Comparer convergence du stream `answer` avec vs sans le stream `thinking` actif.
+
+| Observation | Action |
+|---|---|
+| `thinking` converge proprement (loss cosinus décroît), `answer` pas dégradé | Garder le stream, envisager de l'étendre en Phase 8 (curriculum d'extinction) |
+| `thinking` erratique (loss qui oscille/ne baisse pas) | Vérifier d'abord le choix de couche (protocole de sonde bâclé ?) avant de conclure à une instabilité structurelle |
+| `answer` dégradé par la présence de `thinking` | Signal de conflit de gradient réel (cf. §11bis) — réduire le poids de la perte `thinking` ou geler le core pendant l'entraînement du stream (l'un des deux est explicitement indépendant de l'autre par construction, spec §11bis) |
+
 ## Phase 2 — Tâche synthétique multi-sauts
 
 **Hypothèse** : l'accuracy du modèle complet croît avec $N_{\text{step}}$ (1 à 6) ; Baseline A plafonne tôt (un seul passage ne peut pas chaîner) ; Baseline B échoue partout.
