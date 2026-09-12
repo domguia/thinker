@@ -237,6 +237,68 @@ naive linear extrapolation from the 40M-core point — but that's a guess,
 not a measurement. Get a real batch-size sweep and a real 1B-core data point
 before trusting any duration estimate at that scale.
 
+### GPU-dependent estimate for the 500M-core credibility target (2026-09-12)
+
+Explicit estimate requested for the 500M-core tier (810.8M total, the tier
+chosen above to match Qwen3.5-0.8B's footprint), broken down **by GPU
+model** since throughput depends heavily on it. Two scenarios, since the
+only real data point we have (`EXP-005`, L40S) is a deliberately
+unoptimized config (`--batch_size 4 --block_size 512`, no `torch.compile`,
+14% MFU):
+
+**Peak bf16/fp16 Tensor Core FLOPS (dense, no sparsity — official NVIDIA
+datasheets)**: L40S 362 TFLOPS, A100 (40/80GB) 312 TFLOPS, H100 (SXM) 989
+TFLOPS, H200 989 TFLOPS (same GH100 compute die as H100 — its advantage is
+memory bandwidth/capacity, not raw FLOPS, which mostly helps by allowing a
+larger batch size before running out of VRAM, not by raising the FLOPS
+ceiling itself).
+
+| GPU | Scénario | Débit estimé | Wall-clock pour D=8.11B tokens (10×N) |
+|---|---|---|---|
+| L40S | **Mesuré** (`EXP-005`, batch=4/block=512, 14% MFU) | 5,300 tok/s (réel) | ~425 h (17.7j) ❌ |
+| L40S | Optimiste (batch/config tunés, ~30% MFU — atteignable sur Ada avec FlashAttention) | ~22,300 tok/s (estimé) | ~101 h (4.2j) |
+| A100 | Extrapolé au même config non-optimisé (mise à l'échelle par le ratio de FLOPS crête, **non mesuré à cette taille**) | ~4,570 tok/s (extrapolé) | ~493 h (20.6j) ❌ |
+| A100 | Optimiste (~35% MFU, FlashAttention2, plage bien établie en littérature pour ce type d'entraînement) | ~22,400 tok/s (estimé) | ~101 h (4.2j) |
+| H100 (SXM) | Extrapolé au même config non-optimisé | ~14,470 tok/s (extrapolé) | ~156 h (6.5j) ⚠️ proche de la limite |
+| H100 (SXM) | Optimiste (~40% MFU — dans la plage 40-55% citée pour du pré-entraînement dense bien réglé sur H100) | ~81,300 tok/s (estimé) | **~28 h (1.15j)** |
+| H200 | Optimiste (même calcul crête que H100 ; la VRAM/bande passante en plus permettrait probablement un batch encore plus gros, donc au moins aussi bon) | ≥ ~81,300 tok/s (estimé) | ≤ ~28 h |
+
+Pour le budget de tokens : `D=10×N` (8.11B, colonne ci-dessus) est
+l'hypothèse centrale déjà retenue ; borne basse `D=5×N` (4.05B tokens, ~moitié
+des heures ci-dessus) et borne haute Chinchilla `D=20×N` (16.2B tokens,
+~double) si l'hypothèse centrale s'avère trop optimiste sur la qualité
+atteinte.
+
+**Réserves importantes sur ces chiffres** :
+- Seule la ligne L40S "mesuré" est une vraie mesure — toutes les autres
+  lignes (A100/H100/H200 à cette taille, et les scénarios "optimiste" pour
+  toutes les GPU) sont des **extrapolations**, pas des mesures. Le projet a
+  déjà appris cette leçon une fois (l'ancienne table basée sur des
+  hypothèses de MFU fixes s'est révélée fausse d'un facteur 2-20× une fois
+  mesurée réellement) — donc traiter ce tableau comme une fourchette de
+  planification, pas une garantie.
+- L'extrapolation A100/H100 "non-optimisé" suppose que le MFU à
+  configuration fixe (batch=4) se comporte proportionnellement au ratio de
+  FLOPS crête entre GPU — une simplification : la bande passante mémoire et
+  le coût de lancement des kernels par étape ne suivent pas forcément le
+  même ratio que le calcul brut, donc ces cellules sont les moins fiables du
+  tableau.
+- Le scénario "optimiste" est plausible (la littérature 2024-2025 rapporte
+  couramment 40-55% MFU sur H100 pour du pré-entraînement dense bien réglé
+  avec FlashAttention2/3 et un batch suffisant) mais **n'a jamais été testé
+  sur ce pipeline** — `train_sft.py` n'a ni `torch.compile` ni support
+  multi-GPU actuellement, et le batch=4 actuel est probablement bien en
+  dessous de ce qu'il faudrait pour s'approcher de ce régime.
+
+**Action recommandée avant de réserver un long créneau** : un balayage de
+`--batch_size` (et éventuellement `torch.compile`) au palier 500M-core sur
+un nœud libre (L40S ou A100), quelques heures seulement — remplace toutes
+les extrapolations ci-dessus par un vrai point de mesure, et dira
+directement si l'estimation "optimiste" (~1-4 jours selon le GPU, largement
+dans la limite d'1 semaine de Grid'5000) est atteignable ou si le
+"mesuré/non-optimisé" (~3-20 jours, nécessitant checkpoint/resume déjà
+implémenté) est la réalité à laquelle se préparer.
+
 <details>
 <summary>Old table (2026-09-03, FLOP/MFU-assumption based — superseded above, kept for history)</summary>
 
