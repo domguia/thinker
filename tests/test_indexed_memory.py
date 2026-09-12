@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from core.indexed_memory import HierarchicalMemory, LevelCompressor
-from core.indexed_thinker_model import IndexedThinker
+from core.indexed_thinker_model import IndexedThinker, OutputStream
 from data.kb_retrieval import KBRetrievalDataset
 
 
@@ -268,6 +268,33 @@ class TestOutputStreamsIndependence(unittest.TestCase):
             self.assertIsNotNone(p.grad)
         for p in model.streams['thinking'].parameters():
             self.assertIsNone(p.grad, "a loss on 'answer' must not populate gradients on 'thinking' stream weights")
+
+    def test_stream_supports_1_to_3_layers(self):
+        d, B, S = 8, 2, 5
+        sm_k = torch.randn(B, S, d)
+        sm_v = torch.randn(B, S, d)
+        for n_layers in (1, 2, 3):
+            stream = OutputStream(d, out_dim=6, n_layers=n_layers)
+            self.assertEqual(len(stream.layers), n_layers)
+            out = stream(sm_k, sm_v)
+            self.assertEqual(out.shape, (B, 1, 6))
+
+        with self.assertRaises(AssertionError):
+            OutputStream(d, out_dim=6, n_layers=4)
+
+    def test_gradient_reaches_every_layer_of_a_multilayer_stream(self):
+        d, B, S = 8, 2, 5
+        sm_k = torch.randn(B, S, d, requires_grad=True)
+        sm_v = torch.randn(B, S, d, requires_grad=True)
+        stream = OutputStream(d, out_dim=6, n_layers=3)
+        out = stream(sm_k, sm_v)
+        out.sum().backward()
+
+        for i, layer in enumerate(stream.layers):
+            self.assertIsNotNone(layer.q_proj.weight.grad, f"layer {i} q_proj got no gradient")
+            self.assertTrue(torch.any(layer.q_proj.weight.grad != 0), f"layer {i} q_proj gradient is all-zero")
+            self.assertIsNotNone(layer.ff_in.weight.grad, f"layer {i} ff_in got no gradient")
+            self.assertTrue(torch.any(layer.ff_in.weight.grad != 0), f"layer {i} ff_in gradient is all-zero")
 
 
 if __name__ == '__main__':

@@ -34,33 +34,57 @@ from core.indexed_memory import HierarchicalMemory
 from core.layers import RMSNorm
 
 
+class OutputStreamLayer(nn.Module):
+    """One cross-attention + FF block of an OutputStream (pre-norm residual)."""
+
+    def __init__(self, d_model: int, d_hid: int = None):
+        super().__init__()
+        d_hid = d_hid or 4 * d_model
+        self.norm1 = RMSNorm(d_model)
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.norm2 = RMSNorm(d_model)
+        self.ff_in = nn.Linear(d_model, d_hid)
+        self.ff_out = nn.Linear(d_hid, d_model)
+
+    def forward(self, x: torch.Tensor, sm_k: torch.Tensor, sm_v: torch.Tensor) -> torch.Tensor:
+        q = self.q_proj(self.norm1(x))
+        x = x + F.scaled_dot_product_attention(q, sm_k, sm_v)
+        x = x + self.ff_out(F.gelu(self.ff_in(self.norm2(x))))
+        return x
+
+
 class OutputStream(nn.Module):
     """
-    One independent, lightweight output stream (spec §11bis): its own query
-    projection and its own head, both disjoint from any other stream's weights
-    and from the core recurrent loop. Reads the *entire* accumulated SM
-    trajectory via cross-attention, not just the final register state — the
-    stream's own attention learns which recurrent steps matter for its task,
-    rather than assuming the core's iteration count lines up with anything.
+    One independent, lightweight output stream (spec §11bis): 1-3 stacked
+    cross-attention layers (per raw/Distill-reasonning-stream.md's "streams
+    légers (1-2 couches)", extended to allow 3) plus a head, all disjoint from
+    any other stream's weights and from the core recurrent loop. Reads the
+    *entire* accumulated SM trajectory via cross-attention, not just the final
+    register state — the stream's own attention learns which recurrent steps
+    matter for its task, rather than assuming the core's iteration count lines
+    up with anything.
     """
 
-    def __init__(self, d_model: int, out_dim: int):
+    def __init__(self, d_model: int, out_dim: int, n_layers: int = 1, d_hid: int = None):
         super().__init__()
+        assert 1 <= n_layers <= 3, "output streams are meant to stay lightweight (1-3 layers)"
         self.query_seed = nn.Parameter(torch.randn(1, d_model) * d_model ** -0.5)
-        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.layers = nn.ModuleList([OutputStreamLayer(d_model, d_hid) for _ in range(n_layers)])
         self.head = nn.Linear(d_model, out_dim)
 
     def forward(self, sm_k: torch.Tensor, sm_v: torch.Tensor) -> torch.Tensor:
         B = sm_k.shape[0]
-        q = self.q_proj(self.query_seed.unsqueeze(0).expand(B, -1, -1))
-        out = F.scaled_dot_product_attention(q, sm_k, sm_v)
-        return self.head(out)
+        x = self.query_seed.unsqueeze(0).expand(B, -1, -1)
+        for layer in self.layers:
+            x = layer(x, sm_k, sm_v)
+        return self.head(x)
 
 
 class IndexedThinker(nn.Module):
     def __init__(self, vocab_size: int, d_model: int, n_register: int,
                  block_size: int, depth: int, n_slots: int = 1, n_head: int = 1,
-                 d_hid: int = None, sm_cap: int = None, stream_dims: dict = None):
+                 d_hid: int = None, sm_cap: int = None, stream_dims: dict = None,
+                 stream_n_layers: dict = None):
         super().__init__()
         d_hid = d_hid or 4 * d_model
         self.d_model = d_model
@@ -80,8 +104,10 @@ class IndexedThinker(nn.Module):
         self.fuse_out = nn.Linear(d_hid, d_model)
 
         stream_dims = stream_dims if stream_dims is not None else {'answer': vocab_size}
+        stream_n_layers = stream_n_layers or {}
         self.streams = nn.ModuleDict({
-            name: OutputStream(d_model, dim) for name, dim in stream_dims.items()
+            name: OutputStream(d_model, dim, n_layers=stream_n_layers.get(name, 1))
+            for name, dim in stream_dims.items()
         })
 
     def forward(self, kb_tokens: torch.Tensor, kb_source_ids: torch.Tensor,
