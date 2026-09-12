@@ -526,17 +526,92 @@ models' training cost is not directly comparable to their own pretraining
 cost either, so it's not usable as a literal budget number regardless of
 generation match.
 
+**Correction (2026-09-13) — a single "total params" comparison against
+Qwen3.5-0.8B is not the right unit, three separate axes matter:**
+
+1. **Trainable parameter footprint** (storage/capacity) — embedding+head
+   (tied to the Teacher's vocab) + the core register/attention projections
+   (shared once, reused every loop iteration) + the tiny shared compressor
+   (`LevelCompressor`'s pooling query + `intrablock_pos`, block_size×d_model,
+   negligible) + output streams. **The KB itself adds no dedicated
+   parameter block** — unlike the original `ToyThinker`'s `static_mem`
+   (a `nn.Embedding` sized to the knowledge base), `IndexedThinker` embeds
+   KB leaves through the *same* shared `self.embed` table used for
+   input/query tokens (`core/indexed_thinker_model.py:105,157,160`) — so
+   there is no separate "KB parameter count" to add on top of embedding+core,
+   and no double-counting risk either way.
+2. **Effective compute depth** (FLOPs per forward pass) — this is where a
+   flat total-param comparison misleads. Our core is the **same weights**
+   applied `N_step` times (looped/recurrent), not `N_step` independent
+   layers — so the parameter budget doesn't grow with depth the way a
+   standard stacked transformer's does, only the compute (and activation
+   memory) does. The correct **per-unit** comparison for the core is
+   therefore **one Qwen layer's parameter budget, not the whole model's** —
+   exactly analogous to how our shared core block is applied once per
+   iteration, the way one Qwen layer's weights are applied once per layer
+   in its stack. Pulled the exact numbers from `Qwen/Qwen3.5-0.8B`'s
+   `config.json`: `vocab_size=248,320` (nearly identical to our own
+   Teacher-aligned 248,077 — same tokenizer lineage), `hidden_size=1024`,
+   `tie_word_embeddings=true` → embedding/head ≈ 248,320×1024 ≈ **254.3M**
+   (~28-32% of the ~0.8-0.9B total, depending which public figure is used),
+   leaving **~546-646M core over 24 layers ≈ ~23-27M/layer average**
+   (rough average only — the 24 layers are heterogeneous: 18 gated-DeltaNet
+   linear-attention layers interleaved with 6 full-attention layers every
+   4th layer, no MoE here so at least no expert-count asymmetry to further
+   complicate it).
+   - **Practical implication**: if our core is sized closer to
+     "~1 Qwen layer" (~25M) rather than "~1 Qwen model" (~550-650M, which is
+     roughly where the already-measured 500M-core tier actually sits — much
+     closer to *the whole Qwen stack* than to *one Qwen layer*), and
+     `N_step` is chosen per the ~2-4×(target reasoning depth) heuristic
+     already in `dev_notes/indexed_attention_experiment_plan.md`
+     (Phase 1quater), the **total trainable parameter footprint could land
+     far below Qwen3.5-0.8B's ~0.8-0.9B** (roughly embedding ~254M matched
+     to Qwen's own `hidden_size=1024` + core ~25M + negligible extras ≈
+     ~280-300M total) while remaining **FLOPs-comparable in the forward
+     pass** to Qwen's 24-layer stack — a substantially smaller stored-weight
+     footprint for a comparable compute depth, a genuine efficiency
+     argument *for* the shared-core thesis (§-1's whole point: capacity
+     doesn't need to scale with depth if it lives in reusable weights +
+     external KV, not per-layer FF).
+   - **Important caveat, not to over-claim**: FLOPs-equivalence is **not**
+     the same as capability-equivalence. A small core looped 48-96 times
+     applies the *same* learned function repeatedly (bounded per-step
+     transformation diversity), whereas 24 *distinct* Qwen layers each learn
+     a *different* transformation — matching compute doesn't guarantee
+     matching what the compute can express. This is exactly the open
+     empirical question the Universal Transformer / Looped Transformer
+     literature flags (cited in the `indexed_attention_experiment_plan.md`
+     N_step section) and exactly what Phase 1quater's `N_step` sweep is
+     designed to test — treat the smaller-footprint framing above as a
+     hoped-for outcome to verify, not an assumption to design around yet.
+3. **KB inference/activation memory** — real, but **not a parameter
+   count at all**: building the hierarchy over the KB's leaves produces
+   activations (per-level compressed K/V) that must be held during
+   `attend()`, scaling with the number of facts × d_model × node count —
+   this is architecturally closer to a **context-length / KV-cache memory
+   cost** in a standard transformer than to "model size." Track and report
+   it separately (tokens/facts held × bytes, like a KV-cache sizing
+   calculation) rather than folding it into a parameter-count comparison.
+
 **Resulting decision — target scale for the first "credibility" checkpoint**:
-the already-validated **500M-core tier** (810.8M total measured, `EXP-005`)
-lands almost exactly on Qwen3.5-0.8B's total footprint, making it the
-natural next comparison point once real training data is in hand — no need
-to invent a new arbitrary tier size for this. Keep the small-scale
+keep the already-validated **500M-core tier** (810.8M total measured,
+`EXP-005`) as the concrete, already-working checkpoint to reach first (no
+need to invent a new tier just for this) — its total footprint still lands
+close to Qwen3.5-0.8B's, which remains useful for a *quality-bar*
+comparison (axis 1 above). But **do not read that size match as evidence
+we need a ~500M core to be "as capable" as Qwen3.5-0.8B** — per axis 2,
+the more relevant comparison for the core specifically is against one
+Qwen layer (~25M), with `N_step` doing the work depth normally would; a
+follow-up, smaller-core + larger-`N_step` configuration is worth testing
+once Phase 1quater has real N_step-sweep data, as a genuinely more
+parameter-efficient way to reach a comparable point. Keep the small-scale
 Indexed-Attention-mechanism experiments (`dev_notes/indexed_attention_*`)
-separate from this quality-bar comparison: the former validate the
-*mechanism* at deliberately tiny/controlled scale (and carry the transfer
-caveats documented there), the latter is about a *credible end-to-end
-result* at a scale chosen to match a real external reference — don't
-conflate the two when deciding "is our current scale big enough".
+separate from this quality-bar comparison either way: the former validate
+the *mechanism* at deliberately tiny/controlled scale (and carry the
+transfer caveats documented there), the latter is about a *credible
+end-to-end result* at a scale chosen to match a real external reference —
+don't conflate the two when deciding "is our current scale big enough".
 
 ## Next steps
 
