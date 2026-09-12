@@ -299,6 +299,15 @@ dans la limite d'1 semaine de Grid'5000) est atteignable ou si le
 "mesuré/non-optimisé" (~3-20 jours, nécessitant checkpoint/resume déjà
 implémenté) est la réalité à laquelle se préparer.
 
+**Mise à jour critique (experiment-manager, 2026-09-13) — le point mesuré `EXP-005` n'était pas comparable au peak bf16 cité** :
+`train_sft.py` crée le modèle en **fp32 complet** (`AutoModelForCausalLM.from_config` sans dtype précisé, aucun `autocast`/`GradScaler` dans le fichier) — donc les 362/312/989 TFLOPS "peak bf16 Tensor Core" utilisés partout ci-dessus comme dénominateur du MFU ne sont **pas** le bon plafond pour un run fp32 (débit très inférieur, TF32 automatique sur Ampere+ mis à part, mais encore ~4-8× sous le peak bf16 selon la génération). Le MFU mesuré jusqu'ici (1,5-14%) compare donc un débit fp32 réel à un plafond bf16 théorique — **pas une vraie mesure de marge de progression**.
+
+Confirmé en re-testant le sweep batch_size au palier 500M-core sur L40S 44 Go, en fp32 : `batch=4` → 3 238 tok/s (vs. 5 300 tok/s dans `EXP-005` — écart probablement dû à une contention GPU partagée, pas à réinterpréter comme une régression), `batch=8` **OOM** (tente d'allouer 3,79 Go alors qu'il ne reste que 2,15 Go libres, `batch=4` utilise déjà ~40/44 Go), `batch=16` OOM direct. **La marge de scaling du batch_size est quasi nulle en l'état** — le vrai levier n'est pas le batch size mais :
+1. **bf16/mixed-precision** (`torch.autocast`) — divise la mémoire par ~2 (débloquant un vrai scaling du batch) **et** utilise réellement les Tensor Cores (rendant le MFU mesuré comparable au peak cité pour la première fois). En cours d'implémentation.
+2. **La tête de vocabulaire Teacher (248k tokens) domine la mémoire** — le tenseur de logits `(batch, block_size, vocab)` à `block_size=512` est déjà énorme en fp32, avant même de compter le calcul de la loss KD dessus. Indépendant de (1), cumulable — si (1) seul ne suffit pas, la piste littérature est un calcul de cross-entropy/KL **fusionné par chunks** qui ne matérialise jamais le tenseur de logits complet (ex. Liger-Kernel, "Cut Your Losses", NeurIPS 2024/2025) plutôt que de réduire le vocabulaire lui-même (qui casse l'alignement avec le Teacher).
+
+**Conséquence pour toutes les estimations ci-dessus** : le tableau GPU-dépendant et les scénarios "mesuré" vs. "optimiste" restent la bonne structure de raisonnement, mais **le point "mesuré" L40S doit être refait en bf16** avant d'être considéré comme fiable — le nombre fp32 actuel (5 300 ou 3 238 tok/s selon le run) sous-estime probablement le vrai débit atteignable d'un facteur significatif, dans une direction inconnue tant que le point bf16 n'existe pas. Ne pas figer de décision de réservation longue sur les chiffres fp32 actuels.
+
 <details>
 <summary>Old table (2026-09-03, FLOP/MFU-assumption based — superseded above, kept for history)</summary>
 
