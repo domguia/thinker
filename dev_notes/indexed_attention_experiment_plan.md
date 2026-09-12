@@ -238,6 +238,10 @@ Concernant les deux autres idées proposées par l'utilisateur (stop-gradient al
 2. Balayage LR plus fin et plus de pas (la tâche chaîne est structurellement plus dure que la récupération simple — pas anormal qu'elle demande plus de budget).
 3. Revoir la fusion $\Delta$ / la capacité du registre si 1 et 2 n'aident pas (cf. table de décision ci-dessus).
 
+**Mise à jour GPU (experiment-manager, job 4104848, 2026-09-12/13)** : curriculum `n_hops` 1→2 exécuté (`n_hops=1` ~98%, comme attendu). À `n_hops=2` : `N_step=12` fixe et `N_step ~ Uniform(1,12)` **plafonnent tous deux à 32-34%** après 16-22k+ pas — au-dessus du hasard (~2-3%) mais loin de la maîtrise, et toujours **aucune différenciation** fixe vs. aléatoire. Le `lr=3e-4` utilisé vient tel quel de la tâche de récupération simple (`n_hops=1`), **jamais re-sweepé spécifiquement pour `n_hops=2`** — exactement le pattern déjà rencontré deux fois cette session (`n_facts=64`, et maintenant potentiellement ici) où un LR mal calé imite un plafond de mécanisme. **Décision : sweep LR dédié à `n_hops=2` avant toute conclusion sur (a) `N_step` insuffisant, (b) LR, ou (c) une vraie limite de composition à 2+ sauts** — ne pas descendre vers (c) tant que (b) n'est pas exclu, cohérent avec la discipline déjà actée dans ce plan (ne jamais réutiliser un LR d'une autre échelle sans le revérifier).
+
+**Confirmation batch/LR co-scaling (même session, à `n_hops=1`/tâche simple)** : `batch_size=256` avec `lr=1.2e-3` (scaling linéaire depuis la config de référence, ×4 batch → ×4 LR) atteint 99,9% acc ; `lr=2.4e-3` diverge (7,1%, loss 4,3) ; `lr=6e-4` légèrement en dessous (99,55%). La règle de scaling linéaire a tenu exactement à ce saut de ×4 — confirme la recommandation donnée précédemment (rescaler puis revérifier par un sweep étroit, pas supposer). `batch_size=256, lr=1.2e-3` devient la config de référence pour les prochains runs à cette échelle.
+
 ## Phase 3 — Passage à des données textuelles réelles
 
 **Hypothèse** : `HierarchicalMemory` tient sur un vocabulaire/texte réel sans dégradation qualitative majeure par rapport au vocabulaire synthétique minuscule des phases précédentes.
