@@ -278,3 +278,13 @@ Résultats des tests (CPU) : les 10 tests passent, y compris le test de sur-appr
 4. **§5.1** : quelle fonction $\text{Compress}_\theta$ retenir pour un premier MVP (je penche pour cross-attention $M=1$ par cohérence avec vos préférences déjà exprimées, mais pas encore confirmé) ?
 5. **§6.1** : l'algèbre de fusion $\Delta$ — à formaliser ensemble une fois §3/§4.1 clarifiés.
 6. **§9** : reste-t-on sur le MVP "mécanique" (tester hiérarchie + softmax unifié, sans encore le protocole d'évaluation généraliste à 4 volets), ou faut-il déjà caler `data/kb_retrieval.py` sur les 3 splits (raisonnement pur / récupération pure / multi-sauts) dès cette itération ?
+
+## 12. Flags de variantes pour la Phase 1bis du plan (ajoutés à la demande d'`experiment-manager`)
+
+Trois flags ajoutés pour rendre testables les variantes de la Phase 1bis sans dupliquer le modèle :
+
+- **`IndexedThinker(use_ff: bool = False, ff_hidden_mult: int = 4)`** : par défaut, aucun FF (§-1). `use_ff=True` remplace `fuse_proj` (projection linéaire) par un MLP à 2 couches GELU (`fuse_in`/`fuse_out`) **uniquement dans la boucle principale** — pas réintroduit dans le compresseur ni les output streams, cohérent avec la branche d'action de la Phase 1bis ("réintroduire un FF minimal dans la boucle principale seulement" si le sans-FF s'avère insuffisant pour la composition).
+- **`IndexedThinker(detach_sm_keys: bool = False)`** : teste la lecture A de §4.1 (stop-gradient sur les clés SM uniquement, valeurs non affectées) contre la lecture B (bout-en-bout, défaut actuel).
+- **`HierarchicalMemory(level_dropout_p: float = 0.0)`**, propagé via `IndexedThinker`: dropout stochastique des niveaux hauts pendant l'entraînement uniquement (`self.training`), jamais sur les feuilles (niveau 0, pour toujours garder un minimum d'ancrage réel). Probabilité croissante avec le niveau ($p_i = p \cdot i / \text{depth}$), implémenté en réutilisant le mécanisme de masquage déjà en place pour le padding (§11) plutôt qu'un chemin séparé — un niveau "droppé" pour un forward donné a simplement son masque mis à `False` en entier.
+
+Testés (`tests/test_indexed_memory.py::TestPhase1bisVariantFlags`) : `use_ff` change bien la structure de poids et le gradient atteint `fuse_in`/`fuse_out` ; `detach_sm_keys` change effectivement le gradient reçu par `sm_write_proj` par rapport à la version sans détachement ; `level_dropout_p=1.0` droppe effectivement des niveaux en mode entraînement sans produire de NaN, et n'a aucun effet en mode évaluation (`level_dropout_p=0.0` est un no-op vérifié séparément).

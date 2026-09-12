@@ -11,11 +11,13 @@ This module is intentionally independent from core/toy_model.py / core/layers.py
 CustomFlexDecoder machinery — per the spec, the existing implementation is not
 treated as ground truth here.
 
-Not implemented (out of MVP scope, see spec §7): No-Op / adaptive width, stop-gradient,
-stochastic level dropping. `build()`'s `leaf_mask` allows padding a variable number of
-real leaves up to a fixed `block_size ** depth` (needed for a curriculum that keeps the
-same hierarchy shape across stages); Q_KB/Q_SM are already decoupled (HierarchicalMemory
-vs IndexedThinker's SM query use separate projections).
+Not implemented (out of MVP scope, see spec §7): No-Op / adaptive width. `build()`'s
+`leaf_mask` allows padding a variable number of real leaves up to a fixed
+`block_size ** depth` (needed for a curriculum that keeps the same hierarchy shape
+across stages); Q_KB/Q_SM are already decoupled (HierarchicalMemory vs IndexedThinker's
+SM query use separate projections); `level_dropout_p` implements stochastic level
+dropping (train-time only, see HierarchicalMemory.attend). Stop-gradient on SM keys
+lives in IndexedThinker (core/indexed_thinker_model.py), not here.
 """
 
 import math
@@ -103,7 +105,8 @@ class HierarchicalMemory(nn.Module):
     baseline — spec §9, Baseline C).
     """
 
-    def __init__(self, d_model: int, block_size: int, depth: int, n_slots: int = 1, n_head: int = 1):
+    def __init__(self, d_model: int, block_size: int, depth: int, n_slots: int = 1, n_head: int = 1,
+                 level_dropout_p: float = 0.0):
         super().__init__()
         assert d_model % n_head == 0, "d_model must be divisible by n_head"
         self.d_model = d_model
@@ -111,6 +114,12 @@ class HierarchicalMemory(nn.Module):
         self.depth = depth
         self.n_slots = n_slots
         self.n_head = n_head
+        # spec §11bis / plan Phase 1bis: stochastic level dropping (train-time only,
+        # never applied to level 0 leaves so there is always something real to attend
+        # to). Probability increases with level, matching the idea's own description
+        # ("plus un niveau est haut, plus il est masqué aléatoirement souvent").
+        # Reuses the leaf-padding mask machinery below rather than a separate mechanism.
+        self.level_dropout_p = level_dropout_p
 
         self.k_proj = nn.Linear(d_model, d_model, bias=False)
         self.v_proj = nn.Linear(d_model, d_model, bias=False)
@@ -190,7 +199,15 @@ class HierarchicalMemory(nn.Module):
         normed_k = [self.level_norms[i](k) for i, k in enumerate(self._levels_k)]
         k_all = torch.cat(normed_k, dim=1)
         v_all = torch.cat(self._levels_v, dim=1)
-        mask_all = torch.cat(self._levels_mask, dim=1)  # (B, S) bool, True = attend
+
+        levels_mask = self._levels_mask
+        if self.training and self.level_dropout_p > 0 and self.depth > 0:
+            levels_mask = list(levels_mask)
+            for i in range(1, len(levels_mask)):  # never drop level 0 (leaves)
+                p_i = self.level_dropout_p * (i / self.depth)
+                if torch.rand(()) < p_i:
+                    levels_mask[i] = torch.zeros_like(levels_mask[i])
+        mask_all = torch.cat(levels_mask, dim=1)  # (B, S) bool, True = attend
 
         B, T, d = query_input.shape
         q = self.q_proj(query_input)
