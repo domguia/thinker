@@ -1,5 +1,7 @@
 # Toy model — la mémoire moyen terme construite à la volée n'a jamais été testée
 
+**[SUPERSEDED 2026-09-13]** Document de passation initial, gardé tel quel comme trace du constat de départ. Le plan actif, à jour (implémentation, corrections de `thinker-5b`, protocole d'exécution) est **`dev_notes/toy_memory_experiment_plan.md`** — le lire en premier. La « réserve à lever » du §2 ci-dessous a été vérifiée par `model-design` : voir §5 de ce fichier ou §1bis de `toy_memory_experiment_plan.md` — le constat tient, elle ne l'affaiblit pas.
+
 **Statut : constat + propositions d'expérience. Rien n'est implémenté.** Document de passation écrit le 2026-09-13 par la session `thinker-5b` (contre-expertise), transmis à `model-design` pour implémentation et à `experiment-manager` pour exécution. Voir « État de la passation » en fin de document.
 
 ## 0. Pourquoi ce document
@@ -90,9 +92,41 @@ Une tâche dont le `n_step` minimal requis **croît avec la longueur d'entrée**
 
 Rattachements : spec §3 (options de couplage KB/SM, toujours `[OUVERT]`), spec §14.2 (SM remise à zéro entre fenêtres, registre reporté — un choix qui suppose que la SM porte réellement quelque chose à l'intérieur d'une fenêtre).
 
-## 5. État de la passation (2026-09-13)
+## 4bis. Réserve du §2 levée (`model-design`, 2026-09-13)
 
-- **Fait** : ce constat + ces propositions. Rien d'implémenté, aucun run lancé.
-- **Délégué** : briefing envoyé à la session `model-design [f957bf]` — implémenter Exp. 0 et Exp. 1 (le socle, les autres en dépendent), déléguer l'exécution à `experiment-manager [9053f3]`, ne pas lancer les runs elle-même, documenter dans `dev_notes/`, rapporter à l'utilisateur ou poser ses questions. Exp. 2-5 transmises pour le plan, hors priorité immédiate.
-- **En attente** : la réponse de `model-design`, y compris sur la réserve du §2 (vérifier le chemin du run de septembre).
-- **Si personne n'a repris ce chantier** : Exp. 0 puis Exp. 1 sont chacune à portée d'une soirée de CPU, dans cet ordre. Exp. 1 est celle qui répond à la question.
+Vérifié : `notebooks/Th1nker_runner.ipynb`, cellule 44 (celle qui utilise `NumbersCopyDataset` et un balayage `hp_n_latent`/`hp_n_step` — le chemin plausible pour un run copy/cumsum comme celui du 18-19 sept.) contient exactement le même hardcode : `read_step = n_step - 1  # remove on output step`, ligne identique à `scripts/train.py:77` et `scripts/th1nker_runner.py:1044`. La config de cette cellule (`n_latent=[range(4,16+1,2)]`, `n_step=[range(4,12+1)]`) correspond au bloc de config cité dans `experiment.log.md` pour l'entrée "Sept 18 — Ça marche!". **Les trois chemins d'exécution du dépôt (les deux scripts et le notebook) hardcodent tous `read_step = n_step - 1`, sans exception trouvée.** La réserve est donc levée : le constat du §2 ne s'affaiblit pas, il se confirme par triangulation — rien dans ce dépôt n'a jamais entraîné avec un `read_step` autre que `n_step-1`.
+
+## 5. État de la passation — **clôture de la session `thinker-5b`, 2026-09-13**
+
+Ce document a rempli son rôle (établir le constat et proposer le protocole). **Il est désormais historique : la référence vivante est `dev_notes/toy_memory_experiment_plan.md`, tenu par `model-design`, plus à jour et plus complet.** Ne pas le faire diverger ; le fusionner dans l'autre si l'occasion se présente, en n'en gardant que la trace du constat initial (§1-§2).
+
+### Ce qui a été fait, et par qui
+
+- **`thinker-5b` (cette session, close)** : le constat du §2 et les propositions du §3. Aucune implémentation, aucun run.
+- **`model-design`** : a vérifié le constat indépendamment (y compris `all_losses_compute` et le flux d'accuracy de `scripts/train.py`, non couverts ici) et **confirmé** — rien à contredire. Puis a implémenté :
+  - `learn/toy_memory/eval_metrics.py` — exact-match séquence, accuracy par position, baselines triviales (`copy_input` traité comme **solveur exact** sur `copy` et non comme raccourci ; `most_common_token` mesuré empiriquement), `capacity_budget`, bloc de rapport ;
+  - `learn/toy_memory/train_toy_memory.py` — `--read_step` **obligatoire** (le défaut `n_step-1` qui était la cause du problème ne peut plus être réintroduit par inadvertance), `--eval_read_step` pour l'extrapolation, `--read_step_curriculum`, tâches `copy`/`cumsum` ;
+  - `dev_notes/toy_memory_experiment_plan.md` — plan complet avec table de décision §4.5.
+  - A aussi relâché `N == block_size ** depth` → multiple, côté `HierarchicalMemory` : la Phase 0bis à `depth=1` proposée dans le plan Indexed Attention n'était pas exprimable sans ça.
+- **`experiment-manager`** : détient le protocole d'exécution. Aucun résultat au moment de cette clôture.
+
+### Deux corrections apportées à la conception avant lancement (à ne pas re-défaire)
+
+1. **`read_step` ne varie pas une seule chose.** `memory = x` est fixé avant la boucle, donc `x` est visible pendant `read_step + 1` computes, et chaque compute écrit `n_latent` vecteurs. Le budget d'absorption vaut `(read_step + 1) × n_latent`. Sous le contenu de l'entrée, l'échec est une **impossibilité**, pas un verdict sur le mécanisme. D'où le drapeau `capacity_constraining`, dont le critère primaire doit rester un **compte de vecteurs** (`write_budget_vectors < seq_len`) : une comparaison dims-flottantes/bits ne se déclenche quasiment jamais et donne une fausse assurance.
+2. **Une falaise à `read_step` bas ne se conclut pas.** Chaque point est entraîné from scratch ; le modèle doit découvrir seul la stratégie « tout écrire au step 0 ». Précédents de ce projet : « having a plateau doesn't mean that the model is at capacity » (22 déc. 2023) et le plateau `n_facts=64` que le curriculum a entièrement débloqué (Phase -1/0). D'où le curriculum sur `read_step` **obligatoire avant tout verdict**, et l'attribution causale (Exp. 3) avant de conclure à une limite réelle si le curriculum ne débloque pas non plus.
+
+### En attente
+
+- **Résultats d'Exp. 1** : contrôle préalable (`copy` à `read_step = n_step` doit atteindre ~100 % exact-match — si ce point échoue, rien d'autre n'est interprétable), puis grille `read_step ∈ {0..6}` × 3 seeds sur `copy` aux deux longueurs (8 et 32), puis `cumsum`, avec curriculum sur toute cellule qui montre une falaise.
+- **Exp. 2-5** : au plan, non prioritaires. Exp. 2 (`n_memory`) est celle qui distingue « mémoire » de « simple récurrence » — c'est le vrai contenu scientifique de la question, à ne pas oublier une fois Exp. 1 tranchée.
+- **Addition base 16** : troisième tâche, pas encore câblée.
+
+### ⚠️ Travail non commité au moment de cette clôture
+
+Tout ce qu'a produit `thinker-5b` est commité (`49aa28b`, `c1b0016`, `4336e6f`, `351e3b8`, `0d11533`). **Le travail de `model-design` ne l'est pas** : `learn/toy_memory/`, `dev_notes/toy_memory_experiment_plan.md`, `dev_notes/future_experiments.md`, et ses modifications de `core/indexed_memory.py`, `dev_notes/indexed_attention_experiment_plan.md`, `learn/indexed_attention/train_kb_retrieval.py`. À committer par son auteur.
+
+Sont également non commités, antérieurs à tout ceci et appartenant à l'utilisateur : `learn/distill/train_sft.py`, `thesis/paper/main.typ`, `dev_notes/grid5000_usage.log.md`, `thesis/encadreur_profile.md`, `dev_notes/ideas/pretraining_for_dynmaic_inference.md`, `dev_notes/ideas/retrievial_training_design.md`.
+
+### Réserve levée
+
+Le §2 portait une réserve (« constat issu de la lecture du code, pas d'une exécution ; le run de septembre venait peut-être du notebook »). `model-design` a retracé `core/toy_model.py:183-208` indépendamment et confirmé. **La réserve est levée sur la mécanique** ; le chemin exact du run de septembre n'a pas été retracé, mais il ne change plus rien au constat.
