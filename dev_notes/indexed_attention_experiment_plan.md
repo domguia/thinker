@@ -255,6 +255,11 @@ Concernant les deux autres idées proposées par l'utilisateur (stop-gradient al
 
 **Décision : lancer (1) en premier** (le plus rapide à tester, flag déjà prêt), (2) en parallèle si les ressources le permettent plutôt qu'en séquentiel.
 
+**Trou méthodologique identifié par l'utilisateur dans le sweep `N_step` ci-dessus** : le sweep n'a fait varier que $N_{\text{step}}$ en gardant `n_hops=2` **fixe** — il ne dit donc que "plus de budget ne débloque pas *ce* problème à 2 sauts précis", pas si $N_{\text{step}}$ et `n_hops` **composent** ensemble en général. Un test plus complet, à ajouter (pas bloquant pour (1)/(2) ci-dessus, complémentaire) : une **grille jointe** $(n_{\text{hops}}, N_{\text{step}})$ plutôt qu'un balayage 1D — augmenter `n_hops` (3, 4...) en même temps que $N_{\text{step}}$, **et** inclure explicitement des points où $n_{\text{hops}} > N_{\text{step}}$ (moins d'itérations que de sauts nécessaires — cas dégénéré, échec attendu, sert de plancher de calibration). Deux lectures possibles :
+- Si le plateau (~24-25%) se retrouve identique **quel que soit** le rapport $n_{\text{hops}}/N_{\text{step}}$ (y compris quand $n_{\text{hops}} \le N_{\text{step}}$ largement) → renforce (c) : ce n'est vraiment pas une question de budget, à aucune combinaison testée.
+- Si une combinaison $(n_{\text{hops}}, N_{\text{step}})$ **différente** de $(2, 8\text{-}32)$ débloque un signal net → nuance (c), le problème serait plus spécifique qu'une limite générale de composition (à creuser lequel).
+À lancer après/en parallèle de (1)/(2) selon les ressources disponibles — pas urgent devant `use_ff`, mais à ne pas oublier.
+
 **Confirmation batch/LR co-scaling (même session, à `n_hops=1`/tâche simple)** : `batch_size=256` avec `lr=1.2e-3` (scaling linéaire depuis la config de référence, ×4 batch → ×4 LR) atteint 99,9% acc ; `lr=2.4e-3` diverge (7,1%, loss 4,3) ; `lr=6e-4` légèrement en dessous (99,55%). La règle de scaling linéaire a tenu exactement à ce saut de ×4 — confirme la recommandation donnée précédemment (rescaler puis revérifier par un sweep étroit, pas supposer). `batch_size=256, lr=1.2e-3` devient la config de référence pour les prochains runs à cette échelle.
 
 ## Phase 3 — Passage à des données textuelles réelles
