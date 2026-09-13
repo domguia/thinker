@@ -81,18 +81,62 @@ class OutputStream(nn.Module):
     register state — the stream's own attention learns which recurrent steps
     matter for its task, rather than assuming the core's iteration count lines
     up with anything.
+
+    Default mode: a single learned query (`query_seed`) -> one output vector
+    per forward call, as used by the synthetic single-query/single-answer
+    tasks (data/kb_retrieval.py, data/kb_chain_retrieval.py).
+
+    `sequence_mode=True` (spec §14.3, real-text integration, plan Phase 11):
+    generalizes this to `T` independent per-position queries instead of one,
+    for a per-token LM objective. Each query is built by the caller (Thinker,
+    from teacher-forced target-token embeddings) and passed in as
+    `query_input`; this class only adds a learned per-position embedding
+    (`pos_embed`) on top, since a raw token embedding alone carries no
+    position information. Every position still attends to `sm_k`/`sm_v`
+    *independently* -- no self-attention is added between positions, so this
+    stays exactly the same lightweight cross-attention mechanism as the
+    default mode, merely batched over a query dimension of size `T` instead
+    of 1 (`F.scaled_dot_product_attention` already treats queries at
+    different positions independently when there's no causal/self mask).
+    Teacher forcing means training is fully parallel across positions;
+    generation is necessarily autoregressive (spec §14.3), same as any
+    standard LM decoder.
     """
 
-    def __init__(self, d_model: int, out_dim: int, n_layers: int = 1):
+    def __init__(self, d_model: int, out_dim: int, n_layers: int = 1,
+                 sequence_mode: bool = False, max_seq_len: int = None):
         super().__init__()
         assert 1 <= n_layers <= 3, "output streams are meant to stay lightweight (1-3 layers)"
-        self.query_seed = nn.Parameter(torch.randn(1, d_model) * d_model ** -0.5)
+        self.sequence_mode = sequence_mode
+        if sequence_mode:
+            assert max_seq_len is not None and max_seq_len > 0, (
+                "sequence_mode requires max_seq_len (spec §14.3, an upper bound on T_tgt "
+                "for the learned per-position embedding table)"
+            )
+            self.pos_embed = nn.Embedding(max_seq_len, d_model)
+        else:
+            self.query_seed = nn.Parameter(torch.randn(1, d_model) * d_model ** -0.5)
         self.layers = nn.ModuleList([OutputStreamLayer(d_model) for _ in range(n_layers)])
         self.head = nn.Linear(d_model, out_dim)
 
-    def forward(self, sm_k: torch.Tensor, sm_v: torch.Tensor) -> torch.Tensor:
+    def forward(self, sm_k: torch.Tensor, sm_v: torch.Tensor,
+                query_input: torch.Tensor = None) -> torch.Tensor:
+        """
+        query_input (sequence_mode only): (B, T, d_model) teacher-forced
+        target-token embeddings (spec §14.3's q_t = embed(target_token_{t-1}),
+        computed by the caller since only Thinker owns `self.embed`) -- this
+        method adds the learned position embedding on top.
+        """
         B = sm_k.shape[0]
-        x = self.query_seed.unsqueeze(0).expand(B, -1, -1)
+        if self.sequence_mode:
+            assert query_input is not None, (
+                "sequence_mode stream requires query_input (spec §14.3 teacher forcing)"
+            )
+            T = query_input.shape[1]
+            pos = self.pos_embed(torch.arange(T, device=query_input.device)).unsqueeze(0)
+            x = query_input + pos
+        else:
+            x = self.query_seed.unsqueeze(0).expand(B, -1, -1)
         for layer in self.layers:
             x = layer(x, sm_k, sm_v)
         return self.head(x)

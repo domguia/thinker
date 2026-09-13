@@ -409,6 +409,89 @@ class TestOutputStreamsIndependence(unittest.TestCase):
             self.assertTrue(torch.any(layer.q_proj.weight.grad != 0), f"layer {i} q_proj gradient is all-zero")
 
 
+class TestSequenceModeOutputStream(unittest.TestCase):
+    """spec §14.3: multi-position generalization of OutputStream for a
+    per-token LM objective on real text (plan Phase 11). Default (non-
+    sequence) mode is covered by TestOutputStreamsIndependence above and must
+    stay unaffected -- checked here too (test_default_mode_unaffected)."""
+
+    def test_default_mode_unaffected_by_the_new_flag(self):
+        d, B, S = 8, 2, 5
+        sm_k = torch.randn(B, S, d)
+        sm_v = torch.randn(B, S, d)
+        stream = OutputStream(d, out_dim=6)  # sequence_mode=False, the default
+        self.assertFalse(hasattr(stream, "pos_embed"))
+        out = stream(sm_k, sm_v)
+        self.assertEqual(out.shape, (B, 1, 6))
+
+    def test_sequence_mode_requires_max_seq_len(self):
+        with self.assertRaises(AssertionError):
+            OutputStream(8, out_dim=6, sequence_mode=True)
+
+    def test_sequence_mode_requires_query_input(self):
+        d, B, S = 8, 2, 5
+        stream = OutputStream(d, out_dim=6, sequence_mode=True, max_seq_len=16)
+        with self.assertRaises(AssertionError):
+            stream(torch.randn(B, S, d), torch.randn(B, S, d))
+
+    def test_sequence_mode_output_shape_matches_T_tgt(self):
+        d, B, S, T = 8, 2, 5, 4
+        stream = OutputStream(d, out_dim=6, sequence_mode=True, max_seq_len=16)
+        sm_k, sm_v = torch.randn(B, S, d), torch.randn(B, S, d)
+        query_input = torch.randn(B, T, d)
+        out = stream(sm_k, sm_v, query_input=query_input)
+        self.assertEqual(out.shape, (B, T, 6))
+
+    def test_positions_attend_independently_no_cross_position_leakage(self):
+        # a query at position t must depend only on query_input[:, t] (+ the
+        # shared SM/pos_embed weights), never on query_input at another
+        # position -- there is deliberately no self-attention among target
+        # positions (spec §14.3), so changing position 0's input must not
+        # change position 1's output.
+        torch.manual_seed(0)
+        d, B, S, T = 8, 1, 5, 3
+        stream = OutputStream(d, out_dim=6, sequence_mode=True, max_seq_len=16)
+        sm_k, sm_v = torch.randn(B, S, d), torch.randn(B, S, d)
+        query_input = torch.randn(B, T, d)
+
+        out_a = stream(sm_k, sm_v, query_input=query_input)
+        query_input_b = query_input.clone()
+        query_input_b[:, 0] = torch.randn(B, d)  # perturb only position 0
+        out_b = stream(sm_k, sm_v, query_input=query_input_b)
+
+        torch.testing.assert_close(out_a[:, 1:], out_b[:, 1:], atol=1e-6, rtol=1e-6)
+        self.assertFalse(torch.allclose(out_a[:, 0], out_b[:, 0]), "position 0 itself should change")
+
+    def test_position_embedding_differentiates_identical_token_embeddings(self):
+        # same teacher-forced token embedding repeated at every position must
+        # still produce different outputs per position, purely from pos_embed
+        # -- otherwise position information would be silently lost.
+        torch.manual_seed(0)
+        d, B, S, T = 8, 1, 5, 4
+        stream = OutputStream(d, out_dim=6, sequence_mode=True, max_seq_len=16)
+        sm_k, sm_v = torch.randn(B, S, d), torch.randn(B, S, d)
+        same_token_emb = torch.randn(1, 1, d).expand(B, T, d)
+
+        out = stream(sm_k, sm_v, query_input=same_token_emb)
+        for t in range(1, T):
+            self.assertFalse(torch.allclose(out[:, 0], out[:, t]),
+                              f"position 0 and {t} must differ despite identical token embedding")
+
+    def test_gradient_reaches_pos_embed_and_query_input(self):
+        d, B, S, T = 8, 2, 5, 3
+        stream = OutputStream(d, out_dim=6, sequence_mode=True, max_seq_len=16)
+        sm_k, sm_v = torch.randn(B, S, d), torch.randn(B, S, d)
+        query_input = torch.randn(B, T, d, requires_grad=True)
+
+        out = stream(sm_k, sm_v, query_input=query_input)
+        out.sum().backward()
+
+        self.assertIsNotNone(stream.pos_embed.weight.grad)
+        self.assertTrue(torch.any(stream.pos_embed.weight.grad[:T] != 0))
+        self.assertIsNotNone(query_input.grad)
+        self.assertTrue(torch.any(query_input.grad != 0))
+
+
 class TestPhase1bisVariantFlags(unittest.TestCase):
     """Plan Phase 1bis: with/without FF, stop-gradient on SM keys, level dropout."""
 
