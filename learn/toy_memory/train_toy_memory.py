@@ -16,6 +16,35 @@ and reports exact-match/per-position accuracy against trivial baselines
 used, which cannot distinguish "solved the task" from "nailed the easy
 positions".
 
+**CRITICAL FIX (2026-09-13, found by model-design after a suspicious 96/96
+exact_match=1.0000 grid result)**: `ToyThinker.forward`'s `is_output_ar=True`
+path builds its output query as `out_query = embd_out_pos(pos) +
+embd_vocab(target)` -- the target sequence embedded UNSHIFTED, i.e. position
+i's query already contains an embedding of `target[i]`, the very token being
+scored at that position. `attn_compute` is a pre-norm RESIDUAL stack
+(core/layers.py::CustomFlexDecoderLayer, `x = res + ...` at every sub-layer),
+so this embedding survives to the output, and the tied output head
+(`F.linear(output, embd_vocab.weight)`) reads it straight back off --
+independent of `memory`/`x`/`read_step` entirely. Verified empirically: a
+model trained this way still predicts `targets` perfectly even when `inputs`
+is swapped for a completely unrelated random sequence (see the mismatch test
+this module's `evaluate_with_leak_check` mirrors). This is why 96/96 cells
+converged to exact 1.0000 with zero variance across every read_step, both
+scales, both tasks -- **the metric measured whether the model can read back
+an embedding handed directly to it, not whether it solved the task from
+memory.** `outs[4]` (the `is_full_ar` causal stream) has the same defect,
+since `target` is fed unshifted there too.
+
+**Fix**: shift the query by one position with a reserved BOS id (standard
+teacher-forcing convention -- position i's query carries `target[i-1]`,
+never `target[i]`), so the residual stream can no longer leak the current
+label. `ToyThinker` is built with `vocab_size + 1` (the extra row is the BOS
+id, never a valid label). `evaluate()` now also runs a permanent mismatch
+check (`leak_check` in `eval_metrics.py`) every time -- feeds unrelated
+`inputs` with the same `targets` and asserts accuracy stays near chance, so
+this bug (or a regression of it) can never again silently pass as "the model
+solved the task."
+
 Task order per the plan: copy first (pure transport, no computation -- if
 this breaks under a low read_step, everything downstream will too), then
 cumsum (the smallest task where re-reading vs. memorizing the running sum
@@ -58,38 +87,61 @@ def sample_batch(batch: int, seq_len: int, vocab_size: int, task: str,
     return x.to(device), y.to(device)
 
 
-def forward_and_predict(model, inputs, targets, n_latent, n_step, read_step, n_memory):
-    """One forward pass + argmax predictions from the non-AR (additive
-    teacher-forced query) logits stream, matching the metric already used by
-    `scripts/train.py` (`outs[1]`, not the causal `outs[4]` stream) for
-    continuity with prior numbers in experiment.log.md."""
-    outs = model(inputs, targets, n_latent, n_step, read_step, n_memory=n_memory,
-                 is_full_ar=True, is_output_ar=True, output_step=1)
+def shift_targets(targets: torch.Tensor, bos_id: int) -> torch.Tensor:
+    """Standard teacher-forcing shift: position i's query input becomes
+    target[i-1] (position 0 gets the reserved BOS id), so the residual
+    stream can never carry the CURRENT position's own label -- see the
+    module docstring's CRITICAL FIX note for why the unshifted version leaks."""
+    bos_col = torch.full((targets.shape[0], 1), bos_id, dtype=targets.dtype, device=targets.device)
+    return torch.cat([bos_col, targets[:, :-1]], dim=1)
+
+
+def forward_and_predict(model, inputs, targets, n_latent, n_step, read_step, n_memory, bos_id):
+    """One forward pass + argmax predictions from the (shifted-query) logits
+    stream. `targets` is used unshifted for the returned predictions'
+    ground truth; the query fed to the model is shift_targets(targets,
+    bos_id) so the model can never read its own label off the residual
+    stream (see module docstring)."""
+    shifted = shift_targets(targets, bos_id)
+    outs = model(inputs, shifted, n_latent, n_step, read_step, n_memory=n_memory,
+                 is_full_ar=False, is_output_ar=True, output_step=1)
     logits = outs[1][:, -1, :, :]  # (B, T, vocab) at the last compute step
     preds = torch.argmax(logits, dim=2)
     return outs, preds
 
 
-def evaluate(model, args, device, read_step: int, n_eval: int = 8, seed: int = 999) -> dict:
+def evaluate(model, args, device, read_step: int, bos_id: int, n_eval: int = 8, seed: int = 999) -> dict:
     """Held-out pass (disjoint seed from training) at a given `read_step`.
-    Averages over `n_eval` batches for a less noisy read."""
+    Averages over `n_eval` batches for a less noisy read. Also runs the
+    permanent mismatch/leak check (eval_metrics.leak_check): feeds
+    unrelated `inputs` alongside the same `targets` and confirms accuracy
+    drops to near chance -- catches a regression of the residual-leak bug
+    this module was fixed for, rather than trusting the shift silently."""
     model.eval()
     gen = torch.Generator().manual_seed(seed)
-    tok_accs, exact_accs, pos_accs = [], [], []
+    mismatch_gen = torch.Generator().manual_seed(seed + 54321)
+    tok_accs, exact_accs, pos_accs, leak_accs = [], [], [], []
     with torch.no_grad():
         for _ in range(n_eval):
             inputs, targets = sample_batch(args.batch_size, args.seq_len, args.vocab_size,
                                            args.task, device, generator=gen)
             _, preds = forward_and_predict(model, inputs, targets, args.n_latent,
-                                           args.n_step, read_step, args.n_memory)
+                                           args.n_step, read_step, args.n_memory, bos_id)
             tok_accs.append(token_accuracy(preds, targets))
             exact_accs.append(exact_match_rate(preds, targets))
             pos_accs.append(per_position_accuracy(preds, targets))
+
+            mismatched_inputs, _ = sample_batch(args.batch_size, args.seq_len, args.vocab_size,
+                                                args.task, device, generator=mismatch_gen)
+            _, leak_preds = forward_and_predict(model, mismatched_inputs, targets, args.n_latent,
+                                                args.n_step, read_step, args.n_memory, bos_id)
+            leak_accs.append(token_accuracy(leak_preds, targets))
     model.train()
     return {
         "token_acc": sum(tok_accs) / len(tok_accs),
         "exact_match": sum(exact_accs) / len(exact_accs),
         "pos_acc": torch.stack(pos_accs).mean(dim=0),
+        "leak_token_acc": sum(leak_accs) / len(leak_accs),
     }
 
 
@@ -150,8 +202,9 @@ def main():
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
+    bos_id = args.vocab_size  # reserved row, never a valid label (see shift_targets)
     model = ToyThinker(
-        vocab_size=args.vocab_size, max_latent=max(args.n_latent, 16),
+        vocab_size=args.vocab_size + 1, max_latent=max(args.n_latent, 16),
         max_input_len=args.seq_len, max_output_len=args.seq_len,
         d_model=args.d_model, nhead=args.nhead, d_hid=args.d_hid, nlayers=args.nlayers,
         n_probe=1, dropout=0.0,  # all_losses_compute calls compute_probe_loss() unconditionally,
@@ -221,7 +274,7 @@ def main():
         inputs, targets = sample_batch(args.batch_size, args.seq_len, args.vocab_size,
                                        args.task, device)
         outs, preds = forward_and_predict(model, inputs, targets, args.n_latent,
-                                          args.n_step, current_read_step, args.n_memory)
+                                          args.n_step, current_read_step, args.n_memory, bos_id)
         loss, _ = all_losses_compute(outs, targets, target_emb=None, last_step_only=False)
 
         optimizer.zero_grad()
@@ -230,15 +283,19 @@ def main():
         optimizer.step()
 
         if step % args.eval_every == 0:
-            matched = evaluate(model, args, device, read_step=current_read_step)
+            matched = evaluate(model, args, device, read_step=current_read_step, bos_id=bos_id)
+            leak_flag = "" if matched["leak_token_acc"] < mode_baseline["vocab_chance"] + 0.15 else \
+                " *** LEAK SUSPECTED (mismatch accuracy far above chance) ***"
             print(f"step={step:6d} stage_read_step={current_read_step} elapsed={elapsed/60:.2f}m "
                   f"loss={loss.item():.4f} [matched read_step={current_read_step}] "
-                  f"token_acc={matched['token_acc']:.4f} exact_match={matched['exact_match']:.4f}", flush=True)
+                  f"token_acc={matched['token_acc']:.4f} exact_match={matched['exact_match']:.4f} "
+                  f"leak_check={matched['leak_token_acc']:.4f}{leak_flag}", flush=True)
 
             if args.eval_read_step is not None:
-                extrap = evaluate(model, args, device, read_step=args.eval_read_step)
+                extrap = evaluate(model, args, device, read_step=args.eval_read_step, bos_id=bos_id)
                 print(f"           [extrapolation read_step={args.eval_read_step}] "
-                      f"token_acc={extrap['token_acc']:.4f} exact_match={extrap['exact_match']:.4f}", flush=True)
+                      f"token_acc={extrap['token_acc']:.4f} exact_match={extrap['exact_match']:.4f} "
+                      f"leak_check={extrap['leak_token_acc']:.4f}", flush=True)
 
             if matched["exact_match"] > best_exact:
                 best_exact = matched["exact_match"]
@@ -258,10 +315,14 @@ def main():
                 budget = print_budget(current_read_step, "matched")
                 print(f"step={step:6d} CURRICULUM PROMOTE -> read_step={current_read_step}", flush=True)
 
-    final = evaluate(model, args, device, read_step=current_read_step, n_eval=16)
+    final = evaluate(model, args, device, read_step=current_read_step, bos_id=bos_id, n_eval=16)
     print("\n---", flush=True)
     print(format_report(args.task, final["token_acc"], final["exact_match"],
                         copy_baseline, mode_baseline, pos_acc=final["pos_acc"], budget=budget), flush=True)
+    leak_verdict = "OK (near chance)" if final["leak_token_acc"] < mode_baseline["vocab_chance"] + 0.15 else \
+        "*** LEAK SUSPECTED -- do not trust final_exact_match above ***"
+    print(f"leak_check (mismatched-input token_acc, should sit near vocab_chance={mode_baseline['vocab_chance']:.4f}): "
+          f"{final['leak_token_acc']:.4f}  -> {leak_verdict}", flush=True)
     print(f"read_step_stages:      {stages}", flush=True)
     print(f"final_stage_read_step: {current_read_step} (stage {stage_idx + 1}/{len(stages)})", flush=True)
     print(f"best_exact_match:  {best_exact:.4f}", flush=True)
@@ -270,9 +331,10 @@ def main():
     print(f"num_steps:         {step + 1}", flush=True)
 
     if args.eval_read_step is not None:
-        extrap_final = evaluate(model, args, device, read_step=args.eval_read_step, n_eval=16)
+        extrap_final = evaluate(model, args, device, read_step=args.eval_read_step, bos_id=bos_id, n_eval=16)
         print(f"final_extrapolation_read_step={args.eval_read_step}: "
-              f"token_acc={extrap_final['token_acc']:.4f} exact_match={extrap_final['exact_match']:.4f}", flush=True)
+              f"token_acc={extrap_final['token_acc']:.4f} exact_match={extrap_final['exact_match']:.4f} "
+              f"leak_check={extrap_final['leak_token_acc']:.4f}", flush=True)
 
 
 if __name__ == "__main__":
