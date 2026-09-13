@@ -1,5 +1,5 @@
 """
-Correctness tests for HierarchicalMemory / IndexedThinker, all CPU-only.
+Correctness tests for HierarchicalMemory / Thinker, all CPU-only.
 See dev_notes/indexed_attention_spec.md for the math these cross-check against.
 """
 
@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from core.indexed_memory import HierarchicalMemory, LevelCompressor
-from core.indexed_thinker_model import IndexedThinker, OutputStream
+from core.indexed_thinker_model import Thinker, OutputStream
 from data.kb_retrieval import KBRetrievalDataset
 
 
@@ -297,7 +297,7 @@ class TestOverfitSanityCheck(unittest.TestCase):
         ds = KBRetrievalDataset(n_facts=n_facts, vocab_size=vocab_size, seed=0)
         kb_tokens, kb_source_ids, kb_mask, query_tokens, labels = ds.sample_batch(batch_size=8)
 
-        model = IndexedThinker(
+        model = Thinker(
             vocab_size=ds.total_vocab_size, d_model=32, n_register=1,
             block_size=4, depth=2, n_slots=1, n_head=1, sm_cap=8,
         )
@@ -324,13 +324,13 @@ class TestOverfitSanityCheck(unittest.TestCase):
     def test_flat_baseline_depth_zero_also_overfits(self):
         # Baseline C (spec §9): depth=0 degenerates HierarchicalMemory to plain
         # dense attention over all leaves, no hierarchy. Sanity check that the
-        # same IndexedThinker loop isn't broken/regressed in this degenerate case.
+        # same Thinker loop isn't broken/regressed in this degenerate case.
         torch.manual_seed(0)
         n_facts, vocab_size = 4, 16
         ds = KBRetrievalDataset(n_facts=n_facts, vocab_size=vocab_size, seed=1)
         kb_tokens, kb_source_ids, kb_mask, query_tokens, labels = ds.sample_batch(batch_size=8)
 
-        model = IndexedThinker(
+        model = Thinker(
             vocab_size=ds.total_vocab_size, d_model=32, n_register=1,
             block_size=16, depth=0, n_slots=1, n_head=1, sm_cap=8,
         )
@@ -356,7 +356,7 @@ class TestOverfitSanityCheck(unittest.TestCase):
 
 class TestOutputStreamsIndependence(unittest.TestCase):
     def test_streams_have_disjoint_parameters(self):
-        model = IndexedThinker(
+        model = Thinker(
             vocab_size=20, d_model=16, n_register=1, block_size=4, depth=1,
             stream_dims={'answer': 20, 'thinking': 8},
         )
@@ -370,7 +370,7 @@ class TestOutputStreamsIndependence(unittest.TestCase):
         ds = KBRetrievalDataset(n_facts=1, vocab_size=8, seed=2)  # n_leaves=4, block_size=4, depth=1
         kb_tokens, kb_source_ids, kb_mask, query_tokens, labels = ds.sample_batch(batch_size=4)
 
-        model = IndexedThinker(
+        model = Thinker(
             vocab_size=ds.total_vocab_size, d_model=16, n_register=1,
             block_size=4, depth=1, stream_dims={'answer': ds.total_vocab_size, 'thinking': 8},
         )
@@ -413,7 +413,7 @@ class TestPhase1bisVariantFlags(unittest.TestCase):
     """Plan Phase 1bis: with/without FF, stop-gradient on SM keys, level dropout."""
 
     def _small_model(self, **kwargs):
-        return IndexedThinker(
+        return Thinker(
             vocab_size=20, d_model=16, n_register=1, block_size=4, depth=2,
             sm_cap=8, **kwargs,
         )

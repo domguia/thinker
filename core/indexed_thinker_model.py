@@ -1,4 +1,12 @@
 """
+`Thinker` -- the project's actual model (renamed from `IndexedThinker`
+2026-09-13: this IS the Thinker described by the project's thesis, not a
+variant of it). `core/toy_model.py::ToyThinker` is a deliberately simplified
+placeholder used for earlier toy-task debugging (flat concatenated memory,
+basic transformer layer, no indexing) -- not an earlier version of this class
+and not renamed. `core/thinker_model.py::Th1nker` is a separate, older,
+unused/inactive file -- do not confuse the two.
+
 Minimal end-to-end model wiring HierarchicalMemory (core/indexed_memory.py) into
 the "Indexed Attention" main loop described in dev_notes/indexed_attention_spec.md §2:
 
@@ -18,12 +26,13 @@ trajectory by their own dedicated cross-attention — each stream owns its own
 query + head weights, disjoint from every other stream and from the core loop
 above. Only the SM tensor itself (an activation, not a weight) is shared.
 
-Deliberately a *new*, separate model from core/toy_model.py::ToyThinker rather
+Deliberately a *separate* class from core/toy_model.py::ToyThinker rather
 than a modification of it: ToyThinker's forward has many special-cased flags
 (autoregressive output, probes, curriculum perturbation) unrelated to this
 architecture, and the spec explicitly says not to treat the existing
-implementation as ground truth. This keeps the new mechanism testable in
-isolation.
+implementation as ground truth. This kept the new mechanism testable in
+isolation while under active development; `Thinker` here is the real target
+architecture going forward, not a parallel experiment to eventually merge back.
 
 Not implemented (out of MVP scope, see spec §7, §11bis): No-Op / adaptive
 width, SM capacity eviction beyond an optional hard cap. Q_KB vs Q_SM are
@@ -89,7 +98,7 @@ class OutputStream(nn.Module):
         return self.head(x)
 
 
-class IndexedThinker(nn.Module):
+class Thinker(nn.Module):
     def __init__(self, vocab_size: int, d_model: int, n_register: int,
                  block_size: int, depth: int, n_slots: int = 1, n_head: int = 1,
                  sm_cap: int = None, stream_dims: dict = None,

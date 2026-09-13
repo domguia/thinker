@@ -14,10 +14,10 @@ treated as ground truth here.
 Not implemented (out of MVP scope, see spec §7): No-Op / adaptive width. `build()`'s
 `leaf_mask` allows padding a variable number of real leaves up to a fixed
 `block_size ** depth` (needed for a curriculum that keeps the same hierarchy shape
-across stages); Q_KB/Q_SM are already decoupled (HierarchicalMemory vs IndexedThinker's
+across stages); Q_KB/Q_SM are already decoupled (HierarchicalMemory vs Thinker's
 SM query use separate projections); `level_dropout_p` implements stochastic level
 dropping (train-time only, see HierarchicalMemory.attend). Stop-gradient on SM keys
-lives in IndexedThinker (core/indexed_thinker_model.py), not here.
+lives in Thinker (core/indexed_thinker_model.py), not here.
 """
 
 import math
