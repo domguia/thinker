@@ -690,3 +690,36 @@ So the 99.6% vs 6.0% gap does **not** establish that hierarchical indexing beats
 - `diagnose_attention_supervision.py` / `train_kb_chain_attn_supervised.py`: `--supervise node|leaf`, `--shared_kv_pooling`, plus a `node_selection_diagnostic` that tracks what actually matters.
 
 No GPU runs were launched for this entry — the re-runs are queued in the plan (Phase 0bis / Phase 2-redo).
+
+## 2026-09-13 — CPU-vs-GPU confound resolved: exact-config repro confirms it was hyperparameters, not scale (superseded by the compressor-bug finding above, kept for the record)
+
+Before the Contre-expertise entry above landed, this session (experiment-manager) had been given a narrower, now-superseded task: the earlier GPU `attn_supervised` grid (`d_model=128`, 3 seeds) had failed to reproduce the CPU diagnostic's 99.2% task accuracy (self-match fixed perfectly on both, but GPU `final_acc` stayed at the ~25% plateau) — plan flagged reproducing the exact CPU config (`d_model=32, vocab_size=32, n_register=4, batch_size=64, lr=3e-4, n_step=16, 12000 steps`) at matched budget on GPU as the required next step before trusting either a scale effect or chasing a new architectural hypothesis.
+
+Ran `learn/indexed_attention/train_kb_chain_attn_supervised.py` with that exact config, 3 seeds, on Rennes (`abacus22-1` A5000 job 4105879, then `abacus21-1` A100 job 4105917 after the first job's walltime cut off mid-grid):
+
+| variant | seed 0 | seed 1 | seed 2 |
+|---|---|---|---|
+| `attn_supervised` | 99.77% | 99.77% | 99.22% |
+| baseline (no supervision) | 33.8% | 26.9% | 28.8% |
+
+**Result: GPU fully reproduces the CPU numbers when the config is matched exactly** (99.2-99.8% vs. CPU's 99.2%; baseline lands in the same 25-34% plateau band documented throughout this project). This resolves the specific confusion flagged in the plan: the earlier `d_model=128` grid's failure to reproduce was **not** a d_model/GPU-scale effect — it was a confound of several simultaneously-changed hyperparameters (the GPU script's own defaults: `vocab_size=64` not 32, `n_register=1` not 4, `batch_size=256` not 64, `lr=1.2e-3` not 3e-4, `max_steps` capped by a 30-min walltime not a fixed 12000). Each run took ~25 min on GPU (not the few seconds this scale suggested — small-model wall-clock is dominated by per-step Python/kernel-launch overhead, not FLOPs), which is why the first job's default 1h walltime cut the grid short mid-way and needed a second, longer-walltime job to finish.
+
+**Superseded context**: by the time this finished, the Contre-expertise entry above (relayed via the `model-design` sister session) had already found the real root cause of the `n_hops>=2` plateau (the compressor's shared-softmax key/value pooling bug) and shown the attention-supervision fix itself was targeting the wrong node (leaf, not level-1) — so this result closes the specific "why doesn't GPU reproduce CPU" question cleanly, but the broader `attn_supervised`-at-`d_model=128`-plateau finding it was chasing is no longer the live question. No further action needed on this thread; recorded for completeness since it was a fully-executed, valid diagnostic in its own right.
+
+Infra note: `micromamba` isn't on `$PATH` in a non-interactive `oarsh`/`nohup` shell (no `.bashrc` sourcing) — use the full path (`~/micromamba/micromamba run -n <env> ...`) in any unattended launch script rather than assuming `micromamba` resolves. Also, running a script by relative path from `~/thinker` still needs `PYTHONPATH=~/thinker` set explicitly — Python puts the *script's own* directory (`learn/indexed_attention/`) on `sys.path[0]`, not the cwd, so `import data.foo` / `import core.foo` fail with `ModuleNotFoundError` otherwise despite `cd`ing to the repo root first.
+
+## 2026-09-13 — Toy model: the on-the-fly medium-term memory was never actually tested
+
+Same blind spot as the compressor bug found the same day: the mechanism exists in the code, nothing ever forces its use, and no metric in place would have revealed it.
+
+`core/toy_model.py:205-207` has the machinery (`memory = latents if i >= read_step else [x] + latents`, plus an `n_memory` FIFO cap), but `read_step = n_step - 1` is **hardcoded** in every training script (`scripts/train.py:77`, `scripts/th1nker_runner.py:1044` — whose comment, "remove on output step", confirms the intent was to force only the OUTPUT to read from memory), and `n_memory` was never set (default `1e4`, unbounded). Neither knob appears anywhere in this log.
+
+Tracing the loop: the input stays in memory for every latent-compute step; only the final output query reads `latents` alone. **The model never had to carry information across iterations without being able to re-read the input.**
+
+Consequence: the known results (97% base-16 addition, Dec 2023; the `cumsum` compute-extrapolation, Sept) are fully compatible with "the model re-reads the input each step and the latent is just a workspace". They neither demonstrate nor refute that the on-the-fly memory carries information — the question is simply open. The Sept compute-extrapolation result itself still stands; it does not depend on this point.
+
+Caveat to lift before investing: this comes from reading the code and tracing the loop, not from an execution. The Sept run may have come from `notebooks/Th1nker_runner.ipynb` rather than the two scripts checked. Verify which path that run used.
+
+Full analysis, the decisive experiment (a `read_step` sweep) and four further proposals: **`dev_notes/toy_model_memory_experiments.md`**. Nothing implemented, no runs launched; briefed to `model-design` for implementation and `experiment-manager` for execution.
+
+Why it matters beyond the toy branch: `Thinker` has the same structure (SM built by APPEND per step while the KB stays permanently queryable — i.e. `read_step = n_step` throughout), so this conditions the SM's design in the main architecture, at CPU cost instead of GPU.

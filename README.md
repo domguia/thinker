@@ -11,6 +11,8 @@ This project explores "Language Modeling as Compression" and reasoning via laten
 | **Distillation** | 🟢 Actif, en parallèle **volontairement** : produit une baseline sur architecture standard et fait acquérir l'expérience de la distillation (Teacher, KD Top-K, muP, checkpoint/resume) avant de l'appliquer au `Thinker` (plan Phase 4) | `learn/distill/` |
 | **LLM as Data Compressor** | 🔴 **ARRÊTÉ** — travaux gelés, conservés pour l'historique. Ne pas y consacrer de ressources. La section ci-dessous décrit l'état au moment de l'arrêt | `core/compressor/`, `docs/compression/`, `notebooks/` |
 
+**Chantier toy model (opérations de calcul simple)** : garé depuis mars, repris le 2026-09-13 — la question qu'il devait trancher (« le loop reasoning avec mémoire moyen terme construite à la volée fonctionne-t-il ? ») n'a jamais été testée. Constat et protocole : `dev_notes/toy_model_memory_experiments.md`.
+
 **Point d'entrée pour toute session de travail sur l'architecture** : `dev_notes/indexed_attention_experiment_plan.md`, section « ⚠️ PRIORITÉ ABSOLUE — révision post-contre-expertise », qui liste ce qui est invalidé, ce qui est corrigé dans le code, et l'ordre d'exécution des re-runs.
 
 ## 🚀 LLM as Data Compressor (chantier arrêté — historique)
