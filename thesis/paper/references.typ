@@ -31,4 +31,7 @@
 [30] Ross, S., et al. (2011). A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning. AISTATS. \
 [31] Zhang, C., et al. (2025). Proposing and Solving Olympiad Geometry with Guided Tree Search (TongGeometry). Nature Machine Intelligence. \
 [32] Google DeepMind. (2025). Gold-medalist Performance in Solving Olympiad Geometry (AlphaGeometry 2). arXiv:2502.03544. \
-[33] Liu, S., et al. (2025). Goedel-Prover: Frontier Open-Source Automated Theorem Proving. COLM.
+[33] Liu, S., et al. (2025). Goedel-Prover: Frontier Open-Source Automated Theorem Proving. COLM. \
+[34] Yuan, J., Gao, H., Dai, D., Luo, J., Zhao, L., Zhang, Z., Xie, Z., Wei, Y. X., Wang, L., Xiao, Z., Wang, Y., Ruan, C., Zhang, M., Liang, W., & Zeng, W. (2025). Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention. arXiv:2502.11089. \
+[35] DeepSeek-AI. (2025). DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models (DeepSeek Sparse Attention / Lightning Indexer). arXiv:2512.02556. \
+[36] Qiu, Z., Wang, Z., Li, X., et al. (2026). On the Design of Qwen3.8-Next Architecture: Evaluation, Efficiency, and Training Stability (Qwen Sparse Attention). arXiv:2608.30320.

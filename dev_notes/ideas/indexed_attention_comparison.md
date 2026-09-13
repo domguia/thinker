@@ -2,6 +2,11 @@
 
 Objectif de ce document : avant toute implémentation, comparer point par point les mécanismes d'attention creuse/indexée existants (QSA, DSA, NSA, GDN — discutés en tout début de `raw/Branch-•-Indexed-Attention.md`, lignes 1-500) avec la variante "Indexed Attention" imaginée pour Thinker (synthétisée dans `dev_notes/ideas/branch_indexed_attention_synthesis.md`). Aucun choix d'implémentation n'est fait ici — c'est une base de décision.
 
+**Références retrouvées et vérifiées (2026-09-13, demande explicite de l'utilisateur — ces trois mécanismes ont été discutés dans `raw/Branch-•-Indexed-Attention.md` sans citation formelle jusqu'ici ; ajoutées aussi dans `thesis/paper/references.typ` [34]-[36])** :
+- **NSA** : Yuan, J., Gao, H., Dai, D., et al. (2025). *Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention*. arXiv:2502.11089. (DeepSeek.)
+- **DSA** : DeepSeek-AI (2025). *DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models* — introduit DeepSeek Sparse Attention et son "Lightning Indexer". arXiv:2512.02556.
+- **QSA** : Qiu, Z., Wang, Z., Li, X., et al. (2026). *On the Design of Qwen3.8-Next Architecture: Evaluation, Efficiency, and Training Stability*. arXiv:2608.30320. (Qwen Team, Alibaba — introduit Qwen Sparse Attention dans Qwen3.8-Flash-Next, un hybride avec Gated DeltaNet, une couche QSA pour 3 couches GDN — cohérent avec ce qui était déjà documenté ici à partir des notes de conversation.)
+
 **Clarification terminologique** : "Indexed Attention" est le nom de la variante Thinker elle-même (registre latent + SM + KB hiérarchique indexée). "Branch" dans le nom du fichier source n'est qu'un intitulé de conversation/branche de discussion — ce n'est pas un mécanisme ou un concept architectural séparé. Il n'y a donc pas deux idées concurrentes, une seule : Thinker enrichi d'une mémoire externe indexée.
 
 ## 0. Un point de contexte essentiel : la littérature et Thinker ne résolvent pas le même problème
