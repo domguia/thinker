@@ -492,6 +492,118 @@ class TestSequenceModeOutputStream(unittest.TestCase):
         self.assertTrue(torch.any(query_input.grad != 0))
 
 
+class TestRealTextIntegrationWiring(unittest.TestCase):
+    """spec §14.2 (register carry-over) / §14.3 (target_input teacher forcing)
+    wired into Thinker.forward, plan Phase 11. Uses data/real_text_windows.py's
+    field names (target_input, register_init_override) directly."""
+
+    def _make_model(self, vocab_size=20, d_model=16, n_register=2, block_size=4, depth=1,
+                     sequence_answer=False, max_target_len=None):
+        return Thinker(
+            vocab_size=vocab_size, d_model=d_model, n_register=n_register,
+            block_size=block_size, depth=depth,
+            stream_dims={'answer': vocab_size},
+            stream_sequence={'answer': True} if sequence_answer else None,
+            max_target_len=max_target_len,
+        )
+
+    def test_register_init_override_replaces_learned_init(self):
+        # n_step=0 isolates the register-seeding logic from the reasoning
+        # loop: R returned is exactly register_base + mean(query embedding).
+        torch.manual_seed(0)
+        model = self._make_model()
+        N = model.memory.block_size ** model.memory.depth
+        kb_tokens = torch.randint(0, 20, (2, N))
+        kb_source_ids = torch.zeros(2, N, dtype=torch.long)
+        query_tokens = torch.randint(0, 20, (2, 3))
+
+        R_default, _ = model(kb_tokens, kb_source_ids, query_tokens, n_step=0)
+
+        override = torch.randn(2, model.n_register, model.d_model)
+        R_override, _ = model(kb_tokens, kb_source_ids, query_tokens, n_step=0,
+                               register_init_override=override)
+
+        q_emb = model.embed(query_tokens).mean(dim=1, keepdim=True)
+        torch.testing.assert_close(R_default, model.register_init.unsqueeze(0).expand(2, -1, -1) + q_emb)
+        torch.testing.assert_close(R_override, override + q_emb)
+        self.assertFalse(torch.allclose(R_default, R_override))
+
+    def test_default_streams_work_without_target_input(self):
+        # no stream has sequence_mode=True -> target_input must stay optional
+        # (backward compatibility with kb_retrieval/kb_chain_retrieval usage).
+        model = self._make_model(sequence_answer=False)
+        N = model.memory.block_size ** model.memory.depth
+        kb_tokens = torch.randint(0, 20, (2, N))
+        kb_source_ids = torch.zeros(2, N, dtype=torch.long)
+        query_tokens = torch.randint(0, 20, (2, 3))
+        _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2)
+        self.assertEqual(streams['answer'].shape, (2, 1, 20))
+
+    def test_sequence_mode_stream_requires_target_input(self):
+        model = self._make_model(sequence_answer=True, max_target_len=8)
+        N = model.memory.block_size ** model.memory.depth
+        kb_tokens = torch.randint(0, 20, (2, N))
+        kb_source_ids = torch.zeros(2, N, dtype=torch.long)
+        query_tokens = torch.randint(0, 20, (2, 3))
+        with self.assertRaises(AssertionError):
+            model(kb_tokens, kb_source_ids, query_tokens, n_step=2)
+
+    def test_sequence_mode_stream_produces_per_position_logits(self):
+        torch.manual_seed(0)
+        vocab_size, T_tgt = 20, 5
+        model = self._make_model(vocab_size=vocab_size, sequence_answer=True, max_target_len=T_tgt)
+        N = model.memory.block_size ** model.memory.depth
+        kb_tokens = torch.randint(0, vocab_size, (3, N))
+        kb_source_ids = torch.zeros(3, N, dtype=torch.long)
+        query_tokens = torch.randint(0, vocab_size, (3, 3))
+        target_input = torch.randint(0, vocab_size, (3, T_tgt))
+
+        _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=2, target_input=target_input)
+        self.assertEqual(streams['answer'].shape, (3, T_tgt, vocab_size))
+
+    def test_gradient_reaches_embed_through_target_input_path(self):
+        torch.manual_seed(0)
+        vocab_size, T_tgt = 20, 4
+        model = self._make_model(vocab_size=vocab_size, sequence_answer=True, max_target_len=T_tgt)
+        N = model.memory.block_size ** model.memory.depth
+        kb_tokens = torch.randint(0, vocab_size, (2, N))
+        kb_source_ids = torch.zeros(2, N, dtype=torch.long)
+        query_tokens = torch.randint(0, vocab_size, (2, 3))
+        target_input = torch.randint(0, vocab_size, (2, T_tgt))
+
+        _, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step=1, target_input=target_input)
+        streams['answer'].sum().backward()
+        self.assertIsNotNone(model.embed.weight.grad)
+        self.assertTrue(torch.any(model.embed.weight.grad != 0))
+
+    def test_two_window_register_carry_end_to_end(self):
+        # simulates RealTextWindowDataset's is_first_window convention: first
+        # window uses the learned register_init, later windows carry the
+        # previous window's (stop-gradient'd) final R -- spec §14.2.
+        torch.manual_seed(0)
+        vocab_size = 20
+        model = self._make_model(vocab_size=vocab_size, sequence_answer=True, max_target_len=4)
+        N = model.memory.block_size ** model.memory.depth
+
+        def random_window():
+            return (
+                torch.randint(0, vocab_size, (2, N)),
+                torch.zeros(2, N, dtype=torch.long),
+                torch.randint(0, vocab_size, (2, 3)),
+                torch.randint(0, vocab_size, (2, 4)),  # target_input
+            )
+
+        kb1, src1, q1, tgt1 = random_window()
+        R1, streams1 = model(kb1, src1, q1, n_step=2, target_input=tgt1)
+        self.assertEqual(streams1['answer'].shape, (2, 4, vocab_size))
+
+        kb2, src2, q2, tgt2 = random_window()
+        R2, streams2 = model(kb2, src2, q2, n_step=2, target_input=tgt2,
+                              register_init_override=R1.detach())
+        self.assertEqual(streams2['answer'].shape, (2, 4, vocab_size))
+        self.assertFalse(torch.allclose(R1, R2), "second window's state should differ from the first's")
+
+
 class TestPhase1bisVariantFlags(unittest.TestCase):
     """Plan Phase 1bis: with/without FF, stop-gradient on SM keys, level dropout."""
 

@@ -147,7 +147,8 @@ class Thinker(nn.Module):
                  block_size: int, depth: int, n_slots: int = 1, n_head: int = 1,
                  sm_cap: int = None, stream_dims: dict = None,
                  stream_n_layers: dict = None, level_dropout_p: float = 0.0,
-                 detach_sm_keys: bool = False, use_ff: bool = False, ff_hidden_mult: int = 4):
+                 detach_sm_keys: bool = False, use_ff: bool = False, ff_hidden_mult: int = 4,
+                 stream_sequence: dict = None, max_target_len: int = None):
         super().__init__()
         self.d_model = d_model
         self.n_register = n_register
@@ -181,13 +182,25 @@ class Thinker(nn.Module):
 
         stream_dims = stream_dims if stream_dims is not None else {'answer': vocab_size}
         stream_n_layers = stream_n_layers or {}
+        # spec §14.3 (plan Phase 11): per-stream opt-in to the multi-position
+        # generalization of OutputStream, for a per-token LM objective on real
+        # text -- e.g. stream_sequence={'answer': True} while a 'thinking'
+        # stream (if any) stays in the default single-query mode. Unset by
+        # default so every existing single-query/single-answer usage
+        # (data/kb_retrieval.py, data/kb_chain_retrieval.py) is unaffected.
+        stream_sequence = stream_sequence or {}
         self.streams = nn.ModuleDict({
-            name: OutputStream(d_model, dim, n_layers=stream_n_layers.get(name, 1))
+            name: OutputStream(
+                d_model, dim, n_layers=stream_n_layers.get(name, 1),
+                sequence_mode=stream_sequence.get(name, False),
+                max_seq_len=max_target_len if stream_sequence.get(name, False) else None,
+            )
             for name, dim in stream_dims.items()
         })
 
     def forward(self, kb_tokens: torch.Tensor, kb_source_ids: torch.Tensor,
-                query_tokens: torch.Tensor, n_step: int, kb_leaf_mask: torch.Tensor = None):
+                query_tokens: torch.Tensor, n_step: int, kb_leaf_mask: torch.Tensor = None,
+                register_init_override: torch.Tensor = None, target_input: torch.Tensor = None):
         """
         kb_tokens: (B, N) leaf token ids for the unified input∪KB sequence
             (N must equal block_size ** depth when depth > 0).
@@ -199,10 +212,31 @@ class Thinker(nn.Module):
             embedding added to the learned initial register — a default choice,
             not specified by the spec).
         n_step: number of reasoning iterations (shared weights across steps).
+        register_init_override: optional (B, n_register, d_model) — spec §14.2
+            (plan Phase 11, real-text sliding windows): replaces the learned
+            `self.register_init` as the base the current window's mean query
+            embedding is added to. Lets a training loop carry the previous
+            window's final `R` (typically stop-gradient'd by the caller, per
+            §14.2's default) forward as this window's starting point, instead
+            of always restarting from the learned initial register — pass it
+            only for non-first windows of a document (the first window of
+            each document still uses the learned `self.register_init`, see
+            `RealTextWindowDataset`'s `is_first_window` flag).
+        target_input: optional (B, T_tgt) — spec §14.3 (plan Phase 11):
+            teacher-forced target-token ids (`target_input[t]` is the token
+            that should be embedded and fed as the query predicting
+            `labels[t]`, see data/real_text_windows.py). Required exactly
+            when at least one registered stream has `sequence_mode=True`;
+            embedded here (via `self.embed`, the same table as the KB/input
+            leaves) and passed to those streams as their per-position query
+            input, since only `Thinker` owns `self.embed` (OutputStream
+            itself only knows how to add position information on top, see
+            OutputStream's docstring).
 
         Returns: (R, stream_outputs) with R: (B, n_register, d_model) the final
                  core register state, and stream_outputs a dict {name: (B, 1, out_dim)}
-                 — one entry per registered output stream (spec §11bis).
+                 (or (B, T_tgt, out_dim) for a sequence_mode stream) — one
+                 entry per registered output stream (spec §11bis).
         """
         B = kb_tokens.shape[0]
         device = kb_tokens.device
@@ -211,7 +245,11 @@ class Thinker(nn.Module):
         self.memory.build(leaf_emb, kb_source_ids, leaf_mask=kb_leaf_mask)
 
         q_emb = self.embed(query_tokens).mean(dim=1, keepdim=True)  # (B, 1, d)
-        R = self.register_init.unsqueeze(0).expand(B, -1, -1) + q_emb
+        register_base = (
+            register_init_override if register_init_override is not None
+            else self.register_init.unsqueeze(0).expand(B, -1, -1)
+        )
+        R = register_base + q_emb
 
         sm_k = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
         sm_v = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
@@ -243,5 +281,18 @@ class Thinker(nn.Module):
                 sm_k = sm_k[:, -self.sm_cap:]
                 sm_v = sm_v[:, -self.sm_cap:]
 
-        stream_outputs = {name: stream(sm_k, sm_v) for name, stream in self.streams.items()}
+        # spec §14.3: sequence_mode streams need teacher-forced target-token
+        # embeddings as their per-position query input; embedded once here
+        # (shared self.embed) and reused by every such stream, rather than
+        # each stream re-embedding target_input independently.
+        needs_target_embed = any(stream.sequence_mode for stream in self.streams.values())
+        assert not needs_target_embed or target_input is not None, (
+            "target_input is required when at least one stream has sequence_mode=True (spec §14.3)"
+        )
+        target_embed = self.embed(target_input) if needs_target_embed else None
+
+        stream_outputs = {
+            name: (stream(sm_k, sm_v, query_input=target_embed) if stream.sequence_mode else stream(sm_k, sm_v))
+            for name, stream in self.streams.items()
+        }
         return R, stream_outputs
