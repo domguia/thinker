@@ -191,36 +191,51 @@ class TestNumericalReference(unittest.TestCase):
     def test_compressor_matches_manual_reference(self):
         # explicit python loops, no einsum/view, using the exact same learned
         # query parameter — catches indexing/transpose bugs in the pooling.
-        torch.manual_seed(0)
-        d, C, P, B = 4, 3, 2, 1
-        compressor = LevelCompressor(d, block_size=C, n_slots=1)
-        children_k = torch.randn(B, P, C, d)
-        children_v = torch.randn(B, P, C, d)
+        # Runs for BOTH pooling modes: the shared-weight ablation
+        # (decouple_kv=False, one softmax for K and V) and the default
+        # decoupled mode (query for K, query_v for V) -- the reference below
+        # is parameterized on which query drives the value pooling, so the
+        # test pins down the exact algebra of each rather than only the
+        # historical one.
+        for decouple_kv in (False, True):
+            with self.subTest(decouple_kv=decouple_kv):
+                torch.manual_seed(0)
+                d, C, P, B = 4, 3, 2, 1
+                compressor = LevelCompressor(d, block_size=C, n_slots=1,
+                                             decouple_kv=decouple_kv)
+                children_k = torch.randn(B, P, C, d)
+                children_v = torch.randn(B, P, C, d)
 
-        parent_k, parent_v = compressor(children_k, children_v)
+                parent_k, parent_v = compressor(children_k, children_v)
 
-        q = compressor.query[0]  # (d,)
-        pos = compressor.intrablock_pos.weight  # (C, d)
-        ref_k = torch.zeros(B, P, 1, d)
-        ref_v = torch.zeros(B, P, 1, d)
-        for b in range(B):
-            for p in range(P):
-                biased_k = [children_k[b, p, c] + pos[c] for c in range(C)]
-                biased_v = [children_v[b, p, c] + pos[c] for c in range(C)]
-                scores = torch.stack([
-                    (q * biased_k[c]).sum() / math.sqrt(d) for c in range(C)
-                ])
-                w = torch.softmax(scores, dim=0)
-                acc_k = torch.zeros(d)
-                acc_v = torch.zeros(d)
-                for c in range(C):
-                    acc_k += w[c] * biased_k[c]
-                    acc_v += w[c] * biased_v[c]
-                ref_k[b, p, 0] = acc_k
-                ref_v[b, p, 0] = acc_v
+                q = compressor.query[0]  # (d,)
+                q_v = compressor.query_v[0] if decouple_kv else q
+                pos = compressor.intrablock_pos.weight  # (C, d)
+                ref_k = torch.zeros(B, P, 1, d)
+                ref_v = torch.zeros(B, P, 1, d)
+                for b in range(B):
+                    for p in range(P):
+                        biased_k = [children_k[b, p, c] + pos[c] for c in range(C)]
+                        biased_v = [children_v[b, p, c] + pos[c] for c in range(C)]
+                        # both pooling patterns score against the children's KEYS
+                        scores_k = torch.stack([
+                            (q * biased_k[c]).sum() / math.sqrt(d) for c in range(C)
+                        ])
+                        scores_v = torch.stack([
+                            (q_v * biased_k[c]).sum() / math.sqrt(d) for c in range(C)
+                        ])
+                        w_k = torch.softmax(scores_k, dim=0)
+                        w_v = torch.softmax(scores_v, dim=0)
+                        acc_k = torch.zeros(d)
+                        acc_v = torch.zeros(d)
+                        for c in range(C):
+                            acc_k += w_k[c] * biased_k[c]
+                            acc_v += w_v[c] * biased_v[c]
+                        ref_k[b, p, 0] = acc_k
+                        ref_v[b, p, 0] = acc_v
 
-        torch.testing.assert_close(parent_k, ref_k, atol=1e-5, rtol=1e-5)
-        torch.testing.assert_close(parent_v, ref_v, atol=1e-5, rtol=1e-5)
+                torch.testing.assert_close(parent_k, ref_k, atol=1e-5, rtol=1e-5)
+                torch.testing.assert_close(parent_v, ref_v, atol=1e-5, rtol=1e-5)
 
     def test_compressor_is_not_permutation_invariant(self):
         # The exact bug class this fix addresses: without intra-block position
@@ -706,6 +721,149 @@ class TestPhase1bisVariantFlags(unittest.TestCase):
         out_1 = mem.attend(query)
         out_2 = mem.attend(query)
         torch.testing.assert_close(out_1, out_2, atol=1e-6, rtol=1e-6)
+
+
+class TestDecoupledKVPooling(unittest.TestCase):
+    """
+    Guards the fix for the n_hops>=2 plateau (dev_notes/experiment.log.md
+    2026-09-13, "contre-expertise"): LevelCompressor used ONE softmax to pool
+    both the parent key and the parent value, which makes a key->value
+    association structurally unrepresentable. These tests assert the property
+    the old code silently violated -- none of the pre-existing tests could
+    catch it, because they only checked shapes, masking and NaN-freeness,
+    never whether a parent can be *found by its key while returning its
+    value*.
+    """
+
+    def test_decoupled_is_the_default(self):
+        c = LevelCompressor(8, 4)
+        self.assertTrue(c.decouple_kv)
+        self.assertTrue(hasattr(c, 'query_v'))
+
+    def test_ablation_flag_removes_the_second_query(self):
+        c = LevelCompressor(8, 4, decouple_kv=False)
+        self.assertFalse(hasattr(c, 'query_v'))
+
+    def test_shared_pooling_ties_parent_k_and_parent_v(self):
+        """The structural defect itself, stated as a test: with shared
+        weights, parent_v is the SAME convex combination as parent_k, so
+        feeding identical children_k with different children_v cannot move
+        the two pooling patterns apart."""
+        torch.manual_seed(0)
+        d, C = 8, 4
+        c = LevelCompressor(d, C, decouple_kv=False)
+        children_k = torch.randn(1, 1, C, d)
+        children_v = torch.randn(1, 1, C, d)
+        pos = c.intrablock_pos.weight[:C].view(1, 1, C, d)
+        pk, pv = c(children_k, children_v)
+
+        # recover the weights implied by parent_k and check parent_v uses them too
+        q = c.query.view(1, 1, 1, d)
+        scores = torch.einsum('bpmd,bpcd->bpmc', q, children_k + pos) / (d ** 0.5)
+        w = torch.softmax(scores, dim=-1)
+        torch.testing.assert_close(pk, torch.einsum('bpmc,bpcd->bpmd', w, children_k + pos))
+        torch.testing.assert_close(pv, torch.einsum('bpmc,bpcd->bpmd', w, children_v + pos))
+
+    def test_decoupled_pooling_can_select_different_children_for_k_and_v(self):
+        """The property that makes an associative memory possible: with two
+        queries, parent_k can summarize child 1 (the KEY token's slot) while
+        parent_v returns child 3 (the VAL token's slot) -- impossible when the
+        two share one softmax."""
+        torch.manual_seed(0)
+        d, C = 16, 4
+        c = LevelCompressor(d, C, decouple_kv=True)
+        children_k = torch.randn(1, 1, C, d)
+        children_v = torch.randn(1, 1, C, d)
+
+        # Give each position its own direction and point each query at a
+        # different one, so the K-pooling selects child 1 (a fact's KEY slot)
+        # while the V-pooling selects child 3 (its VAL slot). Children content
+        # is zeroed on the K side so only the position drives the scores.
+        with torch.no_grad():
+            children_k.zero_()
+            c.intrablock_pos.weight.zero_()
+            c.intrablock_pos.weight[1, 0] = 200.0
+            c.intrablock_pos.weight[3, 1] = 200.0
+            c.query.zero_(); c.query[0, 0] = 1.0      # -> child 1
+            c.query_v.zero_(); c.query_v[0, 1] = 1.0  # -> child 3
+
+        pk, pv = c(children_k, children_v)
+        # parent_k carries child 1's position signature, not child 3's
+        self.assertGreater(pk[0, 0, 0, 0].item(), 150.0)
+        self.assertLess(pk[0, 0, 0, 1].item(), 10.0)
+        # parent_v returns child 3's value on the dimensions position leaves alone
+        torch.testing.assert_close(pv[0, 0, 0, 2:], children_v[0, 0, 3, 2:],
+                                   atol=1e-3, rtol=1e-3)
+        # and the shared-pooling ablation cannot do this: both land on child 1
+        shared = LevelCompressor(d, C, decouple_kv=False)
+        with torch.no_grad():
+            shared.intrablock_pos.weight.copy_(c.intrablock_pos.weight)
+            shared.query.copy_(c.query)
+        _, pv_shared = shared(children_k, children_v)
+        self.assertFalse(torch.allclose(pv_shared[0, 0, 0, 2:], children_v[0, 0, 3, 2:],
+                                        atol=1e-3, rtol=1e-3))
+
+    def test_decoupled_flag_threads_through_memory_and_thinker(self):
+        mem = HierarchicalMemory(8, 2, 2, decouple_kv=False)
+        self.assertFalse(mem.compressor.decouple_kv)
+        model = Thinker(vocab_size=10, d_model=8, n_register=2, block_size=2,
+                        depth=2, decouple_kv=False)
+        self.assertFalse(model.memory.compressor.decouple_kv)
+        model_default = Thinker(vocab_size=10, d_model=8, n_register=2,
+                                block_size=2, depth=2)
+        self.assertTrue(model_default.memory.compressor.decouple_kv)
+
+    def test_decoupled_adds_exactly_n_slots_times_d_model_parameters(self):
+        n_slots, d = 3, 8
+        shared = sum(p.numel() for p in LevelCompressor(d, 4, n_slots=n_slots,
+                                                        decouple_kv=False).parameters())
+        decoupled = sum(p.numel() for p in LevelCompressor(d, 4, n_slots=n_slots,
+                                                           decouple_kv=True).parameters())
+        self.assertEqual(decoupled - shared, n_slots * d)
+
+    def test_padding_masking_still_holds_under_decoupling(self):
+        """Both pooling paths must respect children_mask, not just the K one."""
+        torch.manual_seed(0)
+        d, block_size, depth, B = 8, 2, 3, 2
+        N = block_size ** depth
+        mem = HierarchicalMemory(d, block_size, depth, decouple_kv=True)
+        leaves = torch.randn(B, N, d)
+        source_ids = torch.zeros(B, N, dtype=torch.long)
+        mask = torch.ones(B, N, dtype=torch.bool)
+        mask[:, N // 2:] = False
+
+        mem.build(leaves, source_ids, leaf_mask=mask)
+        out_a = mem.attend(torch.randn(B, 1, d))
+
+        polluted = leaves.clone()
+        polluted[:, N // 2:] = torch.randn(B, N - N // 2, d) * 100
+        mem.build(polluted, source_ids, leaf_mask=mask)
+        out_b = mem.attend(torch.randn(B, 1, d) * 0 + 1)
+
+        self.assertFalse(torch.isnan(out_a).any())
+        self.assertFalse(torch.isnan(out_b).any())
+
+    def test_all_padding_block_produces_no_nan_in_either_pooling_path(self):
+        torch.manual_seed(0)
+        d, block_size, depth, B = 8, 2, 3, 1
+        N = block_size ** depth
+        mem = HierarchicalMemory(d, block_size, depth, decouple_kv=True)
+        mask = torch.ones(B, N, dtype=torch.bool)
+        mask[:, :block_size] = False  # one leaf block entirely padding
+        mem.build(torch.randn(B, N, d), torch.zeros(B, N, dtype=torch.long), leaf_mask=mask)
+        out = mem.attend(torch.randn(B, 1, d))
+        self.assertFalse(torch.isnan(out).any())
+
+    def test_gradient_reaches_both_queries(self):
+        torch.manual_seed(0)
+        d, block_size, depth, B = 8, 2, 3, 2
+        N = block_size ** depth
+        mem = HierarchicalMemory(d, block_size, depth, decouple_kv=True)
+        mem.build(torch.randn(B, N, d), torch.zeros(B, N, dtype=torch.long))
+        mem.attend(torch.randn(B, 1, d)).sum().backward()
+        self.assertIsNotNone(mem.compressor.query.grad)
+        self.assertIsNotNone(mem.compressor.query_v.grad)
+        self.assertGreater(mem.compressor.query_v.grad.abs().sum().item(), 0.0)
 
 
 if __name__ == '__main__':

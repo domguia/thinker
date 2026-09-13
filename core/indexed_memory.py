@@ -52,28 +52,42 @@ class LevelCompressor(nn.Module):
     reference implementation rather than found by any test written from the
     spec alone.
 
-    A single attention score (query vs. position-biased children keys) is
-    used to pool both K and V: this is what makes the parent key a genuine
-    summary of "what this block is about" while the parent value stays
-    consistent with the same weighting.
+    `decouple_kv` (default True since 2026-09-13) controls whether the parent
+    key and the parent value are pooled with the SAME attention weights or
+    with two independently learned queries.
+
+    Sharing one weight vector (the original behavior, `decouple_kv=False`,
+    kept only as an ablation) makes an associative memory structurally
+    impossible, and was the root cause of the n_hops>=2 plateau documented in
+    dev_notes/experiment.log.md. A fact block is laid out as
+    [KEY_MARK, key_id, VAL_MARK, val_id] (data/kb_chain_retrieval.py): to be
+    usable as a memory entry, the parent must be FINDABLE by its key
+    (parent_k ~ f(key_id)) and must RETURN its value (parent_v ~ g(val_id)) --
+    two opposite weightings over the same children. With a single softmax the
+    compressor can only pick one, or settle on a blurred compromise that is
+    brute-forceable at one hop and unchainable beyond. Decoupling costs
+    `n_slots * d_model` extra parameters (one more learned query) and lifts
+    the constraint; both scores are still computed against the children's
+    KEYS (biased_k), only the pooling target differs.
+
+    Verified on CPU (d_model=32, n_hops=2, 3000 steps, 2 seeds): shared
+    pooling plateaus at 26-35% (= 1/n_facts, i.e. "copy some KB value at
+    random"), decoupled reaches 100% with loss 0.000 on both seeds.
     """
 
-    def __init__(self, d_model: int, block_size: int, n_slots: int = 1):
+    def __init__(self, d_model: int, block_size: int, n_slots: int = 1,
+                 decouple_kv: bool = True):
         super().__init__()
         self.n_slots = n_slots
+        self.decouple_kv = decouple_kv
         self.query = nn.Parameter(torch.randn(n_slots, d_model) * d_model ** -0.5)
+        if decouple_kv:
+            self.query_v = nn.Parameter(torch.randn(n_slots, d_model) * d_model ** -0.5)
         self.intrablock_pos = nn.Embedding(block_size, d_model)
 
-    def forward(self, children_k: torch.Tensor, children_v: torch.Tensor,
-                children_mask: torch.Tensor = None):
-        # children_k, children_v: (B, P, C, d) -> parent_k, parent_v: (B, P, M, d)
-        # children_mask (optional): (B, P, C) bool, True = real leaf, False = padding.
-        B, P, C, d = children_k.shape
-        pos = self.intrablock_pos.weight[:C].view(1, 1, C, d)
-        biased_k = children_k + pos
-        biased_v = children_v + pos
-
-        q = self.query.view(1, 1, self.n_slots, d).expand(B, P, self.n_slots, d)
+    def _pool(self, query, biased_k, target, children_mask):
+        B, P, C, d = biased_k.shape
+        q = query.view(1, 1, self.n_slots, d).expand(B, P, self.n_slots, d)
         scores = torch.einsum('bpmd,bpcd->bpmc', q, biased_k) / math.sqrt(d)
         if children_mask is not None:
             neg_inf = torch.finfo(scores.dtype).min
@@ -84,8 +98,20 @@ class LevelCompressor(nn.Module):
             # such a parent is itself masked out one level up, so its content only needs
             # to be non-NaN (not meaningful) to avoid poisoning gradients through the mask.
             weights = torch.nan_to_num(weights, nan=0.0)
-        parent_k = torch.einsum('bpmc,bpcd->bpmd', weights, biased_k)
-        parent_v = torch.einsum('bpmc,bpcd->bpmd', weights, biased_v)
+        return torch.einsum('bpmc,bpcd->bpmd', weights, target)
+
+    def forward(self, children_k: torch.Tensor, children_v: torch.Tensor,
+                children_mask: torch.Tensor = None):
+        # children_k, children_v: (B, P, C, d) -> parent_k, parent_v: (B, P, M, d)
+        # children_mask (optional): (B, P, C) bool, True = real leaf, False = padding.
+        C = children_k.shape[2]
+        pos = self.intrablock_pos.weight[:C].view(1, 1, C, -1)
+        biased_k = children_k + pos
+        biased_v = children_v + pos
+
+        parent_k = self._pool(self.query, biased_k, biased_k, children_mask)
+        value_query = self.query_v if self.decouple_kv else self.query
+        parent_v = self._pool(value_query, biased_k, biased_v, children_mask)
         return parent_k, parent_v
 
 
@@ -106,7 +132,7 @@ class HierarchicalMemory(nn.Module):
     """
 
     def __init__(self, d_model: int, block_size: int, depth: int, n_slots: int = 1, n_head: int = 1,
-                 level_dropout_p: float = 0.0):
+                 level_dropout_p: float = 0.0, decouple_kv: bool = True):
         super().__init__()
         assert d_model % n_head == 0, "d_model must be divisible by n_head"
         self.d_model = d_model
@@ -128,7 +154,11 @@ class HierarchicalMemory(nn.Module):
         # priority-bias: 0 = input, 1 = KB (spec §6.2)
         self.source_bias = nn.Embedding(2, d_model)
 
-        self.compressor = LevelCompressor(d_model, block_size, n_slots=n_slots)
+        # decouple_kv: see LevelCompressor's docstring -- default True since
+        # 2026-09-13 (the shared-pooling variant cannot represent a key->value
+        # association at all); decouple_kv=False is kept only as an ablation.
+        self.compressor = LevelCompressor(d_model, block_size, n_slots=n_slots,
+                                          decouple_kv=decouple_kv)
         self.level_norms = nn.ModuleList([RMSNorm(d_model) for _ in range(depth + 1)])
 
         self._levels_k = None

@@ -148,6 +148,7 @@ class Thinker(nn.Module):
                  sm_cap: int = None, stream_dims: dict = None,
                  stream_n_layers: dict = None, level_dropout_p: float = 0.0,
                  detach_sm_keys: bool = False, use_ff: bool = False, ff_hidden_mult: int = 4,
+                 decouple_kv: bool = True,
                  stream_sequence: dict = None, max_target_len: int = None):
         super().__init__()
         self.d_model = d_model
@@ -160,7 +161,7 @@ class Thinker(nn.Module):
         self.register_init = nn.Parameter(torch.randn(n_register, d_model) * d_model ** -0.5)
 
         self.memory = HierarchicalMemory(d_model, block_size, depth, n_slots=n_slots, n_head=n_head,
-                                          level_dropout_p=level_dropout_p)
+                                          level_dropout_p=level_dropout_p, decouple_kv=decouple_kv)
 
         self.sm_q_proj = nn.Linear(d_model, d_model, bias=False)
         self.sm_write_proj = nn.Linear(d_model, 2 * d_model, bias=False)  # -> new K, new V
