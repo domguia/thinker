@@ -1,5 +1,7 @@
 # Future Experiments for Thinker Paper
 
+**§2's "Memory Cache Importance" and "Input Re-reading" items are now an active chantier, not just a wishlist entry** — see `dev_notes/toy_memory_experiment_plan.md` (2026-09-13): `core/toy_model.py`'s two existing runners hard-code `read_step = n_step - 1`, so the input was always re-readable at every compute step except the last, meaning neither ablation below was ever actually tested by any result obtained so far. Exp. 0/1 there implement exactly these two ablations with a proper eval methodology.
+
 To reach publication standards (e.g., NeurIPS, ICLR), the following experiments are required to validate the architectural claims and provide a rigorous empirical foundation.
 
 ## 1. Baselines Comparison

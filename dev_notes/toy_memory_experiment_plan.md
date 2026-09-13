@@ -1,0 +1,106 @@
+# Plan d'expérimentation — Mémoire moyen terme "construite à la volée" (toy model)
+
+Chantier distinct de la branche Indexed Attention (`dev_notes/indexed_attention_*.md`), mais qui pose la même question de fond sur un banc d'essai CPU de quelques minutes plutôt que sur l'architecture principale : **la mémoire construite pendant la boucle est-elle réellement lue, ou le modèle a-t-il simplement toujours le droit de relire l'entrée ?** Question jamais mise à l'épreuve dans ce projet malgré des résultats déjà obtenus (addition base 16 ~97%, extrapolation cumsum, Sept 2023) — voir §1.
+
+Chantier repris le 2026-09-13 (demande explicite de l'utilisateur, relayée par `thinker-5b`). Branche `dev_notes/future_experiments.md` §2 ("Memory Cache Importance", "Input Re-reading") anticipait déjà cette question sans jamais l'exécuter — ce plan la rend concrète et exécutable. Document de passation initial (constat + propositions, rien d'implémenté) : `dev_notes/toy_model_memory_experiments.md`, gardé comme trace historique.
+
+## 1bis. Réserve levée — le run "Ça marche!" de septembre ne contredit pas le constat
+
+`thinker-5b` avait soulevé une réserve légitime avant d'investir : le résultat cumsum de septembre (`experiment.log.md`, "Sept 18 — Ça marche!") a-t-il pu passer par `notebooks/Th1nker_runner.ipynb` plutôt que par les deux scripts déjà vérifiés, avec un `read_step` différent ? **Vérifié, réserve levée** : la cellule du notebook utilisant `NumbersCopyDataset` avec un balayage `hp_n_latent`/`hp_n_step` (le chemin plausible pour ce run — sa config `n_latent=[range(4,16+1,2)], n_step=[range(4,12+1)]` correspond exactement au bloc cité dans le journal) contient elle aussi `read_step = n_step - 1`, identique aux deux scripts. **Les trois chemins d'exécution du dépôt hardcodent tous la même valeur, sans exception trouvée** — le constat §1 se confirme par triangulation plutôt que de s'affaiblir.
+
+## 1. Constat central — confirmé, pas de désaccord
+
+`core/toy_model.py::ToyThinker.forward` (lignes 183-208) :
+```python
+memory = x                                           # avant la boucle
+for i in range(n_step):
+    latent = self.attn_compute(latent, memory, ...)  # utilise memory de la fin de i-1 (ou x brut à i=0)
+    ...
+    memory = latents if i >= read_step else [x] + latents
+```
+`memory = x` avant la boucle rend `x` visible **inconditionnellement** au tout premier compute (`i=0`), quelle que soit la valeur de `read_step` — puis `x` reste inclus pour tout `i <= read_step`. **`x` est donc visible pendant exactement `read_step + 1` computes, pas `read_step`** (précision de `thinker-5b`, voir §4.1 pour la formule de budget qui en découle). **Les deux runners existants fixent en dur `read_step = n_step - 1`** (`scripts/train.py:77`, `scripts/th1nker_runner.py:1044`, commentaire *"remove on output step"*) — donc `x` reste relisible à *chaque* étape de calcul, et n'est retiré qu'à la toute dernière étape (celle qui produit la sortie). `n_memory` (capacité FIFO de la mémoire) n'a par ailleurs jamais été fixé à une valeur finie dans ces runners (défaut `1e4`, effectivement illimité aux échelles testées).
+
+**Conséquence** : tous les résultats connus sur ce toy model (addition base 16 ~97%, extrapolation cumsum, généralisation en augmentant `n_latent`/`n_step` en cours d'entraînement) sont compatibles avec *« le modèle relit l'entrée à chaque pas et le latent n'est qu'un espace de travail »*, aussi bien qu'avec *« une mémoire moyen terme est réellement construite et exploitée »* — les deux lectures prédisent exactement les mêmes résultats obtenus jusqu'ici. La question centrale du chantier ("medium term memory built on the fly") n'a donc jamais été mise à l'épreuve. Vérifié en lisant le code directement (pas seulement le rapport de `thinker-5b`) — je suis d'accord avec ce constat, rien à contredire.
+
+**Second constat, indépendant** : `scripts/train.py:90-91` mesure l'accuracy comme une moyenne **par token** (`(targets == preds).float().mean()`, commentaire du fichier : *"Sequence exact match or token average accuracy? Let's use token average"*). Sur une tâche séquentielle, certaines positions sont prédictibles sans aucun calcul (ex. le premier token de sortie d'un cumsum égale le premier token d'entrée) — le "97%" historique doit être relu à la lumière d'un exact-match de séquence et d'une décomposition par position avant de servir de référence à quoi que ce soit. Même angle mort méthodologique que celui déjà découvert sur la branche Indexed Attention (`indexed_attention_spec.md` §9 "Niveaux de hasard et prédicteurs triviaux") — la leçon retenue là-bas ("est-ce que ce composant peut, en principe, représenter/démontrer ce qu'on lui demande, avant tout balayage") s'applique ici à l'identique.
+
+## 2. Ce qui est implémenté (2026-09-13, cette session)
+
+- **`learn/toy_memory/eval_metrics.py`** (nouveau) : `token_accuracy` (métrique historique, conservée pour comparaison), `exact_match_rate` (séquence entière), `per_position_accuracy`, `copy_input_baseline` (prédire target=input — solveur exact pour `copy`, raccourci sans calcul pour `cumsum`), `most_common_token_baseline` (mode empirique par position, estimé sur un batch de référence à seed fixe, noté sur un batch évalué disjoint), `format_report` (bloc imprimé par tout run, même discipline que `learn/indexed_attention/eval_metrics.py` : jamais citer une accuracy sans ses contrôles triviaux).
+- **`learn/toy_memory/train_toy_memory.py`** (nouveau) : `read_step` devient un argument **explicite** (plus de valeur par défaut dérivée de `n_step-1`; requis sauf si `--read_step_curriculum` est fourni), `n_step` fixe par run (pas resamplé), tâches `copy`/`cumsum` (génération directe, pas de dépendance à `NumbersCopyDataset` — voir docstring du fichier pour pourquoi), `--eval_read_step` optionnel pour la condition d'extrapolation (entraîner à un `read_step`, évaluer aussi à un autre, sans jamais entraîner dessus), `--read_step_curriculum` pour la branche curriculum obligatoire de §4.5 (stages décroissants, promotion sur `--curriculum_promote_acc`/`--curriculum_min_steps`, budget de capacité réimprimé à chaque palier). Testé localement (CPU, quelques dizaines de pas) : tourne sans erreur sur `copy` et `cumsum`, en mode fixe et en mode curriculum, avec et sans `--eval_read_step`.
+- **Note d'implémentation** : `all_losses_compute` appelle `compute_probe_loss(probes, ...)` sans garde — `probes=None` (si `n_probe=0`) fait crasher. `n_probe=1` utilisé par défaut dans le script pour contourner (comme le fait déjà `scripts/train.py`), pas un choix expérimental.
+
+**Pas encore fait** : addition base 16 (Exp. 1 — troisième tâche du plan, réutilise `NumbersComputeDataset`, pas encore câblée dans `train_toy_memory.py`) ; Exp. 2 à 5 (implémentation non prioritaire, voir §4).
+
+## 3. Exp. 0 — Niveaux de référence (prérequis, fait)
+
+Voir `eval_metrics.py` ci-dessus. Le "97%" historique (addition base 16, `scripts/train.py`) reste à recalculer avec ce module une fois Exp. 1 étendu à cette tâche — pas encore fait, cité ici comme **non recalibré**, à ne pas comparer à de nouveaux résultats tant que ce n'est pas fait.
+
+## 4. Exp. 1 — Balayage de `read_step` (l'expérience décisive)
+
+**Protocole** : `read_step ∈ {0, 1, ..., n_step}` à `n_step` fixé, **entraîné** à chaque valeur testée (pas seulement évalué — sinon on mesure un décalage de distribution train/test, pas une capacité). Ordre des tâches : `copy` d'abord (transport pur, aucun calcul requis — si ça casse déjà là, tout le reste cassera aussi), puis `cumsum`, puis addition base 16 en dernier (pas encore câblée).
+
+**Deux lectures possibles, à distinguer par la forme de la courbe** :
+- **Dégradation douce** quand `read_step → 0` ⇒ une mémoire construite à la volée porte une partie réelle de l'information, dégradée mais pas détruite quand l'accès direct à l'entrée disparaît.
+- **Chute nette (falaise)** dès que `read_step < n_step - 1` ⇒ le latent n'est qu'un espace de travail transitoire, la "mémoire" ne portait jamais rien au-delà de ce que le relecture directe de l'entrée fournissait.
+
+### 4.1 Confondant identifié (`thinker-5b`, 2026-09-13) — `read_step` ne varie pas une seule chose
+
+En traçant `core/toy_model.py:183-208` : `memory = x` est fixé **avant** la boucle, donc le compute de l'itération `i=0` voit toujours `x`, quelle que soit la valeur de `read_step` (y compris `read_step=0`) ; ensuite `x` reste visible pour tout `i <= read_step`. **`x` est donc visible pendant exactement `read_step + 1` computes, pas `read_step`.** Un latent de taille `n_latent` est empilé dans la FIFO à chaque compute — la quantité totale d'information que le modèle peut absorber de `x` avant qu'il disparaisse est donc bornée par :
+```
+write_budget = (read_step + 1) × n_latent   vecteurs
+```
+Baisser `read_step` ne réduit donc pas seulement le temps de relecture directe — ça réduit aussi ce budget total d'absorption. Si ce budget passe sous le contenu informationnel de l'entrée (`seq_len × log2(vocab_size)` bits, comparé à `write_budget × d_model` dimensions réelles — comparaison heuristique, pas une équivalence bits/dims stricte), la tâche devient **impossible**, pas difficile : une falaise à cet endroit serait une **borne informationnelle**, pas un verdict sur le mécanisme de mémoire — même type de confondant que celui que la contre-expertise Indexed Attention a dû lever ailleurs (le bug du compresseur).
+
+**Corrigé dans le code (`learn/toy_memory/eval_metrics.py::capacity_budget`)** : chaque run et chaque rapport final imprime `write_budget`, `budget_dims`/`input_bits` (contexte secondaire), et un drapeau `capacity_constraining`. Avec les défauts actuels (`seq_len=8, n_latent=8, d_model=64, vocab_size=16`) : `write_budget = (read_step+1)×8 >= 8 = seq_len` pour tout `read_step>=0` — **jamais contraignant sur toute la grille par défaut, mais tout juste (égalité à `read_step=0`)**, c'est le régime à garder pour la passe principale.
+
+**Correction du drapeau (`thinker-5b`, 2026-09-13)** : la comparaison `budget_dims < input_bits` (dimensions flottantes vs bits) est décalée d'un facteur "bits par dimension flottante" et reste au vert dans des régimes manifestement contraignants — contre-exemple : `n_latent=2, d_model=64, read_step=0, seq_len=32, vocab_size=16` donne `budget_dims=128 == input_bits=128`, aucun drapeau, alors que 2 vecteurs latents ne peuvent manifestement pas retenir l'identité de 32 tokens. La contrainte réelle est **architecturale** (un compresseur par attention ne peut pas tasser un nombre arbitraire de tokens dans moins de slots vectoriels), pas informationnelle au sens bits/dims. **Le drapeau primaire compare désormais un compte de vecteurs** : `capacity_constraining = write_budget_vectors < seq_len` — `budget_dims`/`input_bits` restent affichés comme plancher informationnel absolu, en contexte secondaire seulement.
+
+**Règle à respecter pour toute grille future** : la passe principale se fait à `n_latent >= seq_len` (capacité non contraignante) ; `n_latent < seq_len` est un **axe séparé et ultérieur** (proche d'Exp. 2, capacité de la mémoire elle-même), jamais mélangé dans la même grille que le balayage `read_step` de cette section.
+
+### 4.2 Contrôle préalable obligatoire, avant de lancer le reste de la grille
+
+`copy` à `read_step = n_step` (entrée toujours visible, borne haute de contrôle) doit d'abord atteindre **~100% exact-match**. Si ce point n'est pas atteint, rien du reste de la grille n'est interprétable — le pipeline lui-même (dataset, loss, boucle d'entraînement) serait en cause, pas `read_step`. À vérifier **en premier, séquentiellement**, pas en même temps que le reste du balayage.
+
+### 4.3 `seq_len=8` est probablement trop facile — ajouter un point long
+
+À `seq_len=8, n_latent=8`, un modèle peut faire une copie positionnelle 1:1 en un seul step — il réussira probablement à `read_step=0` sans que ça dise grand-chose au-delà de "le transport sur un pas fonctionne". L'historique du 22 déc. 2023 (`experiment.log.md`) montre déjà que la tâche copy nécessite un curriculum pour passer à `seq_len` 20-40 et plafonne sans. **Ajouter au moins un point long à la grille** (`seq_len=32, n_latent=32` pour rester dans le régime non contraignant de §4.1), en plus du point court `seq_len=8` — c'est là que la question devient réellement discriminante.
+
+### 4.4 `copy` et `cumsum` testent deux choses différentes — à ne pas lire comme "cumsum est plus dur"
+
+`copy` teste le **transport** d'information à travers la mémoire (aucun calcul). `cumsum` teste transport **plus** accumulation. Une réussite sur `copy` et un échec sur `cumsum` au même `read_step` serait un résultat très informatif en soi (la mémoire porte l'information, mais le calcul sur son contenu ne suit pas) — à ne pas résumer comme "cumsum est plus dur", mais à documenter comme une dissociation transport/calcul.
+
+**Extrapolation, `--eval_read_step`** : entraîner à `read_step` élevé (entrée toujours ou presque toujours visible), évaluer (sans entraîner) à `read_step` bas — teste si le mécanisme *pourrait* fonctionner sans réentraînement dédié, distinct de la question "peut-il apprendre à le faire si on l'y entraîne directement".
+
+### 4.5 Table de décision — branche curriculum obligatoire avant tout verdict sur le mécanisme
+
+Chaque point de la grille §4.4 est entraîné **from scratch** à `read_step` fixe. Rien ne garantit que le paysage d'optimisation, depuis une init aléatoire, mène à la stratégie "tout écrire en mémoire au premier compute" quand `read_step` est bas. Une falaise peut donc être un problème d'optimisation, pas une incapacité du mécanisme — précédent double et sans ambiguïté sur ce projet : `experiment.log.md` 22 déc. 2023 (*"having a plateau doesn't mean that the model is at capacity"*, tâche copy, débloqué par curriculum de longueur) et Phase -1/0 d'Indexed Attention (plateau `n_facts=64` résistant à `d_model`/`lr`/`n_step`/`n_register`/`batch_size`, entièrement débloqué par curriculum `16→32→64`, zéro changement d'architecture).
+
+| Observation | Action |
+|---|---|
+| `read_step=n_step` (contrôle, §4.2) n'atteint pas ~100% | Arrêter — problème de pipeline, pas de `read_step`. Rien d'autre n'est interprétable. |
+| Dégradation douce sur toute la grille directe | Signal positif direct pour "la mémoire porte de l'information" — pas besoin de curriculum pour l'interpréter. |
+| **Falaise nette à `read_step` bas (grille directe, from scratch)** | **NE PAS conclure à une limite du mécanisme.** Relancer la même cellule avec `--read_step_curriculum` (ex. `"6,5,4,3,2,1,0"`, promotion sur seuil d'exact-match) avant tout verdict. |
+| Le curriculum débloque (la cellule qui plafonnait en direct atteint le seuil de promotion à chaque palier) | Le mécanisme fonctionne ; la falaise en entraînement direct était un artefact d'optimisation, pas une limite de mémoire. Résultat positif à part entière, pas un demi-résultat. |
+| Le curriculum ne débloque pas non plus (bloqué à un palier, même après le seuil de pas minimal) | Là seulement, la falaise devient un candidat sérieux pour une limite réelle du mécanisme — passer par Exp. 3 (attribution causale) avant de conclure, pas s'arrêter à l'accuracy seule. |
+
+**Implémenté** : `--read_step_curriculum "6,5,4,3,2,1,0"` dans `train_toy_memory.py` (stages strictement décroissants, promotion sur `--curriculum_promote_acc`/`--curriculum_min_steps`, mêmes noms et même règle de promotion — dwell minimal ET seuil d'accuracy, jamais l'un sans l'autre — que `learn/indexed_attention/train_kb_chain.py --hop_curriculum`, décroissant ici puisque `read_step=n_step` est l'extrémité facile/contrôle). Testé localement (`copy`, 4 paliers, seuils assouplis pour forcer la promotion) : promotion effective à chaque palier, budget de capacité réimprimé à chaque promotion.
+
+**Statut** : script prêt (§2), budget de capacité corrigé (§4.1), curriculum câblé (§4.5), **pas encore exécuté à budget réel** — délégué à `experiment-manager` (voir §5). Grille recommandée : (1) contrôle préalable `read_step=n_step` seul d'abord (§4.2) ; (2) `copy`, `n_step=6`, grille directe `read_step ∈ {0,1,2,3,4,5,6}` × 3 seeds, `seq_len=8` (court) ET `seq_len=32` (long, §4.3) ; (3) pour toute cellule qui montre une falaise, relancer avec `--read_step_curriculum` avant de conclure (§4.5) ; (4) `cumsum`, même protocole complet.
+
+**Remarque de l'utilisateur (2026-09-13)** : les runs CPU de ce chantier peuvent aussi être lancés sur le cluster Grid'5000 si c'est plus rapide là-bas (throughput/parallélisme), pas seulement en local — à la discrétion d'`experiment-manager` selon la disponibilité.
+
+## 5. Exp. 2 à 5 — proposées, non prioritaires, gardées dans le plan
+
+- **Exp. 2 — `n_memory ∈ {1, 2, 4, 8, ∞}` à `read_step=0`** : distingue "mémoire" de "simple récurrence". Si `n_memory=1` suffit (seul le dernier latent compte), la revendication de mémoire *moyen terme* (plusieurs pas en arrière) tombe — c'est le vrai contenu scientifique de la question du chantier, au-delà du simple `read_step`.
+- **Exp. 3 — Attribution causale** : corrompre/mettre à zéro/permuter les latents en mémoire à un step donné, mesurer l'effet sur la sortie. Si rien ne bouge, la mémoire n'est pas lue, quelle que soit l'accuracy mesurée par ailleurs — même style de diagnostic que l'intervention causale déjà utilisée sur la branche Indexed Attention (`indexed_attention_experiment_plan.md`, diagnostic `n_hops=2` pré-contre-expertise).
+- **Exp. 4 — Flow runner (conçu le 6 janvier, jamais implémenté)** : tableau `read_input / mem_lookup / mem_write / static_mem_lookup / output` par step, généralise `read_step`/`n_memory` en instrument reconfigurable plutôt qu'un couple de flags — permettrait de tester directement la stratégie que la SM du Thinker principal suppose ("lire une fois au début, calculer sur la mémoire, sortir à la fin").
+- **Exp. 5 — Signature du raisonnement itératif** : une tâche dont le `n_step` minimal requis croît avec la longueur d'entrée. Si un `n_step` fixe suffit toujours quelle que soit la longueur, ce n'est pas du raisonnement itératif au sens visé par le projet.
+
+## 6. Pourquoi ça compte pour l'architecture principale
+
+Le Thinker actuel (`core/indexed_thinker_model.py`) a la même structure de fond : la SM est construite par `APPEND` à chaque itération, pendant que la KB (`HierarchicalMemory`) reste interrogeable en permanence — l'équivalent exact de `read_step = n_step` en permanence, jamais testé autrement. Ce toy model est un banc d'essai CPU de quelques minutes pour une question qui conditionne directement la conception de la SM dans l'architecture principale, avant d'y investir plus loin.
+
+## 7. Prochaine étape
+
+Déléguer l'exécution d'Exp. 1 (`copy` d'abord) à `experiment-manager` — script prêt, pas encore lancé.
