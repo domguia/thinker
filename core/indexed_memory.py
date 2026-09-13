@@ -179,14 +179,27 @@ class HierarchicalMemory(nn.Module):
             (masked before every softmax, at every level) and is never required
             when leaf_mask is None (all leaves treated as real, prior behavior
             unchanged).
-        N must equal block_size ** depth when depth > 0.
+        N must be a multiple of block_size ** depth when depth > 0 (each of
+            the `depth` compression steps reshapes its current node count by
+            block_size, see the loop below) -- NOT N == block_size ** depth.
+            The stricter equality (fixed until 2026-09-13) forced the
+            hierarchy to always reduce all the way down to a single top
+            node, which conflates "how many compression steps" with "what
+            block_size**depth happens to equal N" -- e.g. it made
+            "one node per fact, no further hierarchy" (depth=1, block_size=4,
+            N=4*n_facts) inexpressible for n_facts>1, since block_size would
+            have to absorb every fact into one block to satisfy equality
+            (dev_notes/indexed_attention_experiment_plan.md, Phase 0bis).
+            Nothing downstream (attend()'s unified softmax, §5.2) assumes a
+            single root -- concatenating a "forest" of N/block_size**depth
+            top-level nodes works exactly the same as concatenating one.
         """
         B, N, d = leaf_embeddings.shape
         if self.depth > 0:
-            expected_n = self.block_size ** self.depth
-            assert N == expected_n, (
-                f"HierarchicalMemory: expected {expected_n} leaves "
-                f"(block_size={self.block_size} ** depth={self.depth}), got {N}"
+            divisor = self.block_size ** self.depth
+            assert N % divisor == 0, (
+                f"HierarchicalMemory: N={N} leaves must be a multiple of "
+                f"block_size={self.block_size} ** depth={self.depth} = {divisor}"
             )
 
         biased = leaf_embeddings + self.source_bias(source_ids)

@@ -41,6 +41,18 @@ La tâche `data/kb_chain_retrieval.py` contient de vrais raccourcis structurels 
 - Hypothèse : `depth=1` doit *égaler* `depth≥2` tant que la KB est petite ; l'intérêt de la hiérarchie n'apparaît qu'en coût/passage à l'échelle (nombre de faits grand), pas en accuracy. **Un `depth=1` qui égale `depth=3` à petite échelle n'est pas un échec de la thèse** — c'est le résultat attendu, et il indique à quelle taille de KB il faut monter pour que l'indexation paie.
 - Conséquence pratique (question de l'utilisateur, 2026-09-13) : **oui, on peut démarrer l'intégration sur texte réel avec une mémoire sans index** (`depth=1`). L'indexation hiérarchique est motivée par la taille de mémoire visée, pas par la capacité d'association — elle peut donc être introduite plus tard, une fois la mécanique validée à `depth=1`.
 
+**[CORRECTIF 2026-09-13, `core/indexed_memory.py`] — la grille ci-dessus n'était pas exécutable telle quelle.** `experiment-manager` a trouvé que `HierarchicalMemory.build()` exigeait `N == block_size ** depth` (égalité stricte), ce qui force la hiérarchie à toujours se réduire à **un seul nœud racine** — avec `n_facts` fixé et `block_size=4` (la largeur d'un bloc-fait), ça ne laisse aucune valeur de `depth` produisant « un nœud par fait » pour `n_facts>1` (`depth=1` avec `block_size=4` ne donne qu'1 nœud total pour 4 feuilles = 1 fait, pas `n_facts` nœuds). Contourner avec un `block_size` non-4 mélange plusieurs faits par bloc — une variable confondue différente, pas un test de profondeur.
+
+Rien en aval (le softmax unifié de `attend()`, §5.2) ne suppose une racine unique — concaténer une "forêt" de `N / block_size**depth` nœuds de tête fonctionne exactement comme concaténer un seul nœud. **Assertion assouplie** : `N % (block_size ** depth) == 0` (divisibilité, pas égalité) — 46 tests existants toujours verts (aucun ne dépendait de la racine unique). Avec `block_size=4` fixé et `N = 4 × n_facts` (aucun padding requis), les profondeurs valides deviennent :
+
+| `n_facts` | profondeurs valides (`block_size=4`) | nœuds au niveau `depth` |
+|---|---|---|
+| 16 | {0,1,2,3} | depth=1→16, depth=2→4, depth=3→1 (racine native) |
+| 64 | {0,1,2,3,4} | depth=1→64, depth=2→16, depth=3→4, depth=4→1 (native) |
+| 256 | {0,1,2,3,4,5} | depth=1→256, depth=2→64, depth=3→16, depth=4→4, depth=5→1 (native) |
+
+**`depth ∈ {0,1,2,3}` est donc directement exécutable pour les 3 valeurs de `n_facts`, avec `block_size=4` partout, sans padding ni `block_size` par cellule.** Reste à faire côté `learn/indexed_attention/train_kb_retrieval.py` : son assertion (`block_size**depth == max_facts*4`, ligne ~214) doit être assouplie à l'identique (`%`, pas `==`) — fichier `experiment-manager`, pas de coordination nécessaire au-delà de ce message.
+
 **Étape 3 — Supervision d'attention, cible corrigée.** `--attn_supervised --supervise node`, avec découplage, `n_hops=2`, 3 seeds, à budget comparable à l'ancienne grille (qui donnait 25 %).
 - Observation de fumée à ne pas citer comme résultat : 72 % en 434 pas CPU (15 s).
 - Rapporter `node_selection_diagnostic` (sélection du bon nœud) **et non** le self-match de feuille, qui s'est révélé maximisable sans lien avec la tâche.
@@ -52,6 +64,7 @@ La tâche `data/kb_chain_retrieval.py` contient de vrais raccourcis structurels 
 
 - **Ne pas relancer `use_ff` / `n_register` / les balayages `N_step`/LR de `n_hops=2`.** Leurs verdicts sont sans objet, mais les re-tester à l'aveugle est du travail à faible valeur : ces variantes n'ont d'intérêt que si le modèle réparé bute à nouveau quelque part. Les garder en réserve, comme diagnostics conditionnels, pas comme file d'attente.
 - **Ne pas geler le chantier distillation.** Voir « Statut des chantiers » ci-dessous — il a une fonction propre que la contre-expertise avait sous-estimée.
+- **Ne pas lancer un script `learn/indexed_attention/*` sans relire son `--lr` par défaut.** Piège déjà rencontré au moins 3 fois sur ce projet (EXP-007, Phase 0bis 2026-09-13) : un défaut de script resté à une valeur d'une autre échelle (souvent `3e-3`) diverge silencieusement à `d_model` plus grand — la perte augmente au lieu de baisser, ce qui peut se lire à tort comme une régression d'architecture. Toujours passer `--lr` explicitement à la valeur déjà validée pour la config testée (voir §13 pour les valeurs de référence par échelle), jamais compter sur le défaut du script.
 
 ### Statut des chantiers du projet (2026-09-13, cadrage utilisateur)
 
