@@ -129,4 +129,4 @@ Sont également non commités, antérieurs à tout ceci et appartenant à l'util
 
 ### Réserve levée
 
-Le §2 portait une réserve (« constat issu de la lecture du code, pas d'une exécution ; le run de septembre venait peut-être du notebook »). `model-design` a retracé `core/toy_model.py:183-208` indépendamment et confirmé. **La réserve est levée sur la mécanique** ; le chemin exact du run de septembre n'a pas été retracé, mais il ne change plus rien au constat.
+Le §2 portait une réserve (« constat issu de la lecture du code, pas d'une exécution ; le run de septembre venait peut-être du notebook »). **Entièrement levée** (voir §4bis) : `model-design` a retracé `core/toy_model.py:183-208` indépendamment, puis vérifié le troisième chemin d'exécution — `notebooks/Th1nker_runner.ipynb` cellule 44, dont la config correspond au run « Ça marche » de septembre, porte le même hardcode. Les trois chemins du dépôt hardcodent `read_step = n_step - 1`, sans exception. Le constat ne s'affaiblit pas, il se confirme par triangulation.
