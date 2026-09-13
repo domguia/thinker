@@ -184,6 +184,16 @@ def main():
                         "use a shorter prefix, no padding needed.")
     p.add_argument("--curriculum_promote_acc", type=float, default=0.9)
     p.add_argument("--curriculum_min_steps", type=int, default=500)
+    p.add_argument("--final_stage_min_steps", type=int, default=1500,
+                   help="experiment-manager (2026-09-13): with a single shared --max_time_minutes/--max_steps "
+                        "budget across all curriculum stages, a run whose early stages happen to converge "
+                        "slowly can exhaust the whole budget before the LAST (target) stage gets a fair shot -- "
+                        "two runs in the same grid landed at different stages (16 vs 24) purely from this, "
+                        "not from a code bug in what gets scored (that part was already correct and clearly "
+                        "labeled via final_stage_seq_len/final_stage_read_step). Fix: once the last curriculum "
+                        "stage is entered, the run is guaranteed at least this many steps in it, EXTENDING "
+                        "past --max_time_minutes/--max_steps if needed (a message is printed when this "
+                        "happens) -- never cut short mid-dwell at the one stage that's actually being measured.")
     p.add_argument("--eval_read_step", type=int, default=None,
                    help="Exp. 1's extrapolation condition: additionally evaluate (never train) at this "
                         "alternate read_step, alongside the matched/current read_step above, at every eval "
@@ -300,13 +310,41 @@ def main():
     max_time_seconds = args.max_time_minutes * 60
     best_exact = 0.0
     stage_start_step = 0
+    final_stage_entered_step = None  # set once both curricula reach their last stage
     model.train()
 
-    for step in range(args.max_steps):
+    def at_final_stage():
+        return stage_idx == len(stages) - 1 and seq_stage_idx == len(seq_stages) - 1
+
+    step = 0
+    while True:
         elapsed = time.time() - start_time
-        if elapsed > max_time_seconds:
-            print(f"Time budget of {args.max_time_minutes} minutes reached. Stopping.", flush=True)
+        if final_stage_entered_step is None and at_final_stage():
+            final_stage_entered_step = step
+        final_stage_dwell = (step - final_stage_entered_step) if final_stage_entered_step is not None else 0
+        # Guarantee --final_stage_min_steps once the target stage is reached, even if that
+        # means running past --max_time_minutes/--max_steps -- see --final_stage_min_steps'
+        # help text for why (a slow-to-converge early stage must not eat the final stage's budget).
+        # Only meaningful with an actual curriculum (>1 stage) -- with a single fixed
+        # read_step/seq_len, "the final stage" is the whole run and the user's own
+        # --max_steps/--max_time_minutes is already the intended budget, not a floor to override.
+        curriculum_active = len(stages) > 1 or len(seq_stages) > 1
+        protecting_final_stage = (curriculum_active and at_final_stage()
+                                  and final_stage_dwell < args.final_stage_min_steps)
+        if step >= args.max_steps and not protecting_final_stage:
+            extended_note = f" (extended past the original --max_steps={args.max_steps} to protect the " \
+                            f"final stage's dwell)" if step > args.max_steps else ""
+            print(f"Step budget of {step} reached. Stopping.{extended_note}", flush=True)
             break
+        if elapsed > max_time_seconds:
+            if protecting_final_stage:
+                if final_stage_dwell == 0:
+                    print(f"Time budget of {args.max_time_minutes} minutes reached, but extending to "
+                          f"guarantee --final_stage_min_steps={args.final_stage_min_steps} at the target "
+                          f"stage (read_step={current_read_step}, seq_len={current_seq_len}).", flush=True)
+            else:
+                print(f"Time budget of {args.max_time_minutes} minutes reached. Stopping.", flush=True)
+                break
 
         inputs, targets = sample_batch(args.batch_size, current_seq_len, args.vocab_size,
                                        args.task, device)
@@ -367,6 +405,8 @@ def main():
                 copy_baseline, mode_baseline = compute_baselines(current_seq_len)
                 print(f"step={step:6d} CURRICULUM PROMOTE -> seq_len={current_seq_len}", flush=True)
 
+        step += 1
+
     final = evaluate(model, args, device, read_step=current_read_step, bos_id=bos_id,
                      seq_len=current_seq_len, n_eval=16)
     print("\n---", flush=True)
@@ -383,7 +423,7 @@ def main():
     print(f"best_exact_match:  {best_exact:.4f}", flush=True)
     print(f"final_exact_match: {final['exact_match']:.4f}", flush=True)
     print(f"training_seconds:  {elapsed:.1f}", flush=True)
-    print(f"num_steps:         {step + 1}", flush=True)
+    print(f"num_steps:         {step}", flush=True)
 
     if args.eval_read_step is not None:
         extrap_final = evaluate(model, args, device, read_step=args.eval_read_step, bos_id=bos_id,
