@@ -110,20 +110,23 @@ def forward_and_predict(model, inputs, targets, n_latent, n_step, read_step, n_m
     return outs, preds
 
 
-def evaluate(model, args, device, read_step: int, bos_id: int, n_eval: int = 8, seed: int = 999) -> dict:
-    """Held-out pass (disjoint seed from training) at a given `read_step`.
-    Averages over `n_eval` batches for a less noisy read. Also runs the
+def evaluate(model, args, device, read_step: int, bos_id: int, seq_len: int = None,
+            n_eval: int = 8, seed: int = 999) -> dict:
+    """Held-out pass (disjoint seed from training) at a given `read_step`
+    and `seq_len` (defaults to `args.seq_len` when not curriculum-ing over
+    it). Averages over `n_eval` batches for a less noisy read. Also runs the
     permanent mismatch/leak check (eval_metrics.leak_check): feeds
     unrelated `inputs` alongside the same `targets` and confirms accuracy
     drops to near chance -- catches a regression of the residual-leak bug
     this module was fixed for, rather than trusting the shift silently."""
+    seq_len = seq_len if seq_len is not None else args.seq_len
     model.eval()
     gen = torch.Generator().manual_seed(seed)
     mismatch_gen = torch.Generator().manual_seed(seed + 54321)
     tok_accs, exact_accs, pos_accs, leak_accs = [], [], [], []
     with torch.no_grad():
         for _ in range(n_eval):
-            inputs, targets = sample_batch(args.batch_size, args.seq_len, args.vocab_size,
+            inputs, targets = sample_batch(args.batch_size, seq_len, args.vocab_size,
                                            args.task, device, generator=gen)
             _, preds = forward_and_predict(model, inputs, targets, args.n_latent,
                                            args.n_step, read_step, args.n_memory, bos_id)
@@ -131,7 +134,7 @@ def evaluate(model, args, device, read_step: int, bos_id: int, n_eval: int = 8, 
             exact_accs.append(exact_match_rate(preds, targets))
             pos_accs.append(per_position_accuracy(preds, targets))
 
-            mismatched_inputs, _ = sample_batch(args.batch_size, args.seq_len, args.vocab_size,
+            mismatched_inputs, _ = sample_batch(args.batch_size, seq_len, args.vocab_size,
                                                 args.task, device, generator=mismatch_gen)
             _, leak_preds = forward_and_predict(model, mismatched_inputs, targets, args.n_latent,
                                                 args.n_step, read_step, args.n_memory, bos_id)
@@ -169,6 +172,16 @@ def main():
                         "exact_match crosses --curriculum_promote_acc. Mirrors "
                         "learn/indexed_attention/train_kb_chain.py's --hop_curriculum (there increasing, "
                         "here decreasing since read_step=n_step is the easy/control end).")
+    p.add_argument("--seq_len_curriculum", default=None,
+                   help="experiment-manager (2026-09-13): a from-scratch run at a large seq_len (e.g. 32) "
+                        "converges too slowly to be affordable per grid cell -- even the read_step=n_step "
+                        "control took 2700+ steps and was still climbing (8.7%%->48.6%% exact_match) when a "
+                        "30-min budget ran out. Same fix as --read_step_curriculum, applied to task length "
+                        "instead: comma-separated INCREASING seq_len stages, e.g. '8,16,24,32'. read_step "
+                        "stays FIXED (--read_step, not --read_step_curriculum -- the two curricula are not "
+                        "combined in this version) while seq_len ramps up on the same promotion rule. The "
+                        "model is built once at max(stages) (embeddings sized for it); earlier stages just "
+                        "use a shorter prefix, no padding needed.")
     p.add_argument("--curriculum_promote_acc", type=float, default=0.9)
     p.add_argument("--curriculum_min_steps", type=int, default=500)
     p.add_argument("--eval_read_step", type=int, default=None,
@@ -199,32 +212,51 @@ def main():
         stages = [args.read_step]
     assert all(0 <= s <= args.n_step for s in stages), "every read_step stage must be in [0, n_step]"
 
+    if args.seq_len_curriculum:
+        assert not args.read_step_curriculum, (
+            "--seq_len_curriculum and --read_step_curriculum are not combined in this version -- "
+            "use a fixed --read_step with --seq_len_curriculum"
+        )
+        seq_stages = [int(x) for x in args.seq_len_curriculum.split(",")]
+        assert seq_stages == sorted(seq_stages) and len(set(seq_stages)) == len(seq_stages), (
+            "--seq_len_curriculum stages must be strictly increasing (start short/easy, end long/hard)"
+        )
+        assert seq_stages[-1] == args.seq_len, (
+            f"--seq_len_curriculum's last stage ({seq_stages[-1]}) should equal --seq_len ({args.seq_len}) "
+            f"-- it's the target scale, kept as the single source of truth for reporting/capacity_budget"
+        )
+    else:
+        seq_stages = [args.seq_len]
+    max_seq_len = max(seq_stages)
+
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
     bos_id = args.vocab_size  # reserved row, never a valid label (see shift_targets)
     model = ToyThinker(
         vocab_size=args.vocab_size + 1, max_latent=max(args.n_latent, 16),
-        max_input_len=args.seq_len, max_output_len=args.seq_len,
+        max_input_len=max_seq_len, max_output_len=max_seq_len,
         d_model=args.d_model, nhead=args.nhead, d_hid=args.d_hid, nlayers=args.nlayers,
         n_probe=1, dropout=0.0,  # all_losses_compute calls compute_probe_loss() unconditionally,
                                   # which crashes on probes=None -- n_probe=0 is not a supported no-op here.
     ).to(device)
     stage_idx = 0
     current_read_step = stages[stage_idx]
+    seq_stage_idx = 0
+    current_seq_len = seq_stages[seq_stage_idx]
 
     n_params = sum(p_.numel() for p_ in model.parameters())
-    print(f"task={args.task} n_step={args.n_step} read_step_stages={stages} "
+    print(f"task={args.task} n_step={args.n_step} read_step_stages={stages} seq_len_stages={seq_stages} "
           f"eval_read_step={args.eval_read_step} params={n_params/1e3:.1f}K", flush=True)
 
-    def print_budget(read_step, label):
+    def print_budget(read_step, seq_len, label):
         # thinker-5b (2026-09-13): read_step varies TWO things at once -- how
         # many compute steps directly see x, AND the total FIFO write
         # bandwidth available to consolidate x's content before it
         # disappears. Print the budget so a cliff at low read_step is never
         # misread as a mechanism verdict when it's actually a capacity bound.
-        b = capacity_budget(read_step, args.n_latent, args.d_model, args.seq_len, args.vocab_size)
-        print(f"capacity_budget ({label} read_step={read_step}): "
+        b = capacity_budget(read_step, args.n_latent, args.d_model, seq_len, args.vocab_size)
+        print(f"capacity_budget ({label} read_step={read_step}, seq_len={seq_len}): "
               f"write_budget={b['write_budget_vectors']} vectors ({b['budget_dims']} dims) "
               f"vs. input={b['input_bits']:.1f} bits  "
               f"capacity_constraining={b['capacity_constraining']}", flush=True)
@@ -235,29 +267,34 @@ def main():
                   flush=True)
         return b
 
-    budget = print_budget(current_read_step, "matched")
+    budget = print_budget(current_read_step, current_seq_len, "matched")
     if args.eval_read_step is not None:
-        print_budget(args.eval_read_step, "extrapolation")
+        print_budget(args.eval_read_step, current_seq_len, "extrapolation")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
 
-    # Trivial baselines, measured once up front against a disjointly-seeded
-    # reference/eval split (learn/toy_memory/eval_metrics.py) -- reported
-    # alongside every accuracy number below, never cited without them.
-    def target_sampler(n, seed):
-        gen = torch.Generator().manual_seed(seed)
-        _, y = sample_batch(n, args.seq_len, args.vocab_size, args.task, "cpu", generator=gen)
-        return y
+    # Trivial baselines (learn/toy_memory/eval_metrics.py) -- depend on
+    # seq_len, so recomputed whenever a --seq_len_curriculum promotion
+    # changes it (see the promotion block below), never left stale from an
+    # earlier, shorter stage. Reported alongside every accuracy number,
+    # never cited without them.
+    def compute_baselines(seq_len):
+        def target_sampler(n, seed):
+            gen = torch.Generator().manual_seed(seed)
+            _, y = sample_batch(n, seq_len, args.vocab_size, args.task, "cpu", generator=gen)
+            return y
 
-    probe_x, probe_y = sample_batch(4096, args.seq_len, args.vocab_size, args.task, "cpu",
-                                    generator=torch.Generator().manual_seed(54321))
-    copy_baseline = copy_input_baseline(probe_x, probe_y)
-    mode_baseline = most_common_token_baseline(target_sampler, args.vocab_size, args.seq_len,
-                                               seed=11111)
-    print(f"trivial baselines -- copy_input: token={copy_baseline['token_acc']:.4f} "
-          f"exact={copy_baseline['exact_match']:.4f}  |  most_common_token: "
-          f"token={mode_baseline['token_acc']:.4f} exact={mode_baseline['exact_match']:.4f} "
-          f"vocab_chance={mode_baseline['vocab_chance']:.4f}", flush=True)
+        probe_x, probe_y = sample_batch(4096, seq_len, args.vocab_size, args.task, "cpu",
+                                        generator=torch.Generator().manual_seed(54321))
+        cb = copy_input_baseline(probe_x, probe_y)
+        mb = most_common_token_baseline(target_sampler, args.vocab_size, seq_len, seed=11111)
+        print(f"trivial baselines (seq_len={seq_len}) -- copy_input: token={cb['token_acc']:.4f} "
+              f"exact={cb['exact_match']:.4f}  |  most_common_token: "
+              f"token={mb['token_acc']:.4f} exact={mb['exact_match']:.4f} "
+              f"vocab_chance={mb['vocab_chance']:.4f}", flush=True)
+        return cb, mb
+
+    copy_baseline, mode_baseline = compute_baselines(current_seq_len)
 
     start_time = time.time()
     max_time_seconds = args.max_time_minutes * 60
@@ -271,7 +308,7 @@ def main():
             print(f"Time budget of {args.max_time_minutes} minutes reached. Stopping.", flush=True)
             break
 
-        inputs, targets = sample_batch(args.batch_size, args.seq_len, args.vocab_size,
+        inputs, targets = sample_batch(args.batch_size, current_seq_len, args.vocab_size,
                                        args.task, device)
         outs, preds = forward_and_predict(model, inputs, targets, args.n_latent,
                                           args.n_step, current_read_step, args.n_memory, bos_id)
@@ -283,16 +320,19 @@ def main():
         optimizer.step()
 
         if step % args.eval_every == 0:
-            matched = evaluate(model, args, device, read_step=current_read_step, bos_id=bos_id)
+            matched = evaluate(model, args, device, read_step=current_read_step, bos_id=bos_id,
+                               seq_len=current_seq_len)
             leak_flag = "" if matched["leak_token_acc"] < mode_baseline["vocab_chance"] + 0.15 else \
                 " *** LEAK SUSPECTED (mismatch accuracy far above chance) ***"
-            print(f"step={step:6d} stage_read_step={current_read_step} elapsed={elapsed/60:.2f}m "
-                  f"loss={loss.item():.4f} [matched read_step={current_read_step}] "
+            print(f"step={step:6d} stage_read_step={current_read_step} stage_seq_len={current_seq_len} "
+                  f"elapsed={elapsed/60:.2f}m loss={loss.item():.4f} "
+                  f"[matched read_step={current_read_step}] "
                   f"token_acc={matched['token_acc']:.4f} exact_match={matched['exact_match']:.4f} "
                   f"leak_check={matched['leak_token_acc']:.4f}{leak_flag}", flush=True)
 
             if args.eval_read_step is not None:
-                extrap = evaluate(model, args, device, read_step=args.eval_read_step, bos_id=bos_id)
+                extrap = evaluate(model, args, device, read_step=args.eval_read_step, bos_id=bos_id,
+                                  seq_len=current_seq_len)
                 print(f"           [extrapolation read_step={args.eval_read_step}] "
                       f"token_acc={extrap['token_acc']:.4f} exact_match={extrap['exact_match']:.4f} "
                       f"leak_check={extrap['leak_token_acc']:.4f}", flush=True)
@@ -300,22 +340,35 @@ def main():
             if matched["exact_match"] > best_exact:
                 best_exact = matched["exact_match"]
 
-            # thinker-5b (2026-09-13): promote only on a real signal, same
-            # rule as train_kb_chain.py's --hop_curriculum -- both a minimum
-            # dwell time at this stage AND a held-out accuracy threshold,
-            # never time alone (which would promote through noise) or
-            # accuracy alone (which could promote off a single lucky batch
-            # before the eval average has stabilized).
+            # thinker-5b (2026-09-13) / experiment-manager (seq_len variant,
+            # same day): promote only on a real signal, same rule as
+            # train_kb_chain.py's --hop_curriculum -- both a minimum dwell
+            # time at this stage AND a held-out accuracy threshold, never
+            # time alone (promotes through noise) or accuracy alone (could
+            # promote off a single lucky batch before the eval average has
+            # stabilized). Exactly one of the two curricula is active in a
+            # given run (asserted above), so only one branch below ever fires.
             if (stage_idx < len(stages) - 1
                     and step - stage_start_step >= args.curriculum_min_steps
                     and matched["exact_match"] >= args.curriculum_promote_acc):
                 stage_idx += 1
                 stage_start_step = step
                 current_read_step = stages[stage_idx]
-                budget = print_budget(current_read_step, "matched")
+                budget = print_budget(current_read_step, current_seq_len, "matched")
                 print(f"step={step:6d} CURRICULUM PROMOTE -> read_step={current_read_step}", flush=True)
 
-    final = evaluate(model, args, device, read_step=current_read_step, bos_id=bos_id, n_eval=16)
+            if (seq_stage_idx < len(seq_stages) - 1
+                    and step - stage_start_step >= args.curriculum_min_steps
+                    and matched["exact_match"] >= args.curriculum_promote_acc):
+                seq_stage_idx += 1
+                stage_start_step = step
+                current_seq_len = seq_stages[seq_stage_idx]
+                budget = print_budget(current_read_step, current_seq_len, "matched")
+                copy_baseline, mode_baseline = compute_baselines(current_seq_len)
+                print(f"step={step:6d} CURRICULUM PROMOTE -> seq_len={current_seq_len}", flush=True)
+
+    final = evaluate(model, args, device, read_step=current_read_step, bos_id=bos_id,
+                     seq_len=current_seq_len, n_eval=16)
     print("\n---", flush=True)
     print(format_report(args.task, final["token_acc"], final["exact_match"],
                         copy_baseline, mode_baseline, pos_acc=final["pos_acc"], budget=budget), flush=True)
@@ -325,13 +378,16 @@ def main():
           f"{final['leak_token_acc']:.4f}  -> {leak_verdict}", flush=True)
     print(f"read_step_stages:      {stages}", flush=True)
     print(f"final_stage_read_step: {current_read_step} (stage {stage_idx + 1}/{len(stages)})", flush=True)
+    print(f"seq_len_stages:        {seq_stages}", flush=True)
+    print(f"final_stage_seq_len:   {current_seq_len} (stage {seq_stage_idx + 1}/{len(seq_stages)})", flush=True)
     print(f"best_exact_match:  {best_exact:.4f}", flush=True)
     print(f"final_exact_match: {final['exact_match']:.4f}", flush=True)
     print(f"training_seconds:  {elapsed:.1f}", flush=True)
     print(f"num_steps:         {step + 1}", flush=True)
 
     if args.eval_read_step is not None:
-        extrap_final = evaluate(model, args, device, read_step=args.eval_read_step, bos_id=bos_id, n_eval=16)
+        extrap_final = evaluate(model, args, device, read_step=args.eval_read_step, bos_id=bos_id,
+                                seq_len=current_seq_len, n_eval=16)
         print(f"final_extrapolation_read_step={args.eval_read_step}: "
               f"token_acc={extrap_final['token_acc']:.4f} exact_match={extrap_final['exact_match']:.4f} "
               f"leak_check={extrap_final['leak_token_acc']:.4f}", flush=True)
