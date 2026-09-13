@@ -53,12 +53,28 @@ Rien en aval (le softmax unifié de `attend()`, §5.2) ne suppose une racine uni
 
 **`depth ∈ {0,1,2,3}` est donc directement exécutable pour les 3 valeurs de `n_facts`, avec `block_size=4` partout, sans padding ni `block_size` par cellule.** Reste à faire côté `learn/indexed_attention/train_kb_retrieval.py` : son assertion (`block_size**depth == max_facts*4`, ligne ~214) doit être assouplie à l'identique (`%`, pas `==`) — fichier `experiment-manager`, pas de coordination nécessaire au-delà de ce message.
 
+**[CORRECTIF 2026-09-13] — Étape 1 auto-corrigée par `experiment-manager` : aucun résultat de cette grille ne bat le raccourci, à aucun `n_hops`.** Premier passage lu à tort comme un signal positif croissant (`n_hops=4` à 89-92%, présenté comme "surprenant") — en réalité une comparaison au seul `conditional_chance`, sans vérifier `margin_over_shortcut` comme la méthodologie l'exige. Repris intégralement avec le bloc chance-level complet sur les 21 runs terminés (`n_hops` 2/3/4, découplé + ablation partagée) :
+
+| | `n_hops=2` (5 seeds) | `n_hops=3` (5 seeds) | `n_hops=4` (3 seeds) |
+|---|---|---|---|
+| découplé | 34,6/32,9/33,5/25,5/33,8 % — marge ±0,08 pt max, jamais nette | 47,2/39,4/46,3/44,9/38,2 % — marge toujours négative (-3 à -13 pts) | 92,0/89,0/91,3 % — marge négative (-8 à -11 pts) |
+| partagé (ablation) | 24,7/23,4/23,8 % — au niveau de `conditional_chance`, comme attendu | 16,4/22,8/24,8 % — marge très négative (-26 à -33 pts) | 68,6 % — marge -31,5 pts |
+
+**Cause du malentendu sur `n_hops=4`** : la grille garde `max_facts=4` fixe (pour préserver `block_size=4`/`depth=2`), ce qui force `n_distractors=0` à `n_hops=4` — sans aucun distracteur, le raccourci `non_key` (deviner parmi les valeurs qui n'apparaissent jamais comme clé) sature à **100%** (à ce `n_hops`, la seule valeur non-clé de tout l'épisode *est* la bonne réponse, sans qu'aucun chaînage soit nécessaire). Les "89-92%" étaient donc en dessous, pas au-dessus, de ce plafond dégénéré — l'amélioration apparente avec `n_hops` croissant était la hausse du plafond du raccourci, pas un progrès du modèle. Même lecture, plus discrète, à `n_hops=3` (`non_key` ≈ 49-52%, jamais dépassé).
+
+**Conclusion révisée** : avec le compresseur découplé, **aucune configuration testée à ce jour (2, 3 ou 4 sauts) ne démontre un chaînage réel au-delà d'un raccourci sans récupération** — ce n'est ni un problème spécifique à `n_hops=2` (lecture précédente), ni un signal positif à `n_hops≥3` (lecture initiale erronée, rétractée). Rapproche ce résultat GPU (`d_model=256`) du précédent déjà documenté pour la supervision d'attention (CPU `d_model=32` → 72,9-99,2%, GPU `d_model=128` → ~25%, self-match pourtant parfait) : **c'est la deuxième fois qu'un correctif validé proprement à petite échelle CPU ne se reproduit pas à l'échelle GPU (`d_model=128-256`)** — un pattern à surveiller systématiquement désormais (cf. méthodologie commune, §"Transférabilité échelle petite → grande", Narang et al.), pas à traiter comme deux incidents isolés.
+
+**Prochaines étapes, dans cet ordre** :
+1. **Balayage LR dédié à la variante découplée**, sur la **seule cellule non dégénérée** de cette grille : `n_hops=2, n_distractors=2` (`non_key` ≈ 33%, un vrai plancher, pas un plafond gonflé). Ne pas réutiliser `lr=1,2e-3` (calibré par mise à l'échelle linéaire depuis l'ancien pooling partagé, jamais revalidé pour le pooling découplé spécifiquement — nouveau paramètre `query_v`, paysage d'optimisation différent) sans le revérifier — leçon déjà répétée plusieurs fois sur ce projet.
+2. **Durcir le générateur avant de retester `n_hops≥3`** (voir Étape 4 ci-dessous, priorité relevée) : garder `n_distractors` fixe et non nul (ex. 2) à travers tout balayage `n_hops`, en laissant `max_facts` (et donc `depth`, maintenant libre grâce à l'assouplissement `N % block_size**depth == 0` ci-dessus) croître avec `n_hops` plutôt que de figer `max_facts`. Sans ça, `n_hops≥3` avec peu/pas de distracteurs reste ininterprétable quel que soit le LR.
+3. Ne pas relancer `n_hops=3/4` avec l'ancien générateur en attendant (1)/(2) — les résultats resteraient contaminés par le même plafond dégénéré.
+
 **Étape 3 — Supervision d'attention, cible corrigée.** `--attn_supervised --supervise node`, avec découplage, `n_hops=2`, 3 seeds, à budget comparable à l'ancienne grille (qui donnait 25 %).
 - Observation de fumée à ne pas citer comme résultat : 72 % en 434 pas CPU (15 s).
 - Rapporter `node_selection_diagnostic` (sélection du bon nœud) **et non** le self-match de feuille, qui s'est révélé maximisable sans lien avec la tâche.
 - Question à trancher : la supervision reste-t-elle utile une fois le compresseur réparé, ou devient-elle redondante ? Une réponse « redondante » est un bon résultat (moins de machinerie à porter).
 
-**Étape 4 — Durcir le générateur de tâche** (peut tourner en parallèle des étapes 1-3, ne dépend de rien).
+**Étape 4 — Durcir le générateur de tâche** — **[priorité relevée 2026-09-13]**, n'est plus seulement souhaitable en parallèle : bloquant pour toute conclusion sur `n_hops≥3` (voir le correctif de l'Étape 1 ci-dessus, où `n_distractors=0` a fait saturer `non_key` à 100% et rendu les résultats `n_hops=3/4` ininterprétables). Concrètement : garder `n_distractors` fixe et non nul à travers tout balayage `n_hops` (`max_facts`/`depth` variables à la place, cf. l'assouplissement `N % block_size**depth == 0` plus haut), et durcir `data/kb_chain_retrieval.py` contre les raccourcis structurels restants (chaînes leurres, distracteurs dont les valeurs sont aussi des clés).
 
 ### Ce qu'il ne faut PAS faire maintenant (décision explicite de l'utilisateur, 2026-09-13)
 
