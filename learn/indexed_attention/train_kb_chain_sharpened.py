@@ -13,11 +13,13 @@ on two cheap, directly-applicable fixes, tested here:
 1. A learned "sharpening"/temperature scalar (NTM's key-strength beta,
    Graves et al. 2014) multiplying the query before the dot product,
    initialized > 1 so scores start already sharpened rather than flat.
-2. RMSNorm on the query before `q_proj` (Product-Key Memory's fix, Lample et
-   al. 2019, for "catastrophic drift" -- there only a minority of memory
-   slots got used without normalizing the query network's output; their fix
-   was BatchNorm, RMSNorm matches this project's existing normalization
-   convention elsewhere).
+2. RMSNorm on `q_proj`'s OUTPUT (Product-Key Memory's fix, Lample et al.
+   2019, for "catastrophic drift" -- there only a minority of memory slots
+   got used without normalizing the query NETWORK's output; their fix was
+   BatchNorm on that output, RMSNorm matches this project's existing
+   normalization convention elsewhere). Placement matters: normalizing
+   q_proj's INPUT instead (tried first, at CPU scale) showed no improvement
+   -- see dev_notes/indexed_attention_experiment_plan.md Phase 2.
 
 Otherwise identical to train_kb_chain.py (same CLI, same KBChainDataset task)
 -- kept as a SEPARATE file rather than editing train_kb_chain.py in place, to
@@ -47,9 +49,17 @@ from core.layers import RMSNorm
 
 
 class SharpenedHierarchicalMemory(HierarchicalMemory):
+    """RMSNorm is applied to q_proj's OUTPUT (not its input) -- this matches
+    Product-Key Memory's actual fix (BatchNorm on the query NETWORK's output,
+    Lample et al. 2019), a meaningfully different placement from normalizing
+    the input. An earlier CPU-scale attempt with norm-before-projection
+    showed no improvement (dev_notes/indexed_attention_experiment_plan.md
+    Phase 2); norm-after-projection is the literature-faithful version,
+    tested here for the first time at this (bigger) scale."""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.query_norm = RMSNorm(self.d_model)
+        self.query_out_norm = RMSNorm(self.d_model)
         self.temperature = nn.Parameter(torch.tensor(4.0))
 
     def attend(self, query_input):
@@ -68,7 +78,7 @@ class SharpenedHierarchicalMemory(HierarchicalMemory):
         mask_all = torch.cat(levels_mask, dim=1)
 
         B, T, d = query_input.shape
-        q = self.q_proj(self.query_norm(query_input)) * self.temperature
+        q = self.query_out_norm(self.q_proj(query_input)) * self.temperature
         S = k_all.shape[1]
         if self.n_head > 1:
             hd = d // self.n_head
@@ -129,8 +139,8 @@ def self_match_diagnostic(model, ds, n_facts, device, n_eval=512):
     for b in range(n_eval):
         key_tokens = leaves[b, [i * 4 + 1 for i in range(n_facts)]]
         tok_emb = model.embed(key_tokens)
-        if hasattr(mem, "query_norm"):
-            q = mem.q_proj(mem.query_norm(tok_emb)) * mem.temperature
+        if hasattr(mem, "query_out_norm"):
+            q = mem.query_out_norm(mem.q_proj(tok_emb)) * mem.temperature
         else:
             q = mem.q_proj(tok_emb)
         k = mem.level_norms[0](mem.k_proj(tok_emb + mem.source_bias.weight[1]))
