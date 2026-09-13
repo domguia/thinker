@@ -378,3 +378,71 @@ Question posée : peut-on éviter (ou limiter) le travail d'apprentissage des pa
 2. `d_model$ (1024 dans l'exemple ci-dessus) $< 5120$ (hidden size du Teacher) — une projection est nécessaire, pas une copie directe. Deux options : (a) projection aléatoire fixe (rapide, pas d'optimalité particulière) ; (b) **SVD/PCA** sur la matrice d'embedding du Teacher, ne garder que les $d_{\text{model}}$ composantes principales — capture le plus de variance possible de l'espace d'origine avec le budget dimensionnel choisi, coût CPU raisonnable pour une matrice $248\,320\times 5120$.
 3. **Limiter le travail d'apprentissage demandé, pas forcément l'annuler complètement** : geler `self.embed` (ou lui donner un LR très réduit) est plausible — c'est une table de correspondance token→représentation, un rôle largement indépendant de l'architecture qui la consomme ensuite. Geler `OutputStream['answer'].head` est plus risqué : la tête doit apprendre à prédire depuis l'état interne **de notre propre modèle** (différent de celui du Teacher), donc probablement la laisser entraînable mais initialisée depuis le Teacher plutôt que d'un `nn.Linear` aléatoire — un bon point de départ reste un point de départ, même si elle continue d'apprendre.
 4. **Non résolu, à trancher empiriquement** : geler vs. LR réduit vs. entraînable dès le départ pour `self.embed` — proposé comme une variante de plus à tester (dans l'esprit des flags Phase 1bis déjà en place), pas une décision à prendre a priori.
+
+## 14. Intégration d'`IndexedThinker` sur texte réel — vers un objectif LM par position **[PROPOSITION 2026-09-13, pas encore implémentée, design uniquement]**
+
+### 14.0 Le problème exact à résoudre
+
+`IndexedThinker.forward` (`core/indexed_thinker_model.py:136-194`) a une interface **une-KB-in / une-réponse-out** : un seul `query_tokens`, un seul vecteur de sortie par stream (`OutputStream.query_seed`, `(1, d_model)`, `core/indexed_thinker_model.py:80,86`). C'est adapté à `kb_chain_retrieval.py` (une question, une réponse) mais **pas** à un entraînement LM classique sur texte réel, qui demande une perte cross-entropy **à chaque position** d'un document potentiellement long — ce que ni la Phase 3 du plan (déjà existante : texte/vocabulaire réels mais toujours sous forme synthétique "une requête → une réponse", cf. `wiki_samples.json`) ni aucune phase actuelle ne couvrent. Ce qui suit est la conception de cette extension, pas encore codée, distincte de la Phase 3.
+
+### 14.1 Fenêtrage glissant du document
+
+Un document tokenisé est découpé en fenêtres consécutives, chacune composée de :
+- un **contexte** de $N_{\text{ctx}} = \text{block\_size}^{\text{depth}}$ leaves (contrainte déjà imposée par `HierarchicalMemory.build`, `core/indexed_memory.py:156-160`), lui-même scindé en deux sous-populations distinguées par `source_ids` (§6.2, déjà l'existant) :
+  - **input** (`source_id=0`) : les $T_{\text{local}}$ tokens immédiatement avant la cible (contexte récent, local) ;
+  - **KB** (`source_id=1`) : les tokens plus anciens du **même document**, remplissant le reste des $N_{\text{ctx}} - T_{\text{local}}$ slots — donne un vrai test de rappel long-terme sur données réelles (pas une KB de faits fabriqués), sans attendre un mécanisme de retrieval externe (§14.7). En début de document, `leaf_mask` (déjà supporté, `core/indexed_memory.py:139-151`) pad les slots manquants.
+- une **cible** de $T_{\text{tgt}}$ tokens, sur laquelle la perte est calculée.
+
+**Stride proposé** : $\text{stride} = T_{\text{tgt}}$ (cibles non chevauchantes) — chaque token du document est prédit exactement une fois par epoch, convention standard d'entraînement LM par blocs.
+
+### 14.2 Récurrence du registre $R$ entre fenêtres, SM remise à zéro
+
+Proposition : $R$ (registre final de la fenêtre $i$) devient la base du registre de la fenêtre $i+1$ :
+$$R_{\text{init}}^{(i+1)} = \text{stopgrad}\big(R_{\text{final}}^{(i)}\big) + \bar q^{(i+1)}$$
+où $\bar q^{(i+1)}$ est le même terme qu'aujourd'hui (moyenne des embeddings du contexte de la fenêtre, `core/indexed_thinker_model.py:160-161`), et `register_init` (paramètre appris) ne sert alors qu'à amorcer la toute première fenêtre d'un document.
+
+- **Stop-gradient à la frontière de fenêtre par défaut** (à la Transformer-XL, segment-level recurrence) : borne le graphe de calcul/BPTT à une seule fenêtre au lieu de tout le document — flag d'ablation `detach_register_across_windows: bool = True`, à tester (le cas `False` est un simple TBPTT complet, plus coûteux mais potentiellement plus cohérent en gradient).
+- **SM n'est PAS reportée entre fenêtres** — remise à zéro à chaque fenêtre, comportement déjà actuel (`sm_k`/`sm_v` initialisés vides en tête de `forward`, lignes 163-164). Cette séparation est volontaire et s'aligne avec la terminologie du projet : SM = trace de travail **vraiment court-terme** de cette fenêtre de raisonnement, $R$ = résumé compressé **long-terme** qui traverse tout le document, KB = détail brut local/plus-ancien. Aucun des trois ne fait double emploi avec un autre.
+
+### 14.3 Généralisation de l'`OutputStream` à une sortie multi-position
+
+Nécessaire pour obtenir une perte par position (le point bloquant identifié en 14.0). Remplace la requête unique apprise `query_seed` par une requête **par position de la cible**, construite par teacher forcing :
+$$q_t = \text{embed}(\text{target\_token}_{t-1}) + \text{pos\_embed}(t), \quad t = 1 \ldots T_{\text{tgt}}$$
+chaque $q_t$ attend **indépendamment** (pas de self-attention causale entre positions ajoutée) sur `sm_k`/`sm_v` accumulées pendant les `n_step` itérations de la fenêtre courante — exactement le mécanisme `OutputStreamLayer.forward` existant (`core/indexed_thinker_model.py:59-62`), simplement batché sur la dimension $T_{\text{tgt}}$ au lieu de $1$.
+
+- Reste "léger, sans FF" au sens de §11bis : on ajoute une dimension de batch à la requête, pas de nouvelle couche/poids de type FF.
+- **Entraînement** : CE standard sur les $T_{\text{tgt}}$ positions en parallèle (teacher forcing avec les vrais tokens cible décalés — identique en substance à un décodeur Transformer standard).
+- **Inférence/génération** : nécessairement autorégressive, un token à la fois (puisque $q_t$ dépend de $\text{target\_token}_{t-1}$) — aucun écart par rapport à la pratique standard d'un LM causal.
+- **Lecture directe de la KB en plus de SM** (`read_kb_directly`, optionnelle) : pas retenue par défaut pour le MVP — `o_kb` est déjà intégrée dans SM à chaque itération du cœur (§2), donc probablement redondante ; à garder comme variante d'ablation si le stream peine à récupérer un détail fin noyé dans la trace SM compressée.
+
+### 14.4 Objectif de perte
+
+Réutilise tel quel l'infrastructure de `learn/distill/train_sft.py` : CE standard (`F.cross_entropy` sur `(B, T_{\text{tgt}}, \text{vocab})` vs labels) comme premier mode, KD Top-K (`topk_kd_loss`, déjà validé EXP-003 à EXP-006) branchable à l'identique une fois des cibles Teacher précalculées **par position de fenêtre** (même pipeline `precompute_teacher_targets.py`, tranché par fenêtre plutôt que par exemple) — aucun changement de format de perte nécessaire, seul l'alignement fenêtre/position doit être géré côté chargeur de données.
+
+### 14.5 Nouveau chargeur de données (proposition, pas encore codée)
+
+`data/real_text_windows.py` (nom proposé, distinct de `data/kb_chain_retrieval.py` qui reste la tâche synthétique multi-sauts) : tokenise un document entier une fois, puis produit des fenêtres glissantes `(ctx_leaves, source_ids, leaf_mask, target_tokens, labels)` avec $N_{\text{ctx}} = \text{block\_size}^{\text{depth}}$, $T_{\text{local}}$, $T_{\text{tgt}}$ configurables — partage la même contrainte de forme que `HierarchicalMemory.build` (§14.1). Source : les `train.jsonl`/`val.jsonl` déjà produits par `learn/distill/prepare_*_data.py` (champ `text`), aucun nouveau format de données à créer.
+
+### 14.6 Changements d'interface proposés pour `IndexedThinker.forward`
+
+- Nouveaux arguments optionnels : `target_tokens: (B, T_tgt)` (teacher forcing, active le mode multi-position de §14.3) et `register_init_override: (B, n_register, d) = None` (injecte le $R$ reporté de la fenêtre précédente, §14.2, remplaçant `self.register_init.unsqueeze(0).expand(...)` comme base avant l'ajout de $\bar q$).
+- `R` final est déjà retourné (`return R, stream_outputs`) — rien à changer côté retour pour permettre le report d'une fenêtre à l'autre, seul l'appelant (boucle d'entraînement) a la responsabilité de le transmettre et d'appliquer le stop-gradient de §14.2.
+
+### 14.7 Explicitement hors de ce document de conception
+
+- **Vraie récupération externe** : ici, la "KB" d'une fenêtre = tokens plus anciens du **même document**, pas un corpus externe interrogé par similarité. Un futur mécanisme de retrieval (BM25/embedding search) alimenterait la population `source_id=1` de façon plus riche, sans changer l'interface ci-dessus — seul le choix des leaves KB en amont (côté chargeur de données) changerait.
+- **KB persistante apprise** (Phase 10, §8bis) : orthogonal à ce document, s'intégrerait comme un niveau supplémentaire dans `HierarchicalMemory.attend()` (ou un terme additionné à `o_kb`), indépendant du fenêtrage texte réel décrit ici.
+- **Coût GPU réel du fenêtrage** (un `build()` par fenêtre, potentiellement coûteux si $N_{\text{ctx}}$ est grand, cf. §5.2bis) : non mesuré, nécessitera un test Grid5000 dédié une fois codé.
+
+### 14.8 Résumé des décisions proposées (à valider/ajuster avant implémentation)
+
+| Axe | Choix proposé |
+|---|---|
+| Fenêtrage | glissant, cibles non chevauchantes, stride = $T_{\text{tgt}}$ |
+| Contexte unifié | récence locale = input (`source_id=0`), plus ancien du même document = KB (`source_id=1`) |
+| Registre $R$ entre fenêtres | reporté, stop-gradient à la frontière par défaut (flag d'ablation) |
+| SM entre fenêtres | non reportée — remise à zéro à chaque fenêtre (comportement déjà actuel) |
+| Sortie | généralisation multi-position d'`OutputStream`, cross-attention indépendante par position, pas de self-attention causale ajoutée |
+| Perte | CE standard + KD optionnel, réutilise `topk_kd_loss` tel quel |
+
+Relation avec le plan : voir Phase 11 (nouvelle, `dev_notes/indexed_attention_experiment_plan.md`), qui référence cette section pour le protocole de test une fois implémentée.

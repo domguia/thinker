@@ -355,6 +355,23 @@ Réutiliser `learn/distill/precompute_teacher_targets.py` et `topk_kd_loss()` (d
 
 **Extension possible, à considérer seulement après un premier résultat PKM-style (pas en même temps)** : **Titans / Infini-Transformer** (Google, déjà dans `raw/Branch-•-Indexed-Attention.md` ligne 543, cf. spec §8bis) — mémoire différentiable mise à jour **en continu, y compris à l'inférence**, via une règle d'apprentissage associatif basée sur une métrique de "surprise", plutôt qu'une mémoire figée après l'entraînement (comme le PKM-style ci-dessus). Plus complexe (règle d'écriture différentiable dédiée à concevoir et valider), donc à ne tester qu'une fois la version PKM-style (accumulation par gradient d'entraînement seul) validée ou clairement insuffisante — pas une alternative à essayer en parallèle dès le départ.
 
+## Phase 11 — Intégration réelle sur texte long : fenêtrage + sortie multi-position **[PROPOSITION 2026-09-13, pas encore implémentée]**
+
+**Contexte** : distincte de la Phase 3 (données/vocabulaire réels, mais forme toujours "une requête → une réponse" façon `kb_chain_retrieval.py`, cf. `wiki_samples.json`). Ici, il s'agit de brancher pour de vrai `IndexedThinker` (pas le transformer dense de `train_sft.py`, qui ne sert que de véhicule pipeline pour la piste distillation) sur un objectif LM **par position** sur des documents longs — la tâche explicitement demandée ("intégration sur texte réel"), voir spec §14 pour la conception complète (fenêtrage glissant, récurrence de $R$ entre fenêtres avec SM remise à zéro, généralisation multi-position d'`OutputStream`).
+
+**Hypothèse** : le mécanisme (cœur récurrent + KB hiérarchique + registre reporté entre fenêtres) atteint au moins la perplexité d'un transformer dense de taille comparable sur le même découpage de document, avec l'argument d'efficacité du projet (§13) portant sur le budget de paramètres/profondeur de calcul, pas sur la qualité brute à budget égal.
+
+| Observation | Action |
+|---|---|
+| Perplexité comparable (à budget de paramètres/FLOPs ajusté) | Continuer vers Phase 4/9 sur ce pipeline réel plutôt que sur le transformer dense placeholder |
+| Dégradation nette | Diagnostiquer séparément chaque nouveauté de cette phase : récurrence de $R$ (`detach_register_across_windows` on/off), $T_{\text{local}}$/$T_{\text{tgt}}$ trop petits ou trop grands, sortie multi-position (comparer à la sortie mono-position sur une tâche de contrôle équivalente à `kb_chain_retrieval.py` pour isoler si le bug vient du nouveau mécanisme de sortie ou du fenêtrage) |
+
+**Protocole (esquisse)** : implémenter `data/real_text_windows.py` (§14.5) + les changements d'interface `IndexedThinker.forward` (§14.6), valider d'abord sur CPU à toute petite échelle (quelques documents courts, $N_{\text{ctx}}$/$T_{\text{tgt}}$ minuscules) avant tout passage Grid5000, dans le même esprit que le MVP initial (tests locaux avant GPU). ≥3 seeds une fois à l'échelle GPU.
+
+**Dépendance** : bloquante pour la Phase 10 (KB persistante apprise) et pour tout entraînement KD réaliste sur l'architecture Indexed Attention elle-même (le run KD réaliste actuellement en cours côté experiment-manager tourne sur le transformer dense placeholder, pas sur ce pipeline).
+
+**Ne remplace pas** : les Phases 1/1bis/1quater/2 (mécanisme testé sur tâches synthétiques courtes, cadre plus simple pour isoler les effets) restent le bon outil de diagnostic mécanistique — cette phase est un passage à l'échelle/à la réalité, pas un remplacement du protocole de diagnostic.
+
 ## Ce que ce plan laisse volontairement de côté
 
 No-Op/largeur adaptative, curriculum de largeur "large→étroit" — reportées après la Phase 7. Les introduire plus tôt ajouterait des variables libres avant d'avoir une base fiable pour juger si elles aident.
