@@ -4,6 +4,74 @@ Objectif : passer du MVP testé uniquement en local sur CPU (`dev_notes/indexed_
 
 Ce document a été révisé après un audit critique (3 agents indépendants, angles code/math, méthodologie, validité scientifique) qui a trouvé des trous réels : absence de contrôle statistique, absence de vérification d'attribution causale, généralisation jamais testée, et surtout — la décision la plus débattue de cette session (supprimer tout FF, §-1 de la spec) n'était testée nulle part. Ce plan corrige ça : chaque phase porte maintenant une **hypothèse explicite**, le **raisonnement** qui la sous-tend, et une **table observation → action** (y compris pour les résultats ambigus, pas juste les deux extrêmes).
 
+## ⚠️ PRIORITÉ ABSOLUE — révision post-contre-expertise (2026-09-13). À lire avant toute exécution.
+
+Une contre-expertise indépendante (voir `dev_notes/experiment.log.md`, entrée « Contre-expertise ») a invalidé la conclusion principale de cette branche. **Trois corrections sont déjà dans le code ; les re-runs restent à faire.** Aucun run GPU n'a été lancé pour cette révision — c'est le travail décrit ci-dessous.
+
+### Ce qui est invalidé (ne plus citer ces conclusions)
+
+1. **« (c) une vraie limite du mécanisme de composition à 2+ sauts »** — **RÉFUTÉ**. Le plateau valait exactement `1/n_facts` (33,3 % à `n_distractors=1`, 25,0 % à `n_distractors=2`, deux correspondances exactes), et 97-98 % des prédictions tombaient sur une valeur de la KB : le modèle recopiait une valeur au hasard, il n'avait rien appris de la chaîne. Il était même **en dessous** du meilleur prédicteur sans récupération (`non_key` = 0,500 à `n_distractors=1`).
+2. **Cause réelle** : `LevelCompressor` poolait `parent_k` et `parent_v` avec **le même softmax**, ce qui rend une association clé→valeur structurellement irreprésentable. Corrigé : `decouple_kv=True` par défaut (une seconde requête apprise, `n_slots × d_model` paramètres). Preuve CPU : `n_hops=2` passe de 26-35 % à **100 % (loss 0,000)** sur 2 seeds.
+3. **La supervision d'attention visait la mauvaise cible** (la feuille KEY, dont la valeur est la clé elle-même) — d'où un self-match parfait sans gain d'accuracy. Corrigé : `--supervise node` par défaut.
+4. **Le go/no-go Phase 0 (« hiérarchie 99,6 % vs plat 6,0 % »)** ne démontre pas ce qu'on lui a fait dire — voir Phase 0bis ci-dessous.
+5. **Les verdicts `use_ff` / `n_register` / `N_step` / LR sur `n_hops=2`** ont été rendus sur une architecture incapable de réussir la tâche. Ils ne sont ni vrais ni faux : ils sont **sans objet**. Ne pas les recycler comme acquis ; ne pas non plus se précipiter à tous les relancer (voir « Ce qu'il ne faut PAS faire »).
+
+### Règle d'évaluation désormais obligatoire pour tout run sur les tâches synthétiques
+
+`learn/indexed_attention/eval_metrics.py` est branché dans `train_kb_chain.py` et `train_kb_retrieval.py` : chaque run imprime un bloc « chance-level report ». **Aucune accuracy ne doit être rapportée, citée ou comparée sans ce bloc.** Points de contrôle :
+
+- comparer à `conditional_chance` (= `1/n_facts`), **jamais** à `vocab_chance` ;
+- vérifier `pred_in_kb_rate` : proche de 1,0 ⇒ c'est bien `conditional_chance` la référence ;
+- exiger `margin_over_shortcut > 0` : un modèle qui ne bat pas `non_key`/`random_kb` n'a rien démontré ;
+- `probe/first_hop` n'est pas un raccourci (c'est le solveur exact à 1 saut) — il est exclu de la marge, il sert de marqueur de progression.
+
+La tâche `data/kb_chain_retrieval.py` contient de vrais raccourcis structurels (la réponse finale n'apparaît jamais comme clé). Un durcissement du générateur est souhaitable (chaînes leurres, distracteurs dont les valeurs sont aussi des clés) — voir Phase 2-redo, étape 4.
+
+### Ordre d'exécution recommandé
+
+**Étape 1 — Phase 2-redo (la plus importante, à lancer en premier).** Reproduire sur GPU le résultat CPU du découplage, à budget et échelle réels.
+- Grille : `--shared_kv_pooling` (ablation) vs défaut découplé × `n_hops ∈ {2, 3, 4}` × **≥3 seeds** (le CPU montre une seed sur deux qui échoue à 3 sauts — caractériser cette variance est l'objet principal de l'étape).
+- Config de départ : `batch_size=256`, `lr=1.2e-3` (couple déjà validé), `depth=2`, `block_size=4`, `n_step=12`, `d_model=256`.
+- Critère de réussite : le découplé bat `non_key` d'une marge nette à `n_hops=2` sur les 3 seeds ; l'ablation reste collée à `conditional_chance`.
+- Si `n_hops=3` reste instable : **d'abord** un balayage LR propre pour la variante découplée (son paysage d'optimisation a changé, l'ancien LR n'est plus forcément calibré), **ensuite seulement** un curriculum `--hop_curriculum 1,2,3`.
+
+**Étape 2 — Phase 0bis : une baseline plate honnête.** `depth=0` n'a aucun compresseur : ses feuilles sont des K/V par *token*, donc attendre sur un token-clé retourne ce token-clé. Une mémoire plate de feuilles brutes **ne peut représenter aucune association clé→valeur, quel que soit le budget** — les 5-7 % observés sont structurels, pas un déficit d'indexation. Le gap 99,6 % vs 6,0 % ne prouve donc pas la supériorité de l'indexation hiérarchique ; il prouve que le groupement en blocs est le seul chemin vers une entrée associative.
+- La vraie baseline « mémoire **sans index** » est **`depth=1`** (un seul niveau de compression, un nœud par fait, aucune hiérarchie multi-niveaux, attention dense sur les nœuds). C'est ce qu'il faut comparer à `depth≥2`.
+- Grille : `depth ∈ {0, 1, 2, 3}` × `n_facts ∈ {16, 64, 256}` × 3 seeds, avec le découplage activé partout.
+- Hypothèse : `depth=1` doit *égaler* `depth≥2` tant que la KB est petite ; l'intérêt de la hiérarchie n'apparaît qu'en coût/passage à l'échelle (nombre de faits grand), pas en accuracy. **Un `depth=1` qui égale `depth=3` à petite échelle n'est pas un échec de la thèse** — c'est le résultat attendu, et il indique à quelle taille de KB il faut monter pour que l'indexation paie.
+- Conséquence pratique (question de l'utilisateur, 2026-09-13) : **oui, on peut démarrer l'intégration sur texte réel avec une mémoire sans index** (`depth=1`). L'indexation hiérarchique est motivée par la taille de mémoire visée, pas par la capacité d'association — elle peut donc être introduite plus tard, une fois la mécanique validée à `depth=1`.
+
+**Étape 3 — Supervision d'attention, cible corrigée.** `--attn_supervised --supervise node`, avec découplage, `n_hops=2`, 3 seeds, à budget comparable à l'ancienne grille (qui donnait 25 %).
+- Observation de fumée à ne pas citer comme résultat : 72 % en 434 pas CPU (15 s).
+- Rapporter `node_selection_diagnostic` (sélection du bon nœud) **et non** le self-match de feuille, qui s'est révélé maximisable sans lien avec la tâche.
+- Question à trancher : la supervision reste-t-elle utile une fois le compresseur réparé, ou devient-elle redondante ? Une réponse « redondante » est un bon résultat (moins de machinerie à porter).
+
+**Étape 4 — Durcir le générateur de tâche** (peut tourner en parallèle des étapes 1-3, ne dépend de rien).
+
+### Ce qu'il ne faut PAS faire maintenant (décision explicite de l'utilisateur, 2026-09-13)
+
+- **Ne pas relancer `use_ff` / `n_register` / les balayages `N_step`/LR de `n_hops=2`.** Leurs verdicts sont sans objet, mais les re-tester à l'aveugle est du travail à faible valeur : ces variantes n'ont d'intérêt que si le modèle réparé bute à nouveau quelque part. Les garder en réserve, comme diagnostics conditionnels, pas comme file d'attente.
+- **Ne pas geler le chantier distillation.** Voir « Statut des chantiers » ci-dessous — il a une fonction propre que la contre-expertise avait sous-estimée.
+
+### Statut des chantiers du projet (2026-09-13, cadrage utilisateur)
+
+| Chantier | Statut | Rôle |
+|---|---|---|
+| **LLM-as-Compressor** (`core/compressor/`, `notebooks/`, `docs/compression/`) | **ARRÊTÉ** | Travaux gelés. Ne pas y consacrer de ressources ni de temps GPU. Le `README.md` le met encore en avant — à lire comme un historique, pas comme un chantier actif. |
+| **Distillation** (`learn/distill/`) | **ACTIF, en parallèle, volontairement** | Deux fonctions : (a) produire une **baseline** de référence sur une architecture standard ; (b) **acquérir l'expérience de la distillation** (pipeline Teacher, KD Top-K, muP, checkpoint/resume, précision) *avant* de l'appliquer au Thinker. Ce n'est pas une diversion : c'est le pré-requis assumé de la Phase 4. Le fait que `train_sft.py` utilise un transformer dense est **intentionnel** à ce stade. |
+| **Indexed Attention** (`core/indexed_*.py`, `learn/indexed_attention/`) | **ACTIF, chantier principal** | L'architecture de la thèse. Priorités ci-dessus. |
+
+### Deux questions ouvertes de l'utilisateur, instruites ici
+
+**Q1 — « Peut-on commencer avec une attention sur la mémoire sans index ? »** Oui, et c'est même recommandé : c'est `depth=1` (voir Étape 2). L'indexation hiérarchique est une réponse au **coût** d'une mémoire massive, pas à la capacité d'association — cette dernière vient du compresseur au niveau du fait, qui existe déjà à `depth=1`. Démarrer sans index réduit le nombre de mécanismes non validés simultanément, et fournit la baseline qui manquait pour justifier l'index.
+
+**Q2 — « Peut-on utiliser les embeddings intermédiaires pour accélérer la distillation, et gagner de l'expérience sur leur usage ? »** Deux effets à ne pas confondre :
+- **Coût de stockage : c'est plus cher, pas moins.** Top-K32 ≈ 192 o/token (32 indices int32 + 32 valeurs fp16) ; un hidden state du Teacher en fp16 (`hidden_size=5120`) ≈ 10 240 o/token, soit **~53×**. Précalculer les états intermédiaires bruts alourdirait le pipeline au lieu de l'accélérer.
+- **Vitesse de convergence : c'est là que le gain est réel.** La distillation de représentations (FitNets, MiniLM, layer-wise KD) donne bien plus de signal par token que des logits Top-K, et converge en moins de tokens — le levier pertinent quand le budget est en jours-GPU.
+- **Compromis recommandé** : stocker une **projection réduite** des états du Teacher (PCA/SVD 5120 → 256-512 dims, ~512-1024 o/token, soit 3-5× les Top-K, acceptable), en réutilisant exactement la machinerie SVD déjà proposée en spec §13.1 pour l'initialisation de l'embedding. Superviser par **perte cosinus** plutôt que MSE brute (spec §11bis : une MSE non normalisée est le risque d'instabilité identifié), avec montée en poids progressive.
+- **Bénéfice secondaire, qui est le vrai argument** : c'est exactement le mécanisme du stream `thinking` en embedding (spec §11bis, plan Phase 1ter). Le faire côté distillation dense, c'est acquérir l'expérience du composant avant de le porter sur le Thinker — cohérent avec le rôle assigné au chantier distillation.
+- **Levier de vitesse plus direct, déjà identifié par le projet et non implémenté** : la **loss KD chunkée** (façon Liger-Kernel / « Cut Your Losses »), qui lève le plafond mémoire imposé par le tenseur de logits `(B, T, 248077)` — c'est lui qui bloque le batch à 6, indépendamment de la précision. À faire avant ou en parallèle de l'idée des embeddings intermédiaires.
+
 ## Méthodologie commune à toutes les phases (corrige les trous trouvés par l'audit)
 
 - **Seeds** : chaque condition testée avec **≥3 seeds**, moyenne ± écart-type reportée. Un écart entre deux conditions n'est traité comme un signal réel que s'il dépasse ~2σ ; sinon → **"non concluant"**, jamais "pas d'effet".

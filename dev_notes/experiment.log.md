@@ -420,3 +420,273 @@ Full writeup in `learn/distill/qwen3.8-27b-notes.md`'s "RESOLVED" section.
 — still worth deciding whether to rerun them against real Teacher targets
 before trusting any Teacher-signal-quality conclusion from them.
 
+## 2026-09-12 — Indexed Attention Phase 0: hierarchy vs. flat go/no-go, and an n_facts scale cliff (`EXP-007`)
+
+**Context**: first GPU validation of `HierarchicalMemory`/`IndexedThinker` (`dev_notes/indexed_attention_experiment_plan.md` Phase 0), beyond the CPU overfit tests in `tests/test_indexed_memory.py`. Grid'5000 Rennes, job 4104802 (`abacus3-1`, 4×A5000 24G besteffort, `~/micromamba/envs/teacher311`). Script: `learn/indexed_attention/train_kb_retrieval.py` (new file).
+
+**LR does not transfer across scale (found before the main result)**: `lr=3e-3` (used in the CPU unit tests) fails outright once `n_facts`/`d_model` grow. A sweep at `n_facts=16, d_model=128` found `lr=3e-4` converges cleanly (98.6% held-out acc in 2 min) while `1e-4/3e-3/1e-2` all fail at chance — same muP-style width/LR miscalibration already documented in this log's distillation section, rediscovered independently here.
+
+**Go/no-go result at `n_facts=16` (3 seeds each, held-out eval split, `lr=3e-4`, `d_model=256`, `n_step=3`, 8 min/run)**:
+- `depth=4` (hierarchical): **99.6% / 99.5% / 100.0%** held-out accuracy
+- `depth=0` (flat, Baseline C, spec §9): **7.0% / 6.25% / 5.86%**
+
+Massive, unambiguous gap (>>2σ) — confirms Phase 0's hypothesis cleanly: the hierarchical, unified-softmax memory dramatically outperforms flat attention once the KB is large enough to dilute the flat baseline's signal. Decision per the plan's table: **go** — continue with `depth>0` as the default config into Phase 1bis.
+
+**But: `n_facts=64` (256 leaves, same `d_model=256`) fails to learn at all, for BOTH `depth=0` and `depth=4`** — not a hierarchy-specific weakness, the whole register+SM+fusion mechanism plateaus at chance level. Isolated the axis with 4 short (5 min) diagnostic runs, one per GPU:
+- `n_facts=64, d_model=128, lr=3e-4` → fails (0.2% acc)
+- `n_facts=16, d_model=256, lr=3e-4` → succeeds (99.7%) — control confirming `d_model=256` alone isn't the problem
+- `n_facts=64, d_model=256, lr=1e-4` → fails (0.5%)
+- `n_facts=64, d_model=256, n_step=6` → fails (0.6%)
+
+Neither `d_model` (128 vs 256), nor `lr` (1e-4 to 3e-3 tried across two sweeps), nor `n_step` (3 vs 6) move the needle — it's specifically **`n_facts`** (task scale) that breaks learning. Two more capacity-style levers tested and also ruled out: `n_register=4` (0.3% acc) and `batch_size=256` (0.3% acc) — neither helps either.
+
+**Curriculum learning (matches this log's own 18 Dec 2023 ToyThinker/copy-task precedent — "having a plateau doesn't mean the model is at capacity", solved there by curriculum, not by hyperparameter tuning)**: `thinker-e9` (sister session) implemented fixed-shape padding/masking (`HierarchicalMemory.build(..., leaf_mask=...)`, commit `d7bff12`) so `data/kb_retrieval.py::KBRetrievalDataset(n_facts, max_facts, ...)` can vary real fact count while keeping the hierarchy shape (`block_size`/`depth`) fixed to the curriculum's target scale. `train_kb_retrieval.py` got a `--curriculum "16,32,64"` stage-promotion loop (promote on held-out accuracy threshold). Real GPU curriculum run (16→32→64, same job/node) in progress at time of writing — see next entry or `dev_notes/grid5000_usage.log.md` for the outcome.
+
+**Role split for this work going forward** (per explicit user instruction): `thinker-e9` (sister session, "model-design") owns architecture/spec/plan changes (`core/`, `dev_notes/indexed_attention_spec.md`, `dev_notes/indexed_attention_experiment_plan.md`); this session owns experiment execution — Grid'5000 job orchestration, `learn/indexed_attention/` training-loop code, profiling/optimization, and reporting observations back for the plan to be updated.
+
+### Curriculum result (same day, continued): confirms the mechanism, and re-confirms the flat baseline's failure
+
+Ran the `--curriculum 16,32,64` promotion loop (`train_kb_retrieval.py`, promote at held-out acc ≥0.9, min 500 steps/stage) for real on GPU (job 4104802, `abacus3-1`), `depth=4` and `depth=0` in parallel, 18 min budget each:
+
+- **`depth=4` (hierarchical): fully unblocked.** Promoted cleanly through all three stages and finished at `n_facts=64` (the original blocker) with **100% held-out accuracy**, `best_loss=0.00035`, in 8806 steps / 1082s. Confirms the Dec-2023 ToyThinker curriculum precedent transfers directly to this architecture: the plateau at `n_facts=64` was never a capacity/mechanism ceiling, just an optimization-landscape one that curriculum routes around.
+- **`depth=0` (flat): never left stage 1.** After 22962 steps (>3× the steps `depth=4` needed for its *entire* 3-stage curriculum), held-out accuracy was still stuck at ~5%, never crossing the 0.9 promotion threshold even once — consistent with, not contradicting, the go/no-go result above (flat attention already failed at `n_facts=16` directly; giving it unlimited time at the same stage doesn't change that). Useful negative control: curriculum only helps when the underlying mechanism *can* eventually solve the harder stage — it's not a universal fix for any plateau.
+
+**Practical upshot**: curriculum learning (train `depth>0` at `n_facts=16→32→64`) is now the validated path to scale this task past the `n_facts=64` cliff found in Phase -1, with zero architecture changes. Recorded as the reference training recipe for any future phase needing `n_facts>16`.
+
+### Phase 1bis first pass (n_facts=16, 3 seeds/variant): no differentiation at this scale
+
+Ran `n_slots=4` (vs. default `n_slots=1`), `use_ff=True` (2-layer GELU MLP in the main-loop fuse step), `detach_sm_keys=True` (stop-gradient on SM keys), and `level_dropout_p=0.1` (stochastic high-level dropping), 3 seeds each, same `n_facts=16` task/budget as the go/no-go run:
+
+| Variant | Seed 0 | Seed 1 | Seed 2 |
+|---|---|---|---|
+| Baseline (`n_slots=1`, no FF/detach/dropout) | 99.6% | 99.5% | 100.0% |
+| `n_slots=4` | 98.9% | 99.7% | 99.8% |
+| `use_ff=True` | 99.5% | 100.0% | 100.0% |
+| `detach_sm_keys=True` | (run duplicated by an orchestration mistake, discarded) | 100.0% | 99.7% |
+| `level_dropout_p=0.1` | 99.8% | 100.0% | 99.8% |
+
+All variants land in the same 98.9-100% band as the baseline — **no variant shows a distinguishable effect at this scale**, per the plan's own ambiguity rule (overlapping ±σ → "not concluded," not "no effect ever"). `n_facts=16` is a near-ceiling task for every configuration tried so far; a real test of `use_ff`'s composition-capacity hypothesis (the audit's priority #1) needs either the harder `n_facts=64` curriculum-trained setting or a task that actually requires computing over retrieved values (Phase 2 multi-hop), not more distractors at a task every variant already solves near-perfectly.
+
+**Infra note for future large parallel batches**: piping `oarsh` stdout straight back over the orchestrating SSH connection is fragile — a transient connection drop (happened twice this session, unrelated to the remote job) kills the local pipe and loses all output, even though the remote training process itself survives untouched (confirmed via `ps`/`nvidia-smi` on the node). Switched to `... > ~/remote/path/logfile 2>&1 < /dev/null & disown`, launched via a short-lived `oarsh` call that returns immediately — the remote process then belongs to the OAR cgroup, not to the SSH session, and results are recovered with a plain `cat`/`tail` afterward regardless of local connection hiccups. Adopt this pattern by default for any run expected to outlive a single quick command.
+
+### Multi-hop chain task (Phase 2 / Phase 1quater) and batch-size/LR co-scaling: session close-out
+
+**Multi-hop (`data/kb_chain_retrieval.py::KBChainDataset`, thinker-e9's implementation)**, curriculum on `n_hops` (1→2→3, `n_distractors=1`, `depth=2`), 15 min budget each, comparing fixed `n_step=12` vs. randomized `n_step~Uniform(1,12)` per batch (Universal/Looped-Transformer-style depth randomization, for later extrapolation testing):
+
+- `n_hops=1` promotes cleanly and fast in both runs (~step 1200, ~98% held-out acc) — the mechanism can do a single hop easily even under a large `N_step` budget.
+- `n_hops=2` **plateaus at 32-34% held-out accuracy in BOTH runs**, never crossing the 0.9 promotion threshold despite 16000-22000+ further steps (well past `curriculum_min_steps=500`) — no measurable difference between fixed and randomized `N_step`, so depth-randomization isn't the fix here. Not chance level (~2-3% at this vocab size) but far from mastery.
+- **Not yet diagnosed which of three explanations is correct** (flagged to thinker-e9, unresolved at session close): (a) `N_step=12` still insufficient for `n_hops=2` despite already being ~6x the hop count and above thinker-e9's own "~2-4x n_hops" heuristic, (b) `lr=3e-4` (carried over from the single-lookup task, never re-swept for the chain task specifically) is miscalibrated for this harder task -- same lesson as every other axis in this session, or (c) a genuine mechanism limit on 2+ hop composition through the SM buffer. Whichever it is, this is the most important open question for validating the project's central "iterative extraction beats single-pass" thesis -- next step should be an LR sweep specifically at `n_hops=2` (not reusing the retrieval-task LR) before concluding anything about (c).
+- Added `--extrapolate_n_steps "8,16,24"` to `train_kb_chain.py`: in-memory re-evaluation at `N_step_test > N_step_train` on a fresh disjointly-seeded KB, no checkpoint needed (thinker-e9's suggestion, since this is a cheap go/no-go check, not something needing to persist/reuse a checkpoint elsewhere) -- ready for the next chain run but not yet exercised on a converged model (nothing converged past `n_hops=1` this round).
+
+**Batch-size/LR co-scaling (prompted by a resource-utilization question mid-session)**: profiling (`nvidia-smi`) during the busiest 4-GPU-job stretch showed persistent 5-30% compute / 2-7% VRAM utilization even with 4-9 runs packed onto 4 GPUs simultaneously -- these ~0.7-1.6M-param models are nowhere near saturating an A5000 at `batch_size=64`. Per thinker-e9: don't reuse `lr=3e-4` (tuned for batch=64) at a larger batch without re-tuning -- same d_model/LR coupling lesson as Phase -1, apply the linear scaling rule (Goyal et al. 2017) as a starting point, then verify with a small sweep, don't trust it blindly. Sweep at `batch_size=256`, `n_facts=16`/`depth=3` (the Phase 0 go/no-go task): `lr=6e-4` (99.55% acc), **`lr=1.2e-3` = the linearly-scaled value (4x batch -> 4x lr): best, 99.9% acc**, `lr=2.4e-3` diverges (7.1% acc, loss stuck at 4.3). Confirms the linear scaling rule held exactly at this 4x batch jump. **`batch_size=256, lr=1.2e-3` is now the reference config for any future `learn/indexed_attention` run at this scale** wanting to use the node's idle capacity -- any accuracy/loss comparison against the earlier `batch_size=64, lr=3e-4` runs in this log should note the two changed together, not be read as an apples-to-apples curve comparison.
+
+**Session-level summary of everything validated this session** (Phase 0 through here), for a reader who wants the punch line without the blow-by-blow above:
+1. **Go/no-go (n_facts=16, 3 seeds)**: hierarchical (`depth>0`) massively beats flat attention (`depth=0`) -- 99.6-100% vs. 5.9-7.0%. Confirmed, not ambiguous.
+2. **Curriculum on `n_facts`** (16->32->64) fully unblocks the `depth>0` mechanism at the `n_facts=64` scale that direct training could never solve (any `d_model`/`lr`/`n_step`/`n_register`/`batch_size` tried) -- 100% final accuracy. `depth=0` under the same curriculum never even clears `n_facts=16` (consistent negative control, not a new anomaly).
+3. **Phase 1bis first pass** (`n_slots`, `use_ff`, `detach_sm_keys`, `level_dropout_p`) at `n_facts=16`: no variant distinguishable from baseline (all 98.9-100%) -- inconclusive at this scale, a real test needs either the `n_facts=64` curriculum-trained setting or a task that needs computation over retrieved values, not more distractors on an already-near-ceiling task.
+4. **Multi-hop chain task**: mechanism handles 1 hop easily, plateaus hard at 2 hops (32-34%) regardless of fixed vs. randomized `N_step` -- open question, LR re-sweep at this task is the next diagnostic step, not yet a verdict on the architecture's multi-hop capability.
+5. **Infra**: default to writing remote process output to a file on the node (not piping over the orchestrating SSH connection), and to reserving whole nodes (`gpu=4`) with `CUDA_VISIBLE_DEVICES` packing multiple independent runs per node rather than one GPU per job -- both adopted as standing defaults going forward given these models are small enough that node-level (not just GPU-level) parallelism is the actual bottleneck lever.
+
+
+## 2026-09-13 — Distillation 500M-core MFU/batch-size sweep, and a missing-bf16 discovery (`abacus26` L40S, job 4104870)
+
+Requested by thinker-e9 to replace the extrapolated MFU estimates in `learn/distill/README.md` with a real batch-size sweep at the 500M-core tier (810.8M total, `n_layer=25 n_embd=1280 n_head=16`). Found something more consequential than a batch-size curve: **`train_sft.py` had no mixed-precision at all** (`AutoModelForCausalLM.from_config` → fp32 by default, zero `autocast`/`GradScaler` in the file) — every MFU number in this project's history to date was an fp32-achieved-throughput compared against a **bf16** peak-FLOPS spec, not a like-for-like ratio.
+
+Added `--bf16` to `train_sft.py` (`torch.autocast(device_type="cuda", dtype=torch.bfloat16)` around the forward+loss computation; opt-in flag, no behavior change when unset). Results:
+- fp32: batch=4 → 3,239 tok/s, batch=6 → 3,425 tok/s, **batch=8 OOMs** (44.39GB L40S already ~42GB used at batch=6).
+- bf16: batch=6 → **5,748 tok/s — a real 1.68× speedup over fp32 at the identical batch size** (Tensor Core effect, confirms the missing-autocast finding was real and fixable). **batch=7 also OOMs under bf16.**
+- **The batch ceiling (6) is identical in fp32 and bf16** — bf16 sped up compute but did not raise the memory ceiling, because the bottleneck is the Teacher-aligned tied vocab head (248,077 tokens): `topk_kd_loss`'s `logsumexp` over the full `(batch, block_size, vocab)` logits tensor, plus the Teacher's own fp32 top-K/residual tensors, dominate memory regardless of the model's own autocast dtype.
+
+**Practical upshot**: `--bf16 --batch_size 6` (5,748 tok/s real) is now the best measured single-GPU config at this tier, giving ~392h (16.3 days) for `D=8.11B` tokens on one L40S — still past Grid'5000's ~1-week single-reservation limit, so checkpoint/resume across besteffort reservations (already implemented) remains necessary regardless. Full numbers and a chunked-loss idea (to remove the vocab-driven memory ceiling independently of precision, à la Liger-Kernel/"Cut Your Losses" — not yet implemented, next lever if more throughput is needed) are in `learn/distill/README.md`'s updated batch-size/precision sweep section.
+
+## 2026-09-13 — n_hops=2 LR sweep: rules out miscalibrated LR as the plateau's cause
+
+Follow-up to the multi-hop plateau found earlier (n_hops=2 stuck at 32-34% held-out acc, both fixed and randomized N_step=12), per thinker-e9's request: sweep LR specifically at `n_hops=2` (direct, no curriculum) rather than reusing the `n_hops=1`/single-lookup LR. `abacus3-1`, 4 GPU parallel, 4 min budget each, `n_distractors=2, vocab_size=64, depth=2, block_size=4, d_model=256, n_step=12, batch_size=64`:
+
+| lr | final_acc |
+|---|---|
+| 1e-4 | 24.5% |
+| 3e-4 | 25.3% |
+| 1e-3 | 26.1% |
+| 3e-3 | **diverges (loss NaN, 0% acc)** |
+
+None of the tested LRs show a qualitatively different trajectory from the known 32-34% plateau (these are all in the same ballpark, plausibly still en route to that plateau within the short 4 min budget, not a real difference) — no LR value found so far unlocks mastery, and the highest value tested is unstable. **This weakens hypothesis (b) (miscalibrated LR)** as the explanation for the n_hops=2 plateau. Not a fully exhaustive sweep (4 min/point is short, and only 4 values tried), but no positive signal for "just needed a different LR" the way `n_facts=64`'s plateau turned out to be a curriculum problem rather than an LR one at first glance, or the way `n_facts=16`'s original failure *was* purely an LR problem. Remaining live hypotheses per the original three: (a) `N_step=12` still insufficient for 2-hop composition, or (c) a genuine mechanism limit on chaining through the SM buffer — next diagnostic step (not yet run) should isolate `N_step` directly (e.g. `N_step` sweep at a fixed, reasonable LR) before concluding on (c).
+
+## 2026-09-13 — n_hops=2 LR sweep at full budget: (b) miscalibrated LR properly ruled out
+
+Per thinker-e9's valid concern (the short 4-min sweep above wasn't budget-comparable to the 15-18min/16-22k-step runs that established the 32-34% plateau), re-ran the two most promising short-sweep LRs (`1e-3`, `6e-4`) at full budget (18 min, `abacus3-1`, job 4104890, `n_hops=2` direct, same config as the original plateau runs):
+
+- `lr=6e-4`: 16,685 steps, **final_acc 25.2%** — still within/below the known plateau, no improvement.
+- `lr=1e-3`: 16,984 steps, held-out acc oscillated 22-28% through training then **final measured acc 4.6%** (an unstable/collapsed final read, not a real improvement — consistent with `lr=1e-3` being the least stable value tried so far, one step from the `lr=3e-3` value that diverges outright).
+- Extrapolation probe (`--extrapolate_n_steps 16,20,24`, in-memory, no checkpoint) on both: flat or slightly worse than the training-time N_step=12 accuracy (e.g. `lr=6e-4`: 24.8/25.0/24.5% at N_step_test=16/20/24 vs. 25.2% at N_step=12) — no sign that simply running more reasoning steps at inference recovers anything.
+
+**Conclusion: (b) miscalibrated LR is now properly ruled out** at a budget comparable to the original plateau observation, not just a short sweep. Neither of the two candidate LRs exceeds 32-34%, and the higher one shows real instability rather than a hidden improvement. Remaining live hypotheses: (a) `N_step=12` still insufficient for 2-hop composition (next diagnostic: isolate `N_step` directly, e.g. a sweep at `N_step` ∈ {8, 16, 24, 32} at the already-known-stable `lr=3e-4`, matching Phase -1's methodology of sweeping one axis at a time rather than changing several together), or (c) a genuine mechanism limit on chaining through the SM buffer at 2+ hops -- not yet distinguishable from (a) without that N_step isolation.
+
+## 2026-09-13 — n_hops=2 N_step sweep: (a) also ruled out, points to (c) a real mechanism limit
+
+Isolating N_step directly at a fixed, stable LR (`lr=1.2e-3`, rescaled with `batch_size=256` per the linear rule to avoid reintroducing a batch/LR confound -- NOT the `lr=3e-4` originally suggested, since that was only validated at `batch_size=64`), `n_hops=2` direct, `N_step ∈ {8, 16, 24, 32}` × 2 seeds, 18 min budget each, 8 runs packed on 4 GPUs (2/GPU):
+
+| N_step | seed 0 | seed 1 |
+|---|---|---|
+| 8 | 24.9% | 24.8% |
+| 16 | 25.5% | 24.7% |
+| 24 | 25.0% | 25.5% |
+| 32 | 24.9% | 24.9% |
+
+**Completely flat across a 4x range of N_step (8 to 32, i.e. 4x to 16x the hop count, well past thinker-e9's own ~2-4x heuristic and past the N_step=12 already tested)** -- all 8 runs land within a 0.8-point band (24.7-25.5%), no trend whatsoever. This rules out (a) N_step insufficiency as the explanation, following directly on ruling out (b) miscalibrated LR at full budget in the previous entry.
+
+**With both (a) and (b) ruled out, (c) -- a genuine mechanism limit on 2+-hop composition through the SM buffer -- is now the best-supported explanation** for the n_hops=2 plateau (roughly 25-34% depending on the exact config tested across these sweeps, consistently well above chance ~1.5-3% but nowhere near the near-100% mastery seen at n_hops=1). This is a significant result for the project's central thesis (iterative extraction+processing should compose across hops) -- the mechanism handles single-hop retrieval essentially perfectly but does not yet compose reliably across two hops, independent of training budget, LR, or reasoning-step count tried so far.
+
+**GPU utilization note** (per explicit user feedback on under-utilization mid-session): this sweep used `batch_size=256` (vs. the earlier default of 64) and packed 2 runs per GPU, measured at 31-41% compute / 8-14% VRAM per GPU during the run -- a real improvement over the 5-30%/2-7% seen in earlier single-run-per-GPU sweeps, though still with significant headroom (only 1-2.6GB of 24GB VRAM used per GPU). Density (processes/GPU) should be pushed further on the next batch of runs rather than batch size alone, per thinker-e9's guidance, to avoid re-opening the batch/LR confound question on an already-running sweep.
+
+## 2026-09-13 — n_hops=2: use_ff and n_register don't clearly help either
+
+Testing thinker-e9's priority-1 candidate (`use_ff=True`, the Phase 1bis variant Phase 1bis itself couldn't discriminate at n_facts=16) and n_register as candidate #2, at `n_hops=2` direct, `batch_size=256, lr=1.2e-3, n_step=12`, 2 seeds each, 18 min budget:
+
+| Variant | seed 0 | seed 1 |
+|---|---|---|
+| `use_ff=True` | **diverges (NaN)** | 25.3% (= baseline) |
+| `n_register=2` | 8.8% (worse) | 1.6% (much worse) |
+| `n_register=4` | 25.0% (= baseline) | 25.3% (= baseline) |
+
+None of these clearly break the ~25% plateau. `use_ff` is at best neutral (one seed matches baseline, the other diverges — plausibly an LR-stability interaction with the added FF capacity, not yet re-swept for this variant specifically) rather than a clean unlock. `n_register=2` is notably *worse* and unstable across seeds; `n_register=4` is neutral, same as baseline. No candidate tested so far (LR, N_step, use_ff, n_register) breaks the n_hops=2 plateau — (c) a genuine composition-mechanism limit remains the best-supported reading, though `use_ff`'s divergence at seed 0 leaves open whether a properly re-tuned LR for that variant specifically might behave differently (not yet tested: only the retrieval-task-tuned `lr=1.2e-3` was tried with `use_ff`).
+
+## 13 Sep 2026 -- Teacher-target precompute sharding: A40/A100 (Ampere) are a bad fit for the FP8 Teacher checkpoint
+
+Per the user's "as fast as possible" directive, sharded the 8000-example Teacher-target precompute (`precompute_teacher_targets.py`, K=32, max_length=1024) across 3 independent GPU jobs instead of running it sequentially on one node. Measured per-node throughput surfaced a real (not incidental) hardware-fit issue:
+
+| Node (GPU) | Architecture | ex/s | Notes |
+|---|---|---|---|
+| abacus26 (L40S) | Ada Lovelace | 2.84-2.86 | native FP8 tensor cores |
+| abacus27 (H100 NVL) | Hopper | 3.2-3.5 | native FP8 tensor cores |
+| abacus4 (A40) | Ampere | 0.24 | **no native FP8 tensor cores** |
+
+abacus4's shard was ~12x slower than the other two despite similar GPU memory headroom (58% util, only 126W draw on a ~300W TDP card -- clearly not compute-bound in the normal sense). Root cause: the Qwen3.8-27B-FP8 Teacher checkpoint is natively FP8-quantized; Ada (L40S) and Hopper (H100) have hardware FP8 Tensor Core support, Ampere (A40, and presumably A100) does not, so the `kernels` package's fine-grained FP8 path falls back to a much slower dequant/compute path on Ampere. This is a distinct failure mode from the earlier-documented "forcing `--dtype bfloat16` on a <56GB-VRAM GPU triggers CPU offload" collapse (both were previously conflated as "some GPUs are just slow for this") -- here `--dtype auto` was used correctly, and the model fit in VRAM without offload; the slowdown is purely an architecture/FP8-kernel-support mismatch.
+
+### Full train/val curve, KD-run 500M-core (job 4105629, completed cleanly)
+
+Completed all 13340 steps (`training_seconds=7669.2`, ~2h08, `best_loss=0.1227`), this time with the full periodic val curve preserved (`python -u` fix). Key points (step: val_ce / val_kd):
+
+| step | val_ce | val_kd |
+|---|---|---|
+| 1 | 12.107 | 0.400 |
+| 500 | 0.3145 | 0.671 |
+| 1000 | 0.1909 | 0.706 |
+| 2000 | 0.1315 | 0.732 |
+| 3000 | 0.1134 | 0.750 |
+| 5000 | 0.1004 | 0.778 |
+| 8000 | 0.1062 | 0.786 |
+| 10000 | 0.1038 | 0.802 |
+| 13000 | 0.0974 (min) | 0.815 (max) |
+
+**val_kd diverges almost immediately** (0.40->0.67 by step 500 alone, ~75% of its total eventual rise happens by step 2000-3000) and keeps climbing slowly and almost monotonically for the entire 13340-step run, never plateauing. **val_ce shows no comparable divergence** -- it oscillates in a noisy 0.10-0.13 band from step ~2500 onward, with its best value at the very last measured point (step 13000). Conclusion for model-design's question: KD-term memorization starts near-instantly and never stops climbing at this data scale (8000 examples); CE-based language-modeling generalization is unaffected across the whole run. Their suggested follow-up (try a lower `kd_alpha`, e.g. 0.1-0.2, to see if de-weighting the KD term changes the overall val_loss picture) is a reasonable next step, not yet run.
+
+### GPU-scale attn_supervised grid (6 runs: 3 baseline, 3 attn_supervised) -- self-match fixed, task accuracy not
+
+model-design's attention-supervision fix (auxiliary CE loss on q_proj/k_proj, no new params) was tested at `d_model=128` (vs. their CPU-scale `d_model=32` test) across 3 seeds each:
+
+| variant | seed | final_acc | mean_rank (chance=1.50) | top1_rate (chance=0.25) |
+|---|---|---|---|---|
+| baseline | 0 | 0.246 | 1.250 | 0.336 |
+| baseline | 1 | 0.264 | 1.264 | 0.401 |
+| baseline | 2 | 0.256 | 1.590 | 0.272 |
+| attn_supervised | 0 | 0.247 | **0.000** | **1.000** |
+| attn_supervised | 1 | 0.245 | **0.000** | **1.000** |
+| attn_supervised | 2 | 0.257 | **0.000** | **1.000** |
+
+**Striking disconnect**: the self-match diagnostic goes from noisy/near-chance (baseline) to *perfect* (mean_rank=0, top1=100%, all 3 seeds) under attention supervision -- the auxiliary loss completely fixes the mechanistic problem it targets. But `final_acc` on the actual n_hops=2 chain task is essentially unchanged (baseline avg ~0.255, attn_supervised avg ~0.250) -- no better than the ~25-32% plateau documented throughout this project. This GPU-scale result (larger d_model, longer budget than model-design's CPU smoke test) does not reproduce their reported 72.9% accuracy at CPU scale -- a real discrepancy to flag, not just noise, since the self-match fix landed perfectly across all 3 seeds while accuracy stayed flat. Possible reading: perfect self-match among an episode's *own* candidate facts is necessary but not sufficient for the downstream task -- something else in the SM->output path (per model-design's own earlier hypothesis) may be the actual bottleneck once retrieval itself is no longer the failure mode.
+
+**Actionable conclusion**: never schedule the Teacher-FP8 precompute (or presumably any FP8-checkpoint inference) on Ampere-generation GPUs (A40, A100) at this cluster -- restrict to Ada/Hopper (L40S, H100) or newer. The abacus4 job was killed mid-shard (besteffort preemption actually beat us to it) and its ~2520 remaining examples were re-split across the two already-idle Ada/Hopper nodes instead, which finished in ~8 additional minutes.
+
+Follow-up: launched the real KD training run (`learn/distill/train_sft.py`, 500M-core tier, `--bf16 --mup --kd_alpha 0.5`, merged 8000-example Top-K32 Teacher targets) on the H100 node (fastest available at Rennes for this workload), 10 epochs (13,340 steps) budgeted at ~2h based on measured throughput, checkpointing every 500 steps to survive besteffort preemption.
+
+### Real KD run result (500M-core, 8000 real examples, H100)
+
+Completed cleanly, no preemption: **13,340/13,340 steps, `best_loss=0.1267`, `training_seconds=3110.6` (~51.8 min)** -- almost 2.5x faster than the ~2h05 estimate extrapolated from L40S throughput (0.552 s/step there vs. ~0.233 s/step actually achieved on the H100 NVL, a bigger gap than the ~15-20% suggested by the earlier precompute ex/s comparison -- KD training's compute mix, unlike single-example precompute inference, apparently favors H100 more strongly, plausibly batching/kernel-fusion effects rather than raw FP8 throughput alone).
+
+Loss trajectory: 6.41 (step 1) -> 1.21 (step 95) -> ~0.15-0.18 (plateauing from roughly step 9000 onward, oscillating in that band through step 13340). Combined CE and KD components both bottomed out in the same range (`ce` ~0.10-0.15, `kd` ~0.17-0.22 at the end).
+
+**Caveat worth flagging to model-design**: with only 8000 training examples and 13,340 steps at batch_size=6 (~10 full epochs), a loss collapse from 6.4 to ~0.15 is consistent with memorization/overfitting on this small a sample, not necessarily a generalizable KD signal -- the run validates the training *pipeline* (real data, real Teacher targets, checkpoint/resume, bf16, muP) end-to-end at this scale, but the loss curve itself shouldn't be read as "KD works well at 500M-core" without a held-out eval or a larger example count to rule out memorization.
+
+### Held-out val check confirms memorization on the KD term
+
+Per model-design's suggestion, ran the trained checkpoint against a held-out val split (from `prepare_reasoning_data.py`'s own `val.jsonl`, never seen in training -- distinct from `train_sample8000.jsonl`) using the same CE+KD loss (`learn/distill/eval_val_loss.py`, a new small script that reconstructs the exact architecture from the checkpoint's saved args/muP multipliers and runs a no-grad pass). First pass used a 40-example val slice (`val_sample40.jsonl`) whose Top-K32 Teacher targets happened to already exist from an earlier bf16-vs-fp8 precompute-dtype sweep session, letting this check run **without any GPU at all** (the eval only needs the small 810M student + precomputed targets, not the 27B Teacher -- ran on a plain CPU besteffort-free job while the three Ada/Hopper GPUs were all tied up by other users' jobs, see `grid5000_usage.log.md`).
+
+Result: **val_loss=0.4585** vs. **train best_loss=0.1267** (~3.6x gap). Breaking down the two components separately is informative: `val_ce=0.0985` is actually in the same range as train's CE component (~0.10-0.15) -- plain next-token prediction generalizes fine -- but `val_kd=0.8185` is roughly 4-8x every train-time KD value logged (~0.10-0.22 range). **Conclusion: the loss collapse is memorization specifically of the fine-grained Teacher-logit alignment (the KD term), not of the underlying language-modeling task.** This matches the earlier caveat's prediction and settles the train/val question model-design asked for -- more examples (not just more steps) are needed before this run's loss curve says anything about real KD quality at this scale.
+
+Caveat on this specific check: n=40 is a small val slice (chosen only because its Teacher targets already existed from an unrelated earlier sweep, avoiding a GPU-contended precompute just to get a first read); the qualitative CE-vs-KD split is unlikely to flip with more examples, but a tighter quantitative val_loss estimate would use a larger held-out slice (a 1000-example `val_sample1000.jsonl` is already prepared and staged for this, precompute pending GPU availability).
+
+### Correction: "avoid Ampere for Teacher-FP8 precompute" was too broad -- the real constraint is VRAM, not architecture generation
+
+Session-13's earlier `experiment.log.md` entry ("Teacher-target precompute sharding: A40/A100 are a bad fit for the FP8 Teacher checkpoint") concluded from the abacus4 (A40, 46GB) result alone that Ampere-generation GPUs should be avoided entirely for this workload. Investigating a Nantes site standby reservation (see `grid5000_usage.log.md`) turned up pre-existing logs from an earlier session's FP8-vs-bf16 comparison work on an **A100 80GB** (`ecotaxe` cluster) that contradict the blanket claim.
+
+`transformers` itself explains the real mechanism on load: *"FP8 quantized models is only supported on GPUs with compute capability >= 8.9 (e.g 4090/H100) ... We will default to dequantizing the model to bf16"* -- A100 is compute capability 8.0, so it always dequantizes FP8->bf16 on load, exactly like A40. The dequantized model needs ~55.6GB VRAM (vs. ~30.9GB native FP8). **A40 (46GB) doesn't have enough VRAM for that, so it silently falls back to CPU offload -- a ~50-100x collapse, which is what the earlier 0.24 ex/s number actually measured.** A100 80GB has plenty of headroom for the same 55.6GB dequantized model, so no offload happens: `precompute_fp8_fixed.log` from that Nantes session shows the checkpoint loading in 12.6s and reaching a **steady-state throughput of ~3.1-3.6 ex/s** -- essentially on par with L40S (2.84-2.86 ex/s) and close to H100 (3.2-3.5 ex/s), not 12x slower.
+
+**Corrected rule**: the deciding factor for this Teacher checkpoint's precompute speed is **available GPU VRAM relative to the ~56GB bf16-dequantized footprint**, not "Ampere vs. Hopper/Ada" as a category. A100-80GB (and presumably any other >=64GB-class Ampere card) is a fine precompute target; A40 (46GB) and any other <56GB card outside the native-FP8 Ada/Hopper set are not. Told model-design about this correction since the earlier (too-broad) version had already been passed along.
+
+## 2026-09-13 — Contre-expertise: the n_hops>=2 plateau was a compressor bug, not a mechanism limit
+
+Independent review of the whole Indexed Attention branch (spec + plan + this log + `core/` + diagnostics), requested by the user. It overturns the branch's current headline conclusion. **Read this entry before acting on any earlier multi-hop conclusion in this file.**
+
+### 1. The plateau was compared against the wrong chance level
+
+Every earlier entry reads the plateau as "well above chance (~1.5-3%), so the mechanism partially composes". That reference is the uniform-over-vocabulary rate, and the model never chooses among the vocabulary — it copies a value present in the episode's KB. The correct reference is the **conditional** chance level `1/n_facts`:
+
+| Config | `n_facts` | `1/n_facts` | Plateau observed earlier |
+|---|---|---|---|
+| `n_hops=2, n_distractors=1` | 3 | 33.3% | 32-34% |
+| `n_hops=2, n_distractors=2` | 4 | 25.0% | 24.7-25.5% |
+
+Two exact matches on two different configs. Measured directly: **97-98% of the baseline's predictions land on some KB value**. The model had learned "emit a KB value" and was picking at random among them — a total failure, not partial composition.
+
+Worse, the trivial-predictor controls now implemented (`learn/indexed_attention/eval_metrics.py`) show the plateau was **below** the best no-retrieval shortcut:
+
+| Config | `random_kb` | `non_key` (skips every hop) | model at plateau |
+|---|---|---|---|
+| `n_hops=2, n_distractors=1` | 0.332 | **0.500** | 0.32-0.34 |
+| `n_hops=2, n_distractors=2` | 0.253 | **0.330** | 0.247-0.255 |
+| `n_hops=3, n_distractors=1` | 0.244 | **0.492** | 0.42-0.46 |
+
+`non_key` exploits a real structural shortcut in `data/kb_chain_retrieval.py`: the chain's final answer never appears as a key, so guessing uniformly among non-key values needs zero hops. The `n_hops=3` baseline's "42-46%" was exactly this shortcut, not partial chaining.
+
+### 2. Root cause: `LevelCompressor` could not represent a key->value association
+
+`core/indexed_memory.py::LevelCompressor` pooled `parent_k` and `parent_v` with the **same** softmax weights. A fact block is `[KEY_MARK, key_id, VAL_MARK, val_id]`; to serve as a memory entry a node must be *findable by its key* (`parent_k ~ f(key_id)`) and *return its value* (`parent_v ~ g(val_id)`) — two opposite weightings over the same children. With one softmax the compressor can only pick one, or settle on a blurred compromise: brute-forceable at one hop (hence the clean ~98% at `n_hops=1`), unchainable beyond.
+
+**Fix**: `decouple_kv=True` (now the default) adds a second learned pooling query `query_v`, costing `n_slots * d_model` parameters. `decouple_kv=False` keeps the old behavior as an ablation (`--shared_kv_pooling`).
+
+**CPU evidence** (`d_model=32`, `n_step=8`, 3000 steps, `lr=1e-3`, batch 64, 2 seeds, everything else identical):
+
+| Variant | seed 0 | seed 1 |
+|---|---|---|
+| shared pooling, `n_hops=2` | 35.4% | 26.4% |
+| **decoupled, `n_hops=2`** | **100.0%** (loss 0.000) | **100.0%** (loss 0.000) |
+| shared pooling, `n_hops=3` | 46.2% | 42.4% |
+| **decoupled, `n_hops=3`** | **98.1%** | 46.4% |
+
+Clean and reproducible at 2 hops. At 3 hops one seed out of two solves it at this budget — real progress over a baseline that never does, but **not yet a stable result**; seed variance at 3 hops is the first thing to characterize on GPU.
+
+**Therefore hypothesis (c) ("a genuine mechanism limit on 2+-hop composition") is refuted.** The loop composes; the compressor could not supply anything composable. The `(a)`/`(b)` eliminations (N_step, LR) remain valid work but were answering a question whose premise was wrong.
+
+### 3. The attention supervision was optimizing an orthogonal objective
+
+This explains the "striking disconnect" logged above (perfect self-match, flat accuracy). `candidate_match_loss` supervised the query toward the fact's **KEY leaf** — but attending to a key leaf returns `v_proj` of that same key token, i.e. what the model already had. The auxiliary objective was fully satisfiable *and* useless: hence `mean_rank=0.000 / top1=1.000` on all 3 seeds with accuracy unchanged. Only a fact's **level-1 node** carries the key->value pair.
+
+Both supervision scripts now default to `--supervise node` (targets `mem._levels_k[1]` at the target fact's index, gradient also reaching the compressor's pooling queries); `--supervise leaf` reproduces the old grid.
+
+**Smoke observation, not an experiment** (CPU, 434 steps, 15s, `d_model=32`, `n_hops=2`): `--attn_supervised --supervise node` with decoupled pooling reached `final_acc=0.72` — versus a 25% plateau after 16,000+ GPU steps previously. Needs a real run at budget before being quoted as a result.
+
+### 4. Phase 0's "hierarchy vs flat" result needs re-reading
+
+`depth=0` (the "flat Baseline C") has no compressor at all, so its leaves are per-*token* K/V: `k_proj(embed(tok))` / `v_proj(embed(tok))`. Attending to a key token returns that key token. **A flat memory of raw leaves cannot represent a key->value association under any training budget** — which is why it sat at 5-7% and never left curriculum stage 1.
+
+So the 99.6% vs 6.0% gap does **not** establish that hierarchical indexing beats flat attention. It establishes that block-level grouping is the only path to an associative entry in this implementation. The honest flat baseline is **`depth=1`** (one compression level, one node per fact, no multi-level index) — see the plan's Phase 0bis.
+
+### 5. What changed in the repo
+
+- `core/indexed_memory.py`: `LevelCompressor(decouple_kv=True)` default + `_pool()` helper; threaded through `HierarchicalMemory` and `Thinker`.
+- `tests/test_indexed_memory.py`: `TestDecoupledKVPooling` (9 tests) pinning the property the old code violated; `test_compressor_matches_manual_reference` now parameterized over both modes. 70 tests green.
+- `learn/indexed_attention/eval_metrics.py` (new): conditional chance, `pred_in_kb_rate`, trivial-predictor controls, `format_report`. Wired into `train_kb_chain.py` and `train_kb_retrieval.py` — every run now prints the chance-level block.
+- `diagnose_attention_supervision.py` / `train_kb_chain_attn_supervised.py`: `--supervise node|leaf`, `--shared_kv_pooling`, plus a `node_selection_diagnostic` that tracks what actually matters.
+
+No GPU runs were launched for this entry — the re-runs are queued in the plan (Phase 0bis / Phase 2-redo).
