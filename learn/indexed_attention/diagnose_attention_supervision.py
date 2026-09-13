@@ -46,7 +46,45 @@ def key_positions(leaves, n_facts):
     return torch.tensor([i * 4 + 1 for i in range(n_facts)])
 
 
+def fact_node_match_loss(mem, query_vec, target_fact_idx, n_facts):
+    """CE loss pushing q_proj(query_vec) to select the level-1 NODE of the
+    target fact, among this episode's n_facts real fact nodes.
+
+    This is the supervision target that matches what the model must actually
+    do at inference: `HierarchicalMemory.attend()` scores the query against
+    `k_all` (leaves + every compressed level), and only a fact's level-1 node
+    holds the key->value association -- its `parent_k` can be matched by the
+    fact's key while its `parent_v` returns the fact's value (with
+    `decouple_kv=True`; see core/indexed_memory.py::LevelCompressor).
+
+    Uses the nodes HierarchicalMemory.build() actually produced, so the
+    gradient flows through the compressor's own pooling queries too, not just
+    through q_proj/k_proj.
+
+    query_vec: (B, d). target_fact_idx: (B,) index of the fact to select.
+    """
+    assert mem.depth >= 1, "node-level supervision needs a hierarchy (depth >= 1)"
+    nodes_k = mem.level_norms[1](mem._levels_k[1])          # (B, P * n_slots, d)
+    nodes_k = nodes_k[:, : n_facts * mem.n_slots]            # drop padding nodes
+    q = mem.q_proj(query_vec).unsqueeze(1)                   # (B, 1, d)
+    scores = torch.einsum('bod,bnd->bn', q, nodes_k) / (mem.d_model ** 0.5)
+    if mem.n_slots > 1:
+        # one logit per fact: max over that fact's slots
+        scores = scores.view(scores.shape[0], n_facts, mem.n_slots).max(dim=-1).values
+    return F.cross_entropy(scores, target_fact_idx)
+
+
+def target_fact_index(leaves, key_pos, target_token):
+    """(B,) index of the fact whose KEY token equals `target_token`."""
+    cand_keys = leaves[:, key_pos]                           # (B, n_facts)
+    return (cand_keys == target_token.unsqueeze(1)).float().argmax(dim=1)
+
+
 def candidate_match_loss(mem, embed_fn, query_vec, leaves, key_pos, target_token):
+    """DEPRECATED TARGET -- kept for reproducing the pre-2026-09-13 runs only
+    (`--supervise leaf`). Supervises the query toward the fact's KEY LEAF,
+    whose value is the key token itself, so satisfying this loss perfectly
+    teaches the model nothing about the task. See this module's docstring."""
     """CE loss pushing q_proj(query_vec) to prefer the candidate whose KEY
     equals target_token, among this episode's n_facts candidate keys.
     query_vec: (B, d). leaves: (B, N). key_pos: (n_facts,). target_token: (B,).
@@ -61,7 +99,15 @@ def candidate_match_loss(mem, embed_fn, query_vec, leaves, key_pos, target_token
     return F.cross_entropy(scores, target_idx)
 
 
-def train_with_supervision(ds, model, n_facts, steps, lr=3e-4, aux_weight=AUX_WEIGHT, log_prefix=""):
+def make_aux_loss(supervise, mem, embed_fn, query_vec, leaves, kp, target_token, n_facts):
+    if supervise == "node":
+        return fact_node_match_loss(mem, query_vec,
+                                    target_fact_index(leaves, kp, target_token), n_facts)
+    return candidate_match_loss(mem, embed_fn, query_vec, leaves, kp, target_token)
+
+
+def train_with_supervision(ds, model, n_facts, steps, lr=3e-4, aux_weight=AUX_WEIGHT,
+                           log_prefix="", supervise="node"):
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     t0 = time.time()
     kp = key_positions(None, n_facts)
@@ -81,12 +127,14 @@ def train_with_supervision(ds, model, n_facts, steps, lr=3e-4, aux_weight=AUX_WE
         sm_k = torch.zeros(B, 0, model.d_model, device=device)
         sm_v = torch.zeros(B, 0, model.d_model, device=device)
 
-        aux_loss = candidate_match_loss(mem, model.embed, R.mean(dim=1), leaves, kp, query[:, 0])  # hop 1 at t=0
+        aux_loss = make_aux_loss(supervise, mem, model.embed, R.mean(dim=1),
+                                 leaves, kp, query[:, 0], n_facts)  # hop 1 at t=0
         n_later_steps = 0
         for t in range(base.N_STEP):
             o_kb = mem.attend(R)
             if t >= 1:
-                aux_loss = aux_loss + candidate_match_loss(mem, model.embed, R.mean(dim=1), leaves, kp, mid_vals)
+                aux_loss = aux_loss + make_aux_loss(supervise, mem, model.embed, R.mean(dim=1),
+                                                    leaves, kp, mid_vals, n_facts)
                 n_later_steps += 1
             if sm_k.shape[1] > 0:
                 q_sm = model.sm_q_proj(R)
@@ -137,18 +185,53 @@ def self_match_diagnostic(model, ds, n_facts, n_eval=512):
           f"top1={(ranks == 0).float().mean().item():.3f} (chance={1 / n_facts:.3f})")
 
 
+@torch.no_grad()
+def node_selection_diagnostic(model, ds, n_facts, n_eval=256):
+    """Does the query actually select the right fact NODE (the thing that
+    returns the value), as opposed to the right key leaf? This is the
+    diagnostic that should track task accuracy -- unlike the leaf self-match,
+    which the old supervision could max out without helping."""
+    mem = model.memory
+    leaves, source_ids, mask, query, _ = ds.sample_batch(n_eval)
+    kp = key_positions(None, n_facts)
+    mem.build(model.embed(leaves), source_ids, leaf_mask=mask)
+    R = model.register_init.unsqueeze(0).expand(leaves.shape[0], -1, -1) \
+        + model.embed(query).mean(dim=1, keepdim=True)
+    nodes_k = mem.level_norms[1](mem._levels_k[1])[:, : n_facts * mem.n_slots]
+    q = mem.q_proj(R.mean(dim=1)).unsqueeze(1)
+    scores = torch.einsum('bod,bnd->bn', q, nodes_k) / (mem.d_model ** 0.5)
+    if mem.n_slots > 1:
+        scores = scores.view(scores.shape[0], n_facts, mem.n_slots).max(dim=-1).values
+    tgt = target_fact_index(leaves, kp, query[:, 0])
+    top1 = (scores.argmax(dim=1) == tgt).float().mean().item()
+    print(f"[node-selection] hop-1 node top1={top1:.3f} (chance={1 / n_facts:.3f}) n={n_eval}")
+
+
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--supervise", choices=["node", "leaf"], default="node",
+                    help="node (default, correct target: the fact's level-1 node) or "
+                         "leaf (deprecated: the KEY leaf, reproduces the pre-2026-09-13 runs)")
+    ap.add_argument("--steps", type=int, default=base.TRAIN_STEPS)
+    args = ap.parse_args()
+
     torch.manual_seed(0)
     ds2, model2 = base.make_model(n_hops=2)
     n_facts = 2 + base.N_DISTRACTORS
-    print("=== baseline (no supervision) self-match, untrained-for-reference ===")
+    print(f"=== supervise={args.supervise} | before training ===")
     self_match_diagnostic(model2, ds2, n_facts)
+    node_selection_diagnostic(model2, ds2, n_facts)
 
-    print("\n=== training WITH attention-matching supervision (aux_weight=1.0) ===")
-    train_with_supervision(ds2, model2, n_facts, steps=base.TRAIN_STEPS, log_prefix="[supervised] ")
+    print(f"\n=== training WITH attention-matching supervision (aux_weight=1.0) ===")
+    train_with_supervision(ds2, model2, n_facts, steps=args.steps,
+                           log_prefix="[supervised] ", supervise=args.supervise)
     acc = base.eval_accuracy(ds2, model2)
     print(f"\n[supervised] final eval acc: {acc:.3f}")
     self_match_diagnostic(model2, ds2, n_facts)
+    node_selection_diagnostic(model2, ds2, n_facts)
+    print("NOTE: compare acc against 1/n_facts =", round(1 / n_facts, 3),
+          "-- NOT against 1/vocab (learn/indexed_attention/eval_metrics.py)")
 
 
 if __name__ == "__main__":

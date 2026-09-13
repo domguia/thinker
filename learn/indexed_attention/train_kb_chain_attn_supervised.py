@@ -38,6 +38,7 @@ def build_model(args, total_vocab_size, device):
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
         sm_cap=args.sm_cap, use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         detach_sm_keys=args.detach_sm_keys, level_dropout_p=args.level_dropout_p,
+        decouple_kv=not args.shared_kv_pooling,
     ).to(device)
 
 
@@ -52,9 +53,41 @@ def key_positions(n_facts):
     return torch.tensor([i * 4 + 1 for i in range(n_facts)])
 
 
-def candidate_match_loss(mem, embed_fn, query_vec, leaves, key_pos, target_token):
-    """CE loss pushing q_proj(query_vec) toward the candidate whose KEY
-    equals target_token, among this episode's n_facts candidate keys."""
+def target_fact_index(leaves, key_pos, target_token):
+    """(B,) index of the fact whose KEY token equals `target_token`."""
+    cand_keys = leaves[:, key_pos]
+    return (cand_keys == target_token.unsqueeze(1)).float().argmax(dim=1)
+
+
+def fact_node_match_loss(mem, query_vec, leaves, key_pos, target_token, n_facts):
+    """CORRECT SUPERVISION TARGET (2026-09-13): pushes q_proj(query_vec) to
+    select the target fact's level-1 NODE -- the only object in the memory
+    that carries a key->value association, and what
+    `HierarchicalMemory.attend()` must actually pick. Requires
+    `decouple_kv=True` to be useful (with shared pooling a node's value is
+    tied to the same weighting as its key, so selecting it correctly still
+    cannot return the fact's value).
+
+    Replaces `leaf_key_match_loss` below as the default; see that function's
+    docstring for why the original target was self-defeating."""
+    assert mem.depth >= 1, "node-level supervision needs a hierarchy (depth >= 1)"
+    nodes_k = mem.level_norms[1](mem._levels_k[1])[:, : n_facts * mem.n_slots]
+    q = mem.q_proj(query_vec).unsqueeze(1)
+    scores = torch.einsum('bod,bnd->bn', q, nodes_k) / (mem.d_model ** 0.5)
+    if mem.n_slots > 1:
+        scores = scores.view(scores.shape[0], n_facts, mem.n_slots).max(dim=-1).values
+    return F.cross_entropy(scores, target_fact_index(leaves, key_pos, target_token))
+
+
+def leaf_key_match_loss(mem, embed_fn, query_vec, leaves, key_pos, target_token):
+    """DEPRECATED TARGET (`--supervise leaf`), kept only to reproduce the
+    pre-2026-09-13 GPU grid. Pushes the query toward the fact's KEY LEAF --
+    but attending to a key leaf returns `v_proj` of that same key token, i.e.
+    exactly what the model already had, never the fact's value. This is why
+    that grid drove the self-match diagnostic to a perfect 0.000 mean_rank /
+    100% top-1 across all 3 seeds while task accuracy stayed flat at the
+    plateau: the auxiliary objective was fully satisfiable AND orthogonal to
+    the task. See dev_notes/experiment.log.md ("contre-expertise")."""
     cand_keys = leaves[:, key_pos]  # (B, n_facts)
     cand_emb = embed_fn(cand_keys)
     cand_k = mem.level_norms[0](mem.k_proj(cand_emb + mem.source_bias.weight[1]))  # (B, n_facts, d)
@@ -64,8 +97,15 @@ def candidate_match_loss(mem, embed_fn, query_vec, leaves, key_pos, target_token
     return F.cross_entropy(scores, target_idx)
 
 
+def aux_match_loss(supervise, mem, embed_fn, query_vec, leaves, key_pos, target_token, n_facts):
+    if supervise == "node":
+        return fact_node_match_loss(mem, query_vec, leaves, key_pos, target_token, n_facts)
+    return leaf_key_match_loss(mem, embed_fn, query_vec, leaves, key_pos, target_token)
+
+
 def forward_with_optional_supervision(model, kb_tokens, kb_source_ids, query_tokens, kb_mask,
-                                       n_step, mid_vals, key_pos, attn_supervised, aux_weight, device):
+                                       n_step, mid_vals, key_pos, attn_supervised, aux_weight, device,
+                                       supervise="node", n_facts=None):
     """Manual unroll of Thinker.forward's loop (same equations as
     core/indexed_thinker_model.py), needed to insert the auxiliary loss at
     each step -- the public forward() doesn't expose intermediate R."""
@@ -80,13 +120,15 @@ def forward_with_optional_supervision(model, kb_tokens, kb_source_ids, query_tok
 
     aux_loss = None
     if attn_supervised:
-        aux_loss = candidate_match_loss(model.memory, model.embed, R.mean(dim=1), kb_tokens, key_pos, query_tokens[:, 0])
+        aux_loss = aux_match_loss(supervise, model.memory, model.embed, R.mean(dim=1),
+                                  kb_tokens, key_pos, query_tokens[:, 0], n_facts)
 
     n_later = 0
     for t in range(n_step):
         o_kb = model.memory.attend(R)
         if attn_supervised and t >= 1:
-            aux_loss = aux_loss + candidate_match_loss(model.memory, model.embed, R.mean(dim=1), kb_tokens, key_pos, mid_vals)
+            aux_loss = aux_loss + aux_match_loss(supervise, model.memory, model.embed, R.mean(dim=1),
+                                                 kb_tokens, key_pos, mid_vals, n_facts)
             n_later += 1
         if sm_k.shape[1] > 0:
             q_sm = model.sm_q_proj(R)
@@ -172,6 +214,15 @@ def main():
     parser.add_argument("--sm_cap", type=int, default=None)
     parser.add_argument("--attn_supervised", action="store_true", help="add the contrastive attention-matching auxiliary loss")
     parser.add_argument("--aux_weight", type=float, default=1.0)
+    parser.add_argument("--supervise", choices=["node", "leaf"], default="node",
+                         help="what the auxiliary loss targets. 'node' (default, correct): the "
+                              "target fact's level-1 node, what attend() must select. 'leaf' "
+                              "(deprecated): the fact's KEY leaf -- reproduces the pre-2026-09-13 "
+                              "grid whose auxiliary loss was perfectly satisfiable AND orthogonal "
+                              "to the task. See this file's loss docstrings.")
+    parser.add_argument("--shared_kv_pooling", action="store_true",
+                         help="ABLATION: pre-2026-09-13 LevelCompressor (one softmax pools parent "
+                              "K and parent V). Node supervision cannot help under this variant.")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1.2e-3)
     parser.add_argument("--max_steps", type=int, default=20000)
@@ -224,6 +275,7 @@ def main():
         logits, aux_loss = forward_with_optional_supervision(
             model, kb_tokens, kb_source_ids, query_tokens, kb_mask, args.n_step,
             mid_vals, key_pos, args.attn_supervised, args.aux_weight, device,
+            supervise=args.supervise, n_facts=max_facts,
         )
         task_loss = F.cross_entropy(logits, labels)
         loss = task_loss + args.aux_weight * aux_loss if args.attn_supervised else task_loss
