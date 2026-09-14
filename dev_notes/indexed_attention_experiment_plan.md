@@ -517,6 +517,15 @@ Testé localement (CPU, 3 documents jouets, `depth=1, n_ctx=16, block_size=16`) 
 
 **Pour un vrai run** : préparer un vrai corpus via `learn/distill/prepare_general_data.py` (TinyStories, déjà utilisé ailleurs dans le projet) plutôt que `data/wiki_samples.json` (mauvais format — un dict nommé, pas du JSONL avec un champ `"text"` par ligne, incompatible avec `RealTextWindowDataset`). **Balayer le LR avant de conclure quoi que ce soit** — aucune valeur n'a été validée pour cette configuration (nouvelle tâche, nouvelle échelle, nouveau mécanisme de relais) — même leçon que partout ailleurs ce soir.
 
+**[RÉSULTAT 2026-09-14] Balayage LR** (`experiment-manager`, 2 seeds/valeur, corpus réel — 2700 documents TinyStories+WikiText, tokenizer gpt2) : décroissance propre et monotone de `1e-4` à `3e-3` (`final_loss` 5,58-5,89), dégradation à `1e-2` (6,10-6,81), divergence franche à `3e-2` (16,1-16,9). **`lr=3e-3` est l'optimum**, bien encadré des deux côtés — fenêtre plus large que ce qu'on a vu sur les tâches synthétiques ce soir, pas une surprise en soi mais bon à noter.
+
+**Bug trouvé en essayant "loss décroît proprement → continue plus longtemps" (ma propre table de décision)** : `LockstepLaneBatcher` ne faisait qu'**un seul passage** sur le corpus — `refill()` retournait `False` dès `doc_order` épuisé, arrêtant l'entraînement à un nombre de pas fixe (~1537 avec 2700 documents/8 voies) **peu importe** `--max_time_minutes`/`--max_steps`. Vérifié : deux runs à budgets différents (12 et 18 min) s'arrêtaient au même `num_steps`. **Corrigé** (`learn/indexed_attention/train_real_text.py`) : `refill()` boucle maintenant sur une nouvelle époque (réordre mélangé, `seed+epoch`) au lieu de s'arrêter — comme tous les autres scripts d'entraînement de ce projet, le corpus est un flux, `--max_steps`/`--max_time_minutes` sont censés être les seules vraies conditions d'arrêt. Testé localement (le wraparound s'active bien, l'entraînement dépasse maintenant l'épuisement du petit corpus de test).
+
+**Prochaine étape, table de décision** :
+- Relance à `lr=3e-3`, budget nettement plus généreux (le corpus ne limite plus artificiellement) → si la loss continue de baisser au-delà de ce qui était atteignable avant, bon signal, continuer à pousser le budget avant les baselines.
+- Loss plafonne rapidement même avec plus de budget → possible signe que 2700 documents (petits, TinyStories) sont insuffisants en diversité pour ce vocabulaire — envisager un corpus plus grand avant de conclure quoi que ce soit sur l'architecture.
+- Une fois un plafond de loss stable atteint (avec budget non limitant) → implémenter les Baselines A/B/C (§9, pas encore faites) pour donner un sens à ce chiffre de loss — une loss seule sans référence ne dit rien sur si `depth=1`/Thinker apporte quoi que ce soit face à un transformer standard à paramètres égaux.
+
 ## Phase 4 — Introduction d'un vrai Teacher (distillation, Option A d'abord)
 
 **Hypothèse** : la distillation Top-K KD (Option A, black-box) sur le stream `answer` converge au moins aussi bien qu'un entraînement CE pur, avec moins de données.
