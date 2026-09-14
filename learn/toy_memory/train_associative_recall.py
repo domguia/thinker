@@ -191,7 +191,8 @@ def evaluate(model, args, device, n_step: int, reveal_mask: torch.Tensor,
                                                 device, generator=gen)
             outs = model(x, target=1, n_latent=args.n_latent, n_step=n_step,
                         n_memory=args.n_memory, is_full_ar=False, is_output_ar=False,
-                        x_reveal_mask=reveal_mask.to(device))
+                        x_reveal_mask=reveal_mask.to(device),
+                        latent_reset_steps={args.n_facts} if args.latent_reset_at_query else None)
             logits = outs[1][:, -1, -1, :]  # (B, vocab) -- single kept step, single output position
             preds = torch.argmax(logits, dim=1)
             correct = (preds == target)
@@ -238,6 +239,17 @@ def main():
     p.add_argument("--extra_delay", type=int, default=0,
                    help="extra pure-recurrence compute steps after the query is revealed, before output -- "
                         "makes the test HARDER (further from the write step), never easier; 0 = output immediately at the query step")
+    p.add_argument("--latent_reset_at_query", action="store_true",
+                   help="experiment-manager (2026-09-14): n_memory sweep showed ZERO degradation even at "
+                        "n_latent=1 (n_memory=1 seed0 hit acc_by_idx=[.96,.98,.96,.96] on all 4 indices) -- "
+                        "`latent`'s own step-to-step recurrent carry is an n_memory-INDEPENDENT channel, "
+                        "regardless of n_latent's width (see core/toy_model.py forward()'s "
+                        "latent_reset_steps docstring). This flag severs that carry right before the query "
+                        "step (core/toy_model.py's new latent_reset_steps={n_facts}), forcing the FIFO to be "
+                        "the only channel left -- WITHOUT this flag, any n_memory sweep here is NOT a valid "
+                        "test of external memory capacity, only a measure of what latent's own recurrence "
+                        "can superpose on its own (default False reproduces the exact prior, confounded, "
+                        "behavior for comparison).")
     p.add_argument("--vocab_size", type=int, default=32, help="must be >= n_facts (distinct keys drawn without replacement)")
     p.add_argument("--n_latent", type=int, default=8)
     p.add_argument("--d_model", type=int, default=64)
@@ -309,7 +321,8 @@ def main():
         x, target, _ = sample_batch(args.batch_size, args.n_facts, args.vocab_size, device)
         outs = model(x, target=1, n_latent=args.n_latent, n_step=n_step,
                     n_memory=args.n_memory, is_full_ar=False, is_output_ar=False,
-                    x_reveal_mask=reveal_mask.to(device))
+                    x_reveal_mask=reveal_mask.to(device),
+                    latent_reset_steps={args.n_facts} if args.latent_reset_at_query else None)
         logits = outs[1][:, -1, -1, :]  # (B, vocab)
         loss = F.cross_entropy(logits, target)
 

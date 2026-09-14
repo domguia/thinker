@@ -131,7 +131,8 @@ class ToyThinker(nn.Module):
                 n_latent = None, n_step: int = 1, read_step: int = 1e4, n_keep_output:int = 1,
                 n_memory:int = 1e4, output_step:int = 1, knowledge_trigger = torch.LongTensor([]),
                 is_full_ar:bool = False, is_output_ar:bool = False,
-                x_reveal_mask: Optional[Tensor] = None) -> Tensor:
+                x_reveal_mask: Optional[Tensor] = None,
+                latent_reset_steps: Optional[set] = None) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size]``
@@ -152,6 +153,28 @@ class ToyThinker(nn.Module):
                 (a fact evicted from a too-small `n_memory` before the query arrives is
                 provably unrecoverable, not just harder). `None` (default) reproduces the
                 exact prior behavior via `read_step` -- fully backward compatible.
+            latent_reset_steps: model-design (2026-09-14) -- `x_reveal_mask` alone turned out
+                NOT to be enough (experiment-manager's `n_memory` sweep at n_facts=4, EVEN at
+                n_latent=1, still showed zero degradation as n_memory shrank: n_memory=1 seed0
+                hit acc_by_idx=[0.96,0.98,0.96,0.96] on ALL 4 indices, impossible under a
+                FIFO-only model). Root cause, found by re-reading this loop line by line: `latent
+                = self.attn_compute(latent, memory, ...)` carries `latent` from step to step
+                UNCONDITIONALLY -- a plain recurrent update, entirely independent of `n_memory`
+                and of `n_latent`'s width (a SINGLE d_model-wide vector can still superpose a
+                handful of small facts across training, exactly the "a float dimension carries
+                arbitrarily many bits in principle" caveat already flagged in
+                learn/toy_memory/eval_metrics.py's capacity_budget docstring -- shrinking
+                n_latent removes latent's own internal multi-slot STRUCTURE, but never touches
+                this direct step-to-step carry). So `n_memory` can never be shown "necessary"
+                by any sweep at any n_latent >= 1: the recurrence itself is an always-present,
+                n_memory-independent side channel. `latent_reset_steps` (a set of step indices)
+                forcibly overwrites `latent` back to its LEARNED INITIAL VALUE at the start of
+                each listed step, before that step's `attn_compute` call -- severing the direct
+                recurrent carry at that point, so anything needed afterward can only come from
+                what survived in `memory` (the FIFO `latents` + whatever `x_reveal_mask`
+                reveals that step), making `n_memory` finally the sole channel across the reset.
+                Empty/`None` (default) never resets -- exact prior behavior, fully backward
+                compatible.
 
         Returns:
             output Tensor of shape ``[seq_len, batch_size, vocab_size]``
@@ -180,7 +203,8 @@ class ToyThinker(nn.Module):
 
         # define init latent
         if n_latent == None: n_latent = 8
-        latent = self.embd_latent(pos[:,:n_latent]) # B, L, H
+        latent_init = self.embd_latent(pos[:,:n_latent]) # B, L, H -- kept for latent_reset_steps
+        latent = latent_init
 
         # define output query
         out_query = self.embd_out_pos(pos[:,:n_target])
@@ -212,6 +236,13 @@ class ToyThinker(nn.Module):
             # add pertubation to latent
             # if self.perturb_prob > random.random():
             #     latent = self.pertub(latent)
+
+            # model-design (2026-09-14): sever the direct recurrent carry at this step -- see
+            # forward()'s latent_reset_steps docstring for why this is needed (x_reveal_mask
+            # alone does not stop `latent` itself from acting as an n_memory-independent
+            # channel across the whole loop).
+            if latent_reset_steps is not None and i in latent_reset_steps:
+                latent = latent_init
 
             # compute step
             latent = self.attn_compute(latent, memory, rope_cos=rope_cos, rope_sin=rope_sin)
