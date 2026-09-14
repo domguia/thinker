@@ -188,6 +188,14 @@ def main():
     p.add_argument("--n_head", type=int, default=2)
     p.add_argument("--n_slots", type=int, default=1)
     p.add_argument("--n_step", type=int, default=6, help="spec §9 Baseline A = --n_step 1 (single-pass, no loop), zero new code")
+    p.add_argument("--pool_n_head", type=int, default=1,
+                   help="model-design (2026-09-14): multi-head compressor pooling, confirmed a clean "
+                        "win (99.6-99.9%%, 5/5 seeds) on the synthetic n_hops task at its own tuned LR "
+                        "(4e-4, see indexed_attention_spec.md Sec 5.1bis) -- untested on real text yet. "
+                        "1 (default) reproduces prior behavior exactly.")
+    p.add_argument("--k_dim", type=int, default=None,
+                   help="asymmetric K narrower than V (Sec 5.4) -- None (default) reproduces prior "
+                        "symmetric behavior.")
     p.add_argument("--disable_kb", action="store_true",
                    help="spec §9 Baseline B: loop still runs n_step times, but external-memory (KB) access is "
                         "disabled -- isolates whether any gain comes from the loop itself or the memory. "
@@ -230,13 +238,14 @@ def main():
     model = Thinker(
         vocab_size=tok.vocab_size, d_model=args.d_model, n_register=args.n_register,
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
-        disable_kb=args.disable_kb,
+        disable_kb=args.disable_kb, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
         stream_dims={"answer": tok.vocab_size},
         stream_sequence={"answer": True}, max_target_len=args.t_tgt,
     ).to(device)
     n_params = sum(t.numel() for t in model.parameters())
     print(f"depth={args.depth} block_size={args.block_size} n_ctx={args.n_ctx} t_local={args.t_local} "
-          f"t_tgt={args.t_tgt} n_lanes={args.n_lanes} params={n_params/1e6:.2f}M device={device}", flush=True)
+          f"t_tgt={args.t_tgt} n_lanes={args.n_lanes} pool_n_head={args.pool_n_head} k_dim={args.k_dim} "
+          f"params={n_params/1e6:.2f}M device={device}", flush=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
 
