@@ -58,6 +58,10 @@ Retour explicite de l'utilisateur (2026-09-14) : ne pas attendre qu'une expérie
 - **Vérifier activement l'occupation réelle** (calcul/VRAM, pas juste "un job tourne") des nœuds déjà réservés, ne pas supposer que réserver = utiliser à plein.
 - **Repérer et lancer proactivement** le prochain travail parallélisable dès qu'il y a de la capacité libre, plutôt que d'attendre un feu vert explicite à chaque étape — le contenu des `dev_notes/*_experiment_plan.md` est une pile de tâches indépendantes (sauf dépendances explicitement documentées), pas un script séquentiel.
 
+## 9. Chaque tâche transmise à l'exécution doit porter son hypothèse et une table Observation → Action, pas juste une config à lancer
+
+Retour explicite de l'utilisateur (2026-09-14), directement lié au §8 : donner systématiquement, dans le message de dispatch lui-même (pas seulement dans le document de plan statique), l'hypothèse testée et une table "si le résultat est X, fais Y" pour les issues prévisibles — exactement le format déjà utilisé dans les phases du plan (`Hypothèse`/`Raisonnement`/`Observation → Action`), mais à répéter dans chaque message, pas seulement à le laisser dans le document. Sans ça, la session d'exécution doit revenir demander la marche à suivre à chaque résultat, ce qui recrée exactement le goulot séquentiel du §8. Auto-évaluation honnête au moment de ce retour : je le faisais parfois (ex. prédictions pour `pool_n_head`) mais pas systématiquement (ex. Étape 4, Phase 3 lancées sans table de décision).
+
 ## Pointeurs
 
 - Discipline détaillée (seeds, résultat ambigu, transférabilité petite→grande échelle) : `indexed_attention_experiment_plan.md`, section « Méthodologie commune ».
