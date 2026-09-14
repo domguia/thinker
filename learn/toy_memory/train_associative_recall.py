@@ -1,0 +1,249 @@
+"""
+Exp. 7 (dev_notes/toy_memory_experiment_plan.md Sec 5bis): the first toy task
+designed so that a NULL `n_memory` result is actually falsifiable evidence
+against multi-slot memory, not just a task that happened not to need it.
+
+**Why Exp. 2/6 (`copy`/`cumsum`/`add`/`subtract`, `n_memory` sweep) couldn't
+settle this, even with capacity_budget ruled out**: all four tasks only
+ever require a SINGLE scalar/vector sufficient statistic to be carried
+forward at each step (the running sum for cumsum, the running carry bit for
+add/subtract -- at most 1 bit regardless of how many digits, since a base-N
+addition's carry is always in {0, 1}). `n_memory=1` (plain recurrence) is
+therefore PROVABLY sufficient for these tasks no matter how good the
+mechanism is -- scaling `seq_len` further would not fix this, the required
+state never grows past 1 scalar. This was found only after the `add` result
+came back clean-but-uninformative (`experiment-manager`, 2026-09-14): a real
+design mistake, corrected here rather than chasing more scale on a task that
+structurally cannot answer the question.
+
+**The second, independent trap** (`ToyThinker`'s existing `read_step`,
+`core/toy_model.py`): `x` is always attended to WHOLLY or not at all -- there
+is no way to reveal only PART of it at a given step. So even a task that
+needs K genuinely distinct facts (e.g. "K key-value pairs, then a query")
+is still solvable in one shot if the facts and the query are ever visible
+TOGETHER (even for a single step): a single cross-attention call can jump
+straight to the matching pair, no memory needed at all -- the same
+single-softmax trap already identified for `kb_chain_retrieval.py`
+(indexed_attention_spec.md Sec 9.1), just phrased differently.
+
+**Fix, `core/toy_model.py::ToyThinker.forward`'s new `x_reveal_mask`
+argument**: per-(step, position) visibility instead of a single global
+`read_step` threshold. This task uses it to reveal exactly one (key, value)
+pair per step, in order, each disappearing forever once the next pair
+arrives -- then reveals ONLY the query key at the final step, by which time
+every fact has already left `x` and can only be answered from what got
+written into the FIFO `latents` memory along the way.
+
+**Task**: `n_facts` (K) distinct keys (sampled without replacement so a
+query is never ambiguous) paired with iid random values, presented one pair
+per compute step; a query key (matching one of the K keys, uniformly) is
+revealed at the final step; target is the paired value -- a single token,
+not a sequence, so there is no teacher-forcing/target-embedding channel for
+the label to leak through at all (unlike copy/cumsum/add, no analogue of the
+`is_output_ar` leak bug -- `target=1` (an int, just "how many output
+positions") in the `ToyThinker.forward` call, never the label Tensor itself,
+so there is no embedding of the true label for the residual stream to leak).
+
+**Falsifiable capacity prediction** (`capacity_ceiling` below, distinct from
+and sharper than `eval_metrics.capacity_budget`'s bits/dims check): with a
+FIFO of size `n_memory` and K pairs written before the query, the pair at
+original index `i` survives to query time iff `i >= K - n_memory` (else it
+was evicted, oldest-first, before the query ever arrives) -- an outcome
+determined purely by the write schedule, before any question of whether the
+mechanism itself works. Since the queried index is uniform over `{0..K-1}`,
+a PERFECT mechanism should score exactly `min(1, n_memory/K)` (from genuine
+retrieval) plus `(1 - min(1, n_memory/K)) / vocab_size` (chance on the
+evicted fraction, no information left to retrieve it). A measured curve that
+tracks this prediction as `n_memory` varies (at fixed K) would be the
+clearest possible confirmation that memory genuinely holds `n_memory`
+DISTINCT facts simultaneously, not just the latest one -- the result Exp. 2
+was designed to produce but structurally couldn't.
+"""
+
+import argparse
+import time
+
+import torch
+import torch.nn.functional as F
+
+from core.toy_model import ToyThinker
+from learn.toy_memory.eval_metrics import most_common_token_baseline
+
+
+def build_reveal_mask(n_facts: int, n_step: int, T: int) -> torch.Tensor:
+    """(n_step, T) bool -- step i in [0, n_facts) reveals ONLY positions
+    (2i, 2i+1) (the i-th key/value pair); step n_facts reveals ONLY position
+    2*n_facts (the query key); any step beyond that (extra delay) reveals
+    nothing -- pure recurrence on the already-written FIFO memory, a margin
+    that makes the test harder (further from the write step), not easier."""
+    mask = torch.zeros(n_step, T, dtype=torch.bool)
+    for i in range(n_facts):
+        mask[i, 2 * i] = True
+        mask[i, 2 * i + 1] = True
+    mask[n_facts, 2 * n_facts] = True
+    return mask
+
+
+def sample_batch(batch: int, n_facts: int, vocab_size: int, device,
+                 generator: torch.Generator = None):
+    assert vocab_size >= n_facts, "need at least n_facts distinct tokens available for the keys"
+    # vectorized without-replacement sampling: argsort of iid random scores per row
+    # gives a uniformly random permutation of [0, vocab_size) per batch row.
+    key_perm = torch.argsort(torch.rand(batch, vocab_size, generator=generator), dim=1)
+    keys = key_perm[:, :n_facts]                                            # (B, K), distinct per row
+    values = torch.randint(0, vocab_size, (batch, n_facts), generator=generator)  # (B, K), iid, may repeat/collide with keys
+    query_idx = torch.randint(0, n_facts, (batch,), generator=generator)     # (B,) which fact is queried
+    query_key = keys.gather(1, query_idx.unsqueeze(1)).squeeze(1)           # (B,)
+    target = values.gather(1, query_idx.unsqueeze(1)).squeeze(1)           # (B,)
+
+    T = 2 * n_facts + 1
+    x = torch.empty(batch, T, dtype=torch.long)
+    x[:, 0:2 * n_facts:2] = keys
+    x[:, 1:2 * n_facts:2] = values
+    x[:, 2 * n_facts] = query_key
+    return x.to(device), target.to(device), query_idx
+
+
+def capacity_ceiling(n_facts: int, n_memory: int, vocab_size: int) -> dict:
+    """See module docstring's 'Falsifiable capacity prediction'."""
+    retain_frac = min(1.0, n_memory / n_facts)
+    predicted_acc = retain_frac + (1 - retain_frac) / vocab_size
+    return {"retain_frac": retain_frac, "predicted_acc": predicted_acc}
+
+
+def evaluate(model, args, device, n_step: int, reveal_mask: torch.Tensor,
+            n_eval: int = 8, seed: int = 999) -> dict:
+    model.eval()
+    gen = torch.Generator().manual_seed(seed)
+    accs, retained_accs, evicted_accs = [], [], []
+    with torch.no_grad():
+        for _ in range(n_eval):
+            x, target, query_idx = sample_batch(args.batch_size, args.n_facts, args.vocab_size,
+                                                device, generator=gen)
+            outs = model(x, target=1, n_latent=args.n_latent, n_step=n_step,
+                        n_memory=args.n_memory, is_full_ar=False, is_output_ar=False,
+                        x_reveal_mask=reveal_mask.to(device))
+            logits = outs[1][:, -1, -1, :]  # (B, vocab) -- single kept step, single output position
+            preds = torch.argmax(logits, dim=1)
+            correct = (preds == target)
+            accs.append(correct.float().mean().item())
+
+            retained = query_idx.to(device) >= (args.n_facts - args.n_memory)
+            if retained.any():
+                retained_accs.append(correct[retained].float().mean().item())
+            if (~retained).any():
+                evicted_accs.append(correct[~retained].float().mean().item())
+    model.train()
+    return {
+        "acc": sum(accs) / len(accs),
+        "retained_acc": sum(retained_accs) / len(retained_accs) if retained_accs else float("nan"),
+        "evicted_acc": sum(evicted_accs) / len(evicted_accs) if evicted_accs else float("nan"),
+    }
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--n_facts", type=int, default=4, help="K distinct (key, value) pairs -- Exp.7's main axis, sweep alongside n_memory")
+    p.add_argument("--n_memory", type=int, default=10000, help="FIFO cap on latents kept in memory -- the axis this task is designed to discriminate")
+    p.add_argument("--extra_delay", type=int, default=0,
+                   help="extra pure-recurrence compute steps after the query is revealed, before output -- "
+                        "makes the test HARDER (further from the write step), never easier; 0 = output immediately at the query step")
+    p.add_argument("--vocab_size", type=int, default=32, help="must be >= n_facts (distinct keys drawn without replacement)")
+    p.add_argument("--n_latent", type=int, default=8)
+    p.add_argument("--d_model", type=int, default=64)
+    p.add_argument("--nhead", type=int, default=2)
+    p.add_argument("--d_hid", type=int, default=128)
+    p.add_argument("--nlayers", type=int, default=1)
+    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--max_steps", type=int, default=100000)
+    p.add_argument("--max_time_minutes", type=float, default=15.0)
+    p.add_argument("--eval_every", type=int, default=200)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    args = p.parse_args()
+
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device)
+
+    n_step = args.n_facts + 1 + args.extra_delay
+    T = 2 * args.n_facts + 1
+    reveal_mask = build_reveal_mask(args.n_facts, n_step, T)
+
+    model = ToyThinker(
+        vocab_size=args.vocab_size, max_latent=max(args.n_latent, 16),
+        max_input_len=T, max_output_len=1,
+        d_model=args.d_model, nhead=args.nhead, d_hid=args.d_hid, nlayers=args.nlayers,
+        n_probe=0, dropout=0.0,
+    ).to(device)
+
+    n_params = sum(p_.numel() for p_ in model.parameters())
+    ceiling = capacity_ceiling(args.n_facts, args.n_memory, args.vocab_size)
+    print(f"n_facts={args.n_facts} n_memory={args.n_memory} n_step={n_step} T={T} "
+          f"vocab_size={args.vocab_size} params={n_params/1e3:.1f}K", flush=True)
+    print(f"capacity_ceiling: retain_frac={ceiling['retain_frac']:.4f}  "
+          f"predicted_acc={ceiling['predicted_acc']:.4f}  "
+          f"(perfect mechanism should land here -- see module docstring)", flush=True)
+
+    def target_sampler(n, seed):
+        gen = torch.Generator().manual_seed(seed)
+        _, t, _ = sample_batch(n, args.n_facts, args.vocab_size, "cpu", generator=gen)
+        return t.unsqueeze(1)
+
+    mode_baseline = most_common_token_baseline(target_sampler, args.vocab_size, 1, seed=11111)
+    print(f"trivial baseline -- most_common_value: acc={mode_baseline['token_acc']:.4f}  "
+          f"vocab_chance={mode_baseline['vocab_chance']:.4f}", flush=True)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+
+    start_time = time.time()
+    max_time_seconds = args.max_time_minutes * 60
+    best_acc = 0.0
+    model.train()
+
+    step = 0
+    while True:
+        elapsed = time.time() - start_time
+        if step >= args.max_steps:
+            print(f"Step budget of {step} reached. Stopping.", flush=True)
+            break
+        if elapsed > max_time_seconds:
+            print(f"Time budget of {args.max_time_minutes} minutes reached. Stopping.", flush=True)
+            break
+
+        x, target, _ = sample_batch(args.batch_size, args.n_facts, args.vocab_size, device)
+        outs = model(x, target=1, n_latent=args.n_latent, n_step=n_step,
+                    n_memory=args.n_memory, is_full_ar=False, is_output_ar=False,
+                    x_reveal_mask=reveal_mask.to(device))
+        logits = outs[1][:, -1, -1, :]  # (B, vocab)
+        loss = F.cross_entropy(logits, target)
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        optimizer.step()
+
+        if step % args.eval_every == 0:
+            ev = evaluate(model, args, device, n_step, reveal_mask)
+            print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={loss.item():.4f} "
+                  f"acc={ev['acc']:.4f} retained_acc={ev['retained_acc']:.4f} "
+                  f"evicted_acc={ev['evicted_acc']:.4f} (predicted_acc={ceiling['predicted_acc']:.4f})", flush=True)
+            if ev["acc"] > best_acc:
+                best_acc = ev["acc"]
+
+        step += 1
+
+    final = evaluate(model, args, device, n_step, reveal_mask, n_eval=16)
+    print("\n---", flush=True)
+    print(f"final_acc:            {final['acc']:.4f}", flush=True)
+    print(f"final_retained_acc:   {final['retained_acc']:.4f}  (should be near 1.0 if the mechanism works at all)", flush=True)
+    print(f"final_evicted_acc:    {final['evicted_acc']:.4f}  (should be near vocab_chance={mode_baseline['vocab_chance']:.4f} -- info genuinely gone, not a mechanism failure)", flush=True)
+    print(f"predicted_acc:        {ceiling['predicted_acc']:.4f}  (perfect-mechanism reference, capacity_ceiling)", flush=True)
+    print(f"most_common_value baseline: {mode_baseline['token_acc']:.4f}", flush=True)
+    print(f"best_acc:             {best_acc:.4f}", flush=True)
+    print(f"training_seconds:     {elapsed:.1f}", flush=True)
+    print(f"num_steps:            {step}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

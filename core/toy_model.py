@@ -130,14 +130,37 @@ class ToyThinker(nn.Module):
     def forward(self, x: Tensor, target = None,
                 n_latent = None, n_step: int = 1, read_step: int = 1e4, n_keep_output:int = 1,
                 n_memory:int = 1e4, output_step:int = 1, knowledge_trigger = torch.LongTensor([]),
-                is_full_ar:bool = False, is_output_ar:bool = False) -> Tensor:
+                is_full_ar:bool = False, is_output_ar:bool = False,
+                x_reveal_mask: Optional[Tensor] = None) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size]``
+            x_reveal_mask: model-design (2026-09-14), for a genuine multi-slot-memory
+                discriminating task (dev_notes/toy_memory_experiment_plan.md Sec 5bis/Exp.7):
+                `read_step` is a single global on/off threshold -- ALL of `x` becomes visible
+                or invisible together, so any task that reveals its full content at once
+                (even briefly) lets a single cross-attention call read whatever it needs in
+                one shot, never requiring more than the most recent memory slot (the exact
+                trap that made Exp.2/the `add` task's `n_memory` sweep uninformative, see
+                spec Sec 9.1). `x_reveal_mask`, shape `(n_step, T)` (bool), generalizes this
+                to PER-POSITION, PER-STEP visibility: position `t` of `x` is included in the
+                attended-to raw input only during steps where `x_reveal_mask[i, t]` is True.
+                This is what lets a caller stage a real "reveal fact 1, hide it, reveal fact
+                2, ..., reveal the query only at the end" schedule -- by the time the query
+                is visible, earlier facts are gone from `x` and can ONLY be answered from
+                what was written into the FIFO `latents` memory, testing capacity directly
+                (a fact evicted from a too-small `n_memory` before the query arrives is
+                provably unrecoverable, not just harder). `None` (default) reproduces the
+                exact prior behavior via `read_step` -- fully backward compatible.
 
         Returns:
             output Tensor of shape ``[seq_len, batch_size, vocab_size]``
         """
+        if x_reveal_mask is not None:
+            assert x_reveal_mask.shape == (n_step, x.shape[1]), (
+                f"x_reveal_mask must have shape (n_step, T) = {(n_step, x.shape[1])}, "
+                f"got {tuple(x_reveal_mask.shape)}"
+            )
         B, T = x.shape
         device = x.device
 
@@ -201,7 +224,11 @@ class ToyThinker(nn.Module):
             if len(latents) > n_memory: latents.pop(0) # first in first out
 
             # define context : memory + input
-            memory = latents if i>=read_step else [x] + latents 
+            if x_reveal_mask is not None:
+                visible = x_reveal_mask[i]  # (T,) bool -- see forward()'s docstring for x_reveal_mask
+                memory = [x[:, visible, :]] + latents if visible.any() else latents
+            else:
+                memory = latents if i>=read_step else [x] + latents
             # add static memory
             memory = memory + [static_mem] if static_mem.nelement() else memory
             memory = torch.cat(memory, dim=1)
