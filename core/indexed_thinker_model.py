@@ -149,7 +149,7 @@ class Thinker(nn.Module):
                  stream_n_layers: dict = None, level_dropout_p: float = 0.0,
                  detach_sm_keys: bool = False, use_ff: bool = False, ff_hidden_mult: int = 4,
                  decouple_kv: bool = True, pool_n_head: int = 1, k_dim: int = None,
-                 disable_kb: bool = False,
+                 disable_kb: bool = False, disable_sm: bool = False,
                  stream_sequence: dict = None, max_target_len: int = None):
         super().__init__()
         self.d_model = d_model
@@ -166,6 +166,16 @@ class Thinker(nn.Module):
         # as part of "the loop mechanism" rather than "the memory" per the
         # spec's own framing of this baseline's question.
         self.disable_kb = disable_kb
+        # 2026-09-14: sm_cap=1 vs sm_cap=None came back indistinguishable on
+        # n_hops=2 (mirrors the toy-memory n_memory=1 vs n_memory=10000
+        # finding) -- multi-slot SM accumulation isn't adding anything
+        # detectable here. This flag tests the more radical version of the
+        # same question: does the SM mechanism (write+read at all) add
+        # anything beyond the recurrent register R itself, which already
+        # persists/accumulates via R = R + delta every step? Skips both the
+        # write (sm_write_proj) and the read (o_sm) entirely when True --
+        # a stronger test than sm_cap=1, which still writes+reads one slot.
+        self.disable_sm = disable_sm
 
         self.embed = nn.Embedding(vocab_size, d_model)
         self.register_init = nn.Parameter(torch.randn(n_register, d_model) * d_model ** -0.5)
@@ -272,7 +282,7 @@ class Thinker(nn.Module):
         for _ in range(n_step):
             o_kb = torch.zeros_like(R) if self.disable_kb else self.memory.attend(R)
 
-            if sm_k.shape[1] > 0:
+            if not self.disable_sm and sm_k.shape[1] > 0:
                 q_sm = self.sm_q_proj(R)
                 o_sm = F.scaled_dot_product_attention(q_sm, sm_k, sm_v)
             else:
@@ -285,16 +295,17 @@ class Thinker(nn.Module):
                 delta = self.fuse_proj(self.fuse_norm(fused))
             R = R + delta
 
-            new_k, new_v = self.sm_write_proj(R).chunk(2, dim=-1)
-            if self.detach_sm_keys:
-                # spec §4.1 "reading A": stop-gradient on keys entering SM only
-                # (plan Phase 1bis variant) — values stay fully differentiable.
-                new_k = new_k.detach()
-            sm_k = torch.cat([sm_k, new_k], dim=1)
-            sm_v = torch.cat([sm_v, new_v], dim=1)
-            if self.sm_cap is not None and sm_k.shape[1] > self.sm_cap:
-                sm_k = sm_k[:, -self.sm_cap:]
-                sm_v = sm_v[:, -self.sm_cap:]
+            if not self.disable_sm:
+                new_k, new_v = self.sm_write_proj(R).chunk(2, dim=-1)
+                if self.detach_sm_keys:
+                    # spec §4.1 "reading A": stop-gradient on keys entering SM only
+                    # (plan Phase 1bis variant) — values stay fully differentiable.
+                    new_k = new_k.detach()
+                sm_k = torch.cat([sm_k, new_k], dim=1)
+                sm_v = torch.cat([sm_v, new_v], dim=1)
+                if self.sm_cap is not None and sm_k.shape[1] > self.sm_cap:
+                    sm_k = sm_k[:, -self.sm_cap:]
+                    sm_v = sm_v[:, -self.sm_cap:]
 
         # spec §14.3: sequence_mode streams need teacher-forced target-token
         # embeddings as their per-position query input; embedded once here
