@@ -229,7 +229,24 @@ class ToyThinker(nn.Module):
 
         latents = []
         outputs = []
-        memory = x
+        # model-design (2026-09-14) -- SEVERE BUG, found via train_associative_recall.py's
+        # latent_reset_at_query results (a non-monotonic, near-collapsed n_memory sweep that
+        # made no sense under the intended design): `memory = x` here is the FULL, unsliced x
+        # -- used as-is for i=0's attn_compute call below, BEFORE x_reveal_mask's per-step
+        # masking (only applied at the END of each loop iteration, for the NEXT step) ever
+        # takes effect. So at i=0, every position of x -- every fact AND the query in
+        # train_associative_recall.py's case -- was visible simultaneously regardless of
+        # x_reveal_mask[0], defeating the entire point of a staged reveal (the exact
+        # single-shot-softmax trap x_reveal_mask exists to avoid, spec Sec 9.1) for every
+        # x_reveal_mask run tonight. Harmless for the read_step path (`memory = x` at i=0 was
+        # already documented/intentional there -- see this module's original read_step
+        # docstring in train_toy_memory.py). Fixed: compute i=0's memory the same masked way
+        # as every later step when x_reveal_mask is given.
+        if x_reveal_mask is not None:
+            visible0 = x_reveal_mask[0]
+            memory = x[:, visible0, :] if visible0.any() else x[:, :0, :]
+        else:
+            memory = x
         static_mem = self.emb_static_mem(knowledge_trigger.to(device))
         # static_mem = self.emb_static_mem.data.weight if knowledge_trigger=='all' else self.emb_static_mem(knowledge_trigger)
         for i in range(n_step):
