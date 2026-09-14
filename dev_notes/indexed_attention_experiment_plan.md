@@ -1,5 +1,7 @@
 # Plan d'expérimentation & de recherche — Indexed Attention (au-delà du MVP)
 
+**⚠️ Lire `dev_notes/agent_lessons.md` avant de lancer quoi que ce soit** — leçons méthodologiques transversales (revalidation du LR à chaque changement d'axe, ordre de diagnostic avant de conclure à un mur, hasard conditionnel obligatoire, etc.), qui se sont répétées plusieurs fois sur ce chantier et sur toy-memory.
+
 Objectif : passer du MVP testé uniquement en local sur CPU (`dev_notes/indexed_attention_spec.md` §11) à une validation progressive sur GPU (Grid'5000), alignée sur la vision complète du projet (séparer raisonnement et mémoire, cf. §-1 de la spec) plutôt que de s'arrêter à la mécanique de base.
 
 Ce document a été révisé après un audit critique (3 agents indépendants, angles code/math, méthodologie, validité scientifique) qui a trouvé des trous réels : absence de contrôle statistique, absence de vérification d'attribution causale, généralisation jamais testée, et surtout — la décision la plus débattue de cette session (supprimer tout FF, §-1 de la spec) n'était testée nulle part. Ce plan corrige ça : chaque phase porte maintenant une **hypothèse explicite**, le **raisonnement** qui la sous-tend, et une **table observation → action** (y compris pour les résultats ambigus, pas juste les deux extrêmes).

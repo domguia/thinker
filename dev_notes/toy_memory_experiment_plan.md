@@ -1,5 +1,7 @@
 # Plan d'expérimentation — Mémoire moyen terme "construite à la volée" (toy model)
 
+**⚠️ Lire `dev_notes/agent_lessons.md` avant de lancer quoi que ce soit** — leçons méthodologiques transversales (revalidation du LR à chaque changement d'axe, ordre de diagnostic avant de conclure à un mur, protection de chaque étape d'un curriculum, etc.), qui se sont répétées plusieurs fois sur ce chantier et sur Indexed Attention.
+
 Chantier distinct de la branche Indexed Attention (`dev_notes/indexed_attention_*.md`), mais qui pose la même question de fond sur un banc d'essai CPU de quelques minutes plutôt que sur l'architecture principale : **la mémoire construite pendant la boucle est-elle réellement lue, ou le modèle a-t-il simplement toujours le droit de relire l'entrée ?** Question jamais mise à l'épreuve dans ce projet malgré des résultats déjà obtenus (addition base 16 ~97%, extrapolation cumsum, Sept 2023) — voir §1.
 
 Chantier repris le 2026-09-13 (demande explicite de l'utilisateur, relayée par `thinker-5b`). Branche `dev_notes/future_experiments.md` §2 ("Memory Cache Importance", "Input Re-reading") anticipait déjà cette question sans jamais l'exécuter — ce plan la rend concrète et exécutable. Document de passation initial (constat + propositions, rien d'implémenté) : `dev_notes/toy_model_memory_experiments.md`, gardé comme trace historique.
