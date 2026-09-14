@@ -122,18 +122,33 @@ def recency_echo_predicted_acc(n_facts: int, vocab_size: int) -> float:
     uniform) and at chance otherwise -- 1/4 + (3/4)/32 = 27.34% at
     n_facts=4, vocab_size=32, matching the observed plateau almost exactly.
     A trivial-predictor CONTROL (like copy_input_baseline for copy/cumsum),
-    not itself evidence the model does this -- see `model_matches_recency`
-    in `evaluate()`, which checks the model's ACTUAL predictions against it,
-    for the real diagnostic."""
+    not itself evidence the model does this -- see `evaluate()`'s
+    `acc_excl_last`/`recency_match_excl_last` (an unconfounded version of
+    this check, after the first attempt turned out not to discriminate
+    anything, see that docstring) for the real diagnostic."""
     p_match = 1.0 / n_facts
     return p_match + (1 - p_match) / vocab_size
 
 
 def evaluate(model, args, device, n_step: int, reveal_mask: torch.Tensor,
             n_eval: int = 8, seed: int = 999) -> dict:
+    """`model_matches_recency` (first version, 2026-09-14) was CONFOUNDED --
+    experiment-manager caught it: it stayed ~25-30% in BOTH the plateau
+    cells and the one 97.6% success, because a genuinely-retrieving model
+    ALSO agrees with the recency-echo prediction whenever the query happens
+    to target the last-written fact (prob 1/n_facts, by construction --
+    "correct" and "echoes recency" coincide there regardless of mechanism).
+    It measured a floor every model must hit, not whether a model relies on
+    the shortcut. Fixed by CONDITIONING on the fact this coincidence cannot
+    occur -- `query_idx != n_facts-1` (the ~75% of episodes where the
+    correct answer and the recency-echo answer are DIFFERENT tokens, since
+    keys/values are independent draws): only there does an above-chance
+    `acc_excl_last`/high `recency_match_excl_last` unambiguously mean
+    something (genuine retrieval / the shortcut, respectively)."""
     model.eval()
     gen = torch.Generator().manual_seed(seed)
-    accs, retained_accs, evicted_accs, recency_match_accs = [], [], [], []
+    accs, retained_accs, evicted_accs = [], [], []
+    acc_excl_last_l, recency_match_excl_last_l = [], []
     with torch.no_grad():
         for _ in range(n_eval):
             x, target, query_idx = sample_batch(args.batch_size, args.n_facts, args.vocab_size,
@@ -152,19 +167,22 @@ def evaluate(model, args, device, n_step: int, reveal_mask: torch.Tensor,
             if (~retained).any():
                 evicted_accs.append(correct[~retained].float().mean().item())
 
-            # model-design (2026-09-14): does the model's prediction match the "echo the
-            # last-written value, ignore the query" shortcut, regardless of whether that's
-            # correct? High agreement (not just accuracy near the shortcut's level) confirms
-            # the shortcut, rather than genuine (if imperfect) query-conditioned retrieval
-            # that happens to land near the same number by coincidence.
+            # excludes the ~1/n_facts of episodes where the query targets the LAST-written
+            # fact -- there, "correct" and "echoes recency" are the same token by
+            # construction, so agreement there is uninformative (see docstring above).
             recency_pred = x[:, 2 * args.n_facts - 1]
-            recency_match_accs.append((preds == recency_pred).float().mean().item())
+            not_last = query_idx.to(device) != (args.n_facts - 1)
+            if not_last.any():
+                acc_excl_last_l.append(correct[not_last].float().mean().item())
+                recency_match_excl_last_l.append((preds[not_last] == recency_pred[not_last]).float().mean().item())
     model.train()
     return {
         "acc": sum(accs) / len(accs),
         "retained_acc": sum(retained_accs) / len(retained_accs) if retained_accs else float("nan"),
         "evicted_acc": sum(evicted_accs) / len(evicted_accs) if evicted_accs else float("nan"),
-        "model_matches_recency": sum(recency_match_accs) / len(recency_match_accs),
+        "acc_excl_last": sum(acc_excl_last_l) / len(acc_excl_last_l) if acc_excl_last_l else float("nan"),
+        "recency_match_excl_last": sum(recency_match_excl_last_l) / len(recency_match_excl_last_l)
+            if recency_match_excl_last_l else float("nan"),
     }
 
 
@@ -213,8 +231,8 @@ def main():
           f"(perfect mechanism should land here -- see module docstring)", flush=True)
     recency_baseline_acc = recency_echo_predicted_acc(args.n_facts, args.vocab_size)
     print(f"recency_echo_baseline: predicted_acc_if_always_echoes_last_value={recency_baseline_acc:.4f}  "
-          f"(trivial-shortcut control -- see recency_echo_predicted_acc docstring; watch "
-          f"model_matches_recency below, not just whether acc lands near this number)", flush=True)
+          f"(trivial-shortcut control -- see recency_echo_predicted_acc docstring; the real diagnostic "
+          f"is acc_excl_last/recency_match_excl_last below, not whether acc lands near this number)", flush=True)
 
     def target_sampler(n, seed):
         gen = torch.Generator().manual_seed(seed)
@@ -259,7 +277,8 @@ def main():
             print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={loss.item():.4f} "
                   f"acc={ev['acc']:.4f} retained_acc={ev['retained_acc']:.4f} "
                   f"evicted_acc={ev['evicted_acc']:.4f} (predicted_acc={ceiling['predicted_acc']:.4f}) "
-                  f"model_matches_recency={ev['model_matches_recency']:.4f}", flush=True)
+                  f"acc_excl_last={ev['acc_excl_last']:.4f} "
+                  f"recency_match_excl_last={ev['recency_match_excl_last']:.4f}", flush=True)
             if ev["acc"] > best_acc:
                 best_acc = ev["acc"]
 
@@ -271,10 +290,15 @@ def main():
     print(f"final_retained_acc:   {final['retained_acc']:.4f}  (should be near 1.0 if the mechanism works at all)", flush=True)
     print(f"final_evicted_acc:    {final['evicted_acc']:.4f}  (should be near vocab_chance={mode_baseline['vocab_chance']:.4f} -- info genuinely gone, not a mechanism failure)", flush=True)
     print(f"predicted_acc:        {ceiling['predicted_acc']:.4f}  (perfect-mechanism reference, capacity_ceiling)", flush=True)
-    print(f"model_matches_recency: {final['model_matches_recency']:.4f}  "
-          f"(fraction of predictions equal to 'echo the last-written value' -- near 1.0 with acc near "
-          f"{recency_baseline_acc:.4f} confirms that shortcut; near {1/args.vocab_size:.4f} chance-level "
-          f"agreement is consistent with genuine query-conditioned retrieval instead)", flush=True)
+    print(f"acc_excl_last:        {final['acc_excl_last']:.4f}  "
+          f"(accuracy on the ~{1 - 1/args.n_facts:.0%} of episodes where the query does NOT target the "
+          f"last-written fact -- near vocab_chance={1/args.vocab_size:.4f} means the overall acc above is "
+          f"coming almost entirely from the shortcut, not genuine retrieval; well above chance means real "
+          f"retrieval is happening on at least part of the buffer)", flush=True)
+    print(f"recency_match_excl_last: {final['recency_match_excl_last']:.4f}  "
+          f"(on that same subset, fraction of predictions equal to 'echo the last-written value' -- near "
+          f"1.0 alongside a chance-level acc_excl_last confirms the shortcut; near chance is consistent "
+          f"with genuine query-conditioned retrieval instead)", flush=True)
     print(f"most_common_value baseline: {mode_baseline['token_acc']:.4f}", flush=True)
     print(f"best_acc:             {best_acc:.4f}", flush=True)
     print(f"training_seconds:     {elapsed:.1f}", flush=True)
