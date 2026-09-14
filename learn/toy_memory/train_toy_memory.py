@@ -48,8 +48,31 @@ solved the task."
 Task order per the plan: copy first (pure transport, no computation -- if
 this breaks under a low read_step, everything downstream will too), then
 cumsum (the smallest task where re-reading vs. memorizing the running sum
-actually matters), addition-base16 last (reuses `NumbersComputeDataset`
-separately, not wired here).
+actually matters), then add/subtract (below).
+
+**add/subtract (wired 2026-09-14, reviving the user's original base-16
+arithmetic proposal from dev_notes/experiment.log.md's 18 Dec 2023 entry --
+never fully pursued at the time precisely because large numbers need
+carry-holding short-term memory, which is exactly what this project now
+needs a task to discriminate)**: `x[:, :L]` and `x[:, L:]` (L = seq_len // 2)
+are two L-digit base-`vocab_size` numbers, LSB-first; the target is their
+sum/difference, LSB-first, ripple carry/borrow, in the first L output
+positions (positions L: are a deterministic 0 filler so the output keeps
+shape (batch, seq_len) -- see per_position_accuracy for the real/filler
+split, never read exact_match alone here without checking it).
+
+Why this is the right memory-discriminating task, unlike
+`data/kb_chain_retrieval.py` (see dev_notes/indexed_attention_spec.md Sec
+9.1): that task's flaw was that every hop's fact is a static token already
+sitting in the KB, so a single unified softmax can jump straight to whatever
+hop is currently needed -- no temporal memory required regardless of how
+good the mechanism is. Here, the carry/borrow at digit i is NOT present
+anywhere in the input; it can only be produced by having actually processed
+digits 0..i-1 first. There is no KB shortcut to it. A model that gets late
+digits right without ever holding a running carry across compute steps
+would be a genuine surprise, not an artifact of task design -- this avoids
+both traps identified in Sec 9.1 (Markovian-shortcut-via-static-facts, and
+single-softmax-solves-it-in-one-shot).
 
 Deliberately does NOT reuse `data.numbers.NumbersCopyDataset`: its
 `__iter__` carries a `progressive_copy`-curriculum's mutable class-level
@@ -72,7 +95,31 @@ from learn.toy_memory.eval_metrics import (
     copy_input_baseline, most_common_token_baseline, format_report, capacity_budget,
 )
 
-TASKS = ("copy", "cumsum")
+TASKS = ("copy", "cumsum", "add", "subtract")
+
+
+def _ripple_add_or_subtract(a: torch.Tensor, b: torch.Tensor, vocab_size: int,
+                            subtract: bool) -> torch.Tensor:
+    """LSB-first ripple carry (add) / borrow (subtract), digit by digit. The
+    carry/borrow at position i is produced only by processing positions
+    0..i-1 first -- it is never a token present in the input, unlike a
+    kb_chain_retrieval fact (see module docstring's add/subtract section for
+    why that distinction is what makes this task actually discriminate
+    memory use, not just re-computable from a static lookup)."""
+    L = a.shape[1]
+    carry = torch.zeros(a.shape[0], dtype=a.dtype, device=a.device)
+    out = torch.zeros_like(a)
+    for i in range(L):
+        if subtract:
+            s = a[:, i] - b[:, i] - carry
+            borrow = (s < 0).to(a.dtype)
+            out[:, i] = s + borrow * vocab_size
+            carry = borrow
+        else:
+            s = a[:, i] + b[:, i] + carry
+            out[:, i] = s % vocab_size
+            carry = s // vocab_size
+    return out
 
 
 def sample_batch(batch: int, seq_len: int, vocab_size: int, task: str,
@@ -82,6 +129,20 @@ def sample_batch(batch: int, seq_len: int, vocab_size: int, task: str,
         y = x.clone()
     elif task == "cumsum":
         y = torch.cumsum(x, dim=1) % vocab_size
+    elif task in ("add", "subtract"):
+        assert seq_len % 2 == 0, (
+            f"task={task!r} requires an even seq_len (split evenly between operand A and B digits), "
+            f"got seq_len={seq_len}"
+        )
+        L = seq_len // 2
+        a, b = x[:, :L], x[:, L:]
+        result = _ripple_add_or_subtract(a, b, vocab_size, subtract=(task == "subtract"))
+        y = torch.zeros_like(x)
+        y[:, :L] = result
+        # y[:, L:] stays a deterministic 0 filler so target keeps shape (batch, seq_len),
+        # matching output_len == input_len elsewhere in this script -- per_position_accuracy
+        # exposes the real (first L)/filler (last L) split, never collapse to one number
+        # without checking it for this task.
     else:
         raise ValueError(f"unknown task {task!r}, expected one of {TASKS}")
     return x.to(device), y.to(device)
@@ -361,7 +422,13 @@ def main():
         if step % args.eval_every == 0:
             matched = evaluate(model, args, device, read_step=current_read_step, bos_id=bos_id,
                                seq_len=current_seq_len)
-            leak_flag = "" if matched["leak_token_acc"] < mode_baseline["vocab_chance"] + 0.15 else \
+            # model-design (2026-09-14): compare against mode_baseline['token_acc'], not the flat
+            # vocab_chance -- add/subtract has a deterministic 0-filler half that ANY predictor
+            # (leaking or not) gets right for free, so mode_baseline['token_acc'] (which already
+            # measures that trivial floor) is the correct near-chance reference; vocab_chance alone
+            # made every add/subtract run print a false-positive LEAK SUSPECTED.
+            leak_ref = mode_baseline["token_acc"]
+            leak_flag = "" if matched["leak_token_acc"] < leak_ref + 0.15 else \
                 " *** LEAK SUSPECTED (mismatch accuracy far above chance) ***"
             print(f"step={step:6d} stage_read_step={current_read_step} stage_seq_len={current_seq_len} "
                   f"elapsed={elapsed/60:.2f}m loss={loss.item():.4f} "
@@ -413,9 +480,11 @@ def main():
     print("\n---", flush=True)
     print(format_report(args.task, final["token_acc"], final["exact_match"],
                         copy_baseline, mode_baseline, pos_acc=final["pos_acc"], budget=budget), flush=True)
-    leak_verdict = "OK (near chance)" if final["leak_token_acc"] < mode_baseline["vocab_chance"] + 0.15 else \
+    leak_ref = mode_baseline["token_acc"]  # see the periodic-eval leak_flag comment above for why
+    leak_verdict = "OK (near chance)" if final["leak_token_acc"] < leak_ref + 0.15 else \
         "*** LEAK SUSPECTED -- do not trust final_exact_match above ***"
-    print(f"leak_check (mismatched-input token_acc, should sit near vocab_chance={mode_baseline['vocab_chance']:.4f}): "
+    print(f"leak_check (mismatched-input token_acc, should sit near mode_baseline={leak_ref:.4f} "
+          f"[vocab_chance={mode_baseline['vocab_chance']:.4f}]): "
           f"{final['leak_token_acc']:.4f}  -> {leak_verdict}", flush=True)
     print(f"read_step_stages:      {stages}", flush=True)
     print(f"final_stage_read_step: {current_read_step} (stage {stage_idx + 1}/{len(stages)})", flush=True)
