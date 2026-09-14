@@ -53,6 +53,18 @@ Rien en aval (le softmax unifié de `attend()`, §5.2) ne suppose une racine uni
 
 **`depth ∈ {0,1,2,3}` est donc directement exécutable pour les 3 valeurs de `n_facts`, avec `block_size=4` partout, sans padding ni `block_size` par cellule.** Reste à faire côté `learn/indexed_attention/train_kb_retrieval.py` : son assertion (`block_size**depth == max_facts*4`, ligne ~214) doit être assouplie à l'identique (`%`, pas `==`) — fichier `experiment-manager`, pas de coordination nécessaire au-delà de ce message.
 
+**[RÉSULTAT 2026-09-14] — grille complète, 36 cellules, `lr=3e-4`, `block_size=4` uniforme, découplé par défaut** :
+
+| `n_facts` | `depth=0` | `depth=1` | `depth=2` | `depth=3/4/5` (native) |
+|---|---|---|---|---|
+| 16 (direct) | 2,5/2,5/3,3% — échoue structurellement, attendu | **100/100/100%** | **100/100/96,4%** | 100/100/**4,2%** — 2/3 seeds propres, une seed en échec, pas creusé (possible loterie seed/budget, cf. toy-memory ce soir) |
+| 64 (direct, sans curriculum) | 0,8-1,25% | 0,8-1,6% | 0,8-1,4% | 0,8-1,4% |
+| 256 (direct, sans curriculum) | 0-0,63% | 0-0,63% | 0-0,63% | 0-0,63% |
+
+**Confirme exactement l'hypothèse de cette étape à `n_facts=16`** : `depth=0` échoue structurellement (attendu, §5.1bis) ; `depth=1` égale `depth≥2` (100% partout ou presque) — **la baseline "sans index" tient la comparaison à cette échelle**, cohérent avec "l'indexation paie au coût/passage à l'échelle, pas en accuracy". `n_facts=64/256` échouent **uniformément, à toutes les profondeurs** — ce n'est **pas** un résultat sur la profondeur, c'est le besoin de curriculum déjà documenté (EXP-007) qui s'applique ici identiquement, indépendamment de `depth`.
+
+**Question ouverte, proposée par `experiment-manager`, à trancher** : refaire la comparaison `depth` à `n_facts=64/256` **avec curriculum** (`--curriculum`, même patron qu'EXP-007) pour voir si `depth=1` continue d'égaler `depth≥2` une fois que les deux peuvent effectivement converger à cette échelle — pertinent directement pour la décision déjà prise plus haut ("on peut démarrer l'intégration texte réel avec `depth=1`") : si `depth=1` décroche de `depth≥2` en accuracy une fois le curriculum appliqué à grande échelle, cette décision devrait être révisée. Pas urgent/bloquant, mais peu coûteux (curriculum + flag déjà existants) et directement informatif — à lancer quand la compute se libère, sans priorité sur cumsum/génération durcie en cours.
+
 **[CORRECTIF 2026-09-13] — Étape 1 auto-corrigée par `experiment-manager` : aucun résultat de cette grille ne bat le raccourci, à aucun `n_hops`.** Premier passage lu à tort comme un signal positif croissant (`n_hops=4` à 89-92%, présenté comme "surprenant") — en réalité une comparaison au seul `conditional_chance`, sans vérifier `margin_over_shortcut` comme la méthodologie l'exige. Repris intégralement avec le bloc chance-level complet sur les 21 runs terminés (`n_hops` 2/3/4, découplé + ablation partagée) :
 
 | | `n_hops=2` (5 seeds) | `n_hops=3` (5 seeds) | `n_hops=4` (3 seeds) |
