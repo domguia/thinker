@@ -111,6 +111,32 @@ def capacity_ceiling(n_facts: int, n_memory: int, vocab_size: int) -> dict:
     return {"retain_frac": retain_frac, "predicted_acc": predicted_acc}
 
 
+def latent_capacity_note(n_latent: int, n_facts: int) -> str:
+    """experiment-manager's full n_memory sweep (2026-09-14, 60/60 cells) found NO
+    degradation as n_memory shrinks -- n_memory=1 seed3 hit acc_by_idx=[1,1,1,1],
+    impossible if the FIFO were the only channel. Root cause: `latent`
+    (`core/toy_model.py`'s recurrent state, updated every step via
+    `attn_compute(latent, memory, ...)`) is a SEPARATE, n_memory-INDEPENDENT
+    channel -- it persists/accumulates through its own recurrent update
+    regardless of what the FIFO holds, exactly like R in the main Thinker
+    (disable_sm's mechanistic story: "querying the SM re-consults a function of
+    what R already contains"). It also has `n_latent` internal vector slots of
+    its own (self-attention among its own positions) -- same vector-SLOT
+    accounting as `capacity_budget` (bits-vs-dims is the wrong unit, see that
+    docstring), so `n_latent >= n_facts` alone can already be enough to hold
+    every fact regardless of n_memory. A `n_memory` sweep is only informative
+    once this alternate channel is constrained below what the task needs --
+    hence the WARNING below, printed for every run of this script from now on
+    so this confound is never silently reintroduced."""
+    if n_latent >= n_facts:
+        return (f"WARNING: n_latent={n_latent} >= n_facts={n_facts} -- the recurrent `latent` state "
+                f"alone may have enough internal vector slots to hold every fact regardless of "
+                f"n_memory, making any n_memory sweep run here uninformative about EXTERNAL "
+                f"multi-slot memory specifically. Use n_latent < n_facts (e.g. n_latent=1) to force "
+                f"reliance on the FIFO before trusting a capacity_ceiling comparison.")
+    return f"n_latent={n_latent} < n_facts={n_facts} -- latent alone cannot hold every fact, n_memory sweep is meaningful here."
+
+
 def recency_echo_predicted_acc(n_facts: int, vocab_size: int) -> float:
     """experiment-manager (2026-09-14): the LR sweep's plateau (~27.5-31.1%
     on 8/9 cells, all landing in the same narrow band regardless of a 10x LR
@@ -248,6 +274,7 @@ def main():
     print(f"capacity_ceiling: retain_frac={ceiling['retain_frac']:.4f}  "
           f"predicted_acc={ceiling['predicted_acc']:.4f}  "
           f"(perfect mechanism should land here -- see module docstring)", flush=True)
+    print(latent_capacity_note(args.n_latent, args.n_facts), flush=True)
     recency_baseline_acc = recency_echo_predicted_acc(args.n_facts, args.vocab_size)
     print(f"recency_echo_baseline: predicted_acc_if_always_echoes_last_value={recency_baseline_acc:.4f}  "
           f"(trivial-shortcut control -- see recency_echo_predicted_acc docstring; the real diagnostic "
