@@ -109,6 +109,16 @@ Rien en aval (le softmax unifié de `attend()`, §5.2) ne suppose une racine uni
 
 **Étape 4 — Durcir le générateur de tâche** — **[priorité relevée 2026-09-13]**, n'est plus seulement souhaitable en parallèle : bloquant pour toute conclusion sur `n_hops≥3` (voir le correctif de l'Étape 1 ci-dessus, où `n_distractors=0` a fait saturer `non_key` à 100% et rendu les résultats `n_hops=3/4` ininterprétables). Concrètement : garder `n_distractors` fixe et non nul à travers tout balayage `n_hops` (`max_facts`/`depth` variables à la place, cf. l'assouplissement `N % block_size**depth == 0` plus haut), et durcir `data/kb_chain_retrieval.py` contre les raccourcis structurels restants (chaînes leurres, distracteurs dont les valeurs sont aussi des clés).
 
+**[RECETTE CONCRÈTE 2026-09-14]** — garder `n_distractors` fixe *et* `depth=2` (le régime hiérarchique qu'on veut tester) se heurte à une contrainte arithmétique : avec `block_size=4` (imposé — il doit égaler la largeur d'un fait, sinon les nœuds de niveau 1 ne correspondent plus à des faits entiers, `block_size` étant partagé entre tous les niveaux), `depth=2` n'est valide que si `max_facts` est un multiple de 4 (vérifié : `max_facts∈{5,6,7}` n'admettent que `depth≤1`, aucun `depth=2` possible). **Solution : fixer `max_facts=8` (au lieu de 4) à travers tout le balayage `n_hops`, en ajustant `n_distractors = 8 - n_hops` par cellule** :
+
+| `n_hops` | `n_distractors` | `max_facts` | `depth` valides |
+|---|---|---|---|
+| 2 | 6 | 8 | {0,1,2} |
+| 3 | 5 | 8 | {0,1,2} |
+| 4 | 4 | 8 | {0,1,2} |
+
+`depth=2` reste valide et identique aux trois cellules (32 feuilles, 8 nœuds-faits au niveau 1, 2 nœuds au niveau 2 — pas une racine unique, mais une hiérarchie réelle à 2 niveaux, contrairement à l'ancienne grille qui utilisait `max_facts=4` fixe). `n_distractors≥4` à chaque cellule évite la dégénérescence de `non_key` trouvée dans la grille précédente. Léger changement par rapport à l'ancienne grille (`max_facts=4→8`, donc KB deux fois plus grande) — noter que ce n'est pas strictement la même tâche que l'Étape 1 corrigée (`n_hops=2` y utilisait `max_facts=4`), donc ne pas comparer directement les deux accuracies sans le rappeler.
+
 ### Ce qu'il ne faut PAS faire maintenant (décision explicite de l'utilisateur, 2026-09-13)
 
 - **Ne pas relancer `use_ff` / `n_register` / les balayages `N_step`/LR de `n_hops=2`.** Leurs verdicts sont sans objet, mais les re-tester à l'aveugle est du travail à faible valeur : ces variantes n'ont d'intérêt que si le modèle réparé bute à nouveau quelque part. Les garder en réserve, comme diagnostics conditionnels, pas comme file d'attente.
