@@ -52,6 +52,12 @@ Trouvé deux fois la même nuit (une fois sur la dernière étape, une fois — 
 
 Plusieurs questions cette nuit ("le plancher par étape était-il suffisant ?", "le sweep LR isolé a-t-il convergé avant 1500 pas ?") avaient déjà leur réponse dans des logs déjà produits — gratuit à relire, pas besoin de consommer de la compute pour le redécouvrir. Réflexe à adopter systématiquement avant de proposer un nouveau run diagnostique.
 
+## 8. Traiter les plans comme une pile de tâches parallélisables, pas une séquence à orchestrer une par une
+
+Retour explicite de l'utilisateur (2026-09-14) : ne pas attendre qu'une expérience se conclue avant d'en proposer/lancer une autre — le cluster a plusieurs nœuds de capacités différentes, l'objectif est de maximiser l'occupation, pas de dérouler le plan dans l'ordre. Deux conséquences concrètes :
+- **Vérifier activement l'occupation réelle** (calcul/VRAM, pas juste "un job tourne") des nœuds déjà réservés, ne pas supposer que réserver = utiliser à plein.
+- **Repérer et lancer proactivement** le prochain travail parallélisable dès qu'il y a de la capacité libre, plutôt que d'attendre un feu vert explicite à chaque étape — le contenu des `dev_notes/*_experiment_plan.md` est une pile de tâches indépendantes (sauf dépendances explicitement documentées), pas un script séquentiel.
+
 ## Pointeurs
 
 - Discipline détaillée (seeds, résultat ambigu, transférabilité petite→grande échelle) : `indexed_attention_experiment_plan.md`, section « Méthodologie commune ».
