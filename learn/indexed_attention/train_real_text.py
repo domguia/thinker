@@ -187,7 +187,11 @@ def main():
     p.add_argument("--d_model", type=int, default=128)
     p.add_argument("--n_head", type=int, default=2)
     p.add_argument("--n_slots", type=int, default=1)
-    p.add_argument("--n_step", type=int, default=6)
+    p.add_argument("--n_step", type=int, default=6, help="spec §9 Baseline A = --n_step 1 (single-pass, no loop), zero new code")
+    p.add_argument("--disable_kb", action="store_true",
+                   help="spec §9 Baseline B: loop still runs n_step times, but external-memory (KB) access is "
+                        "disabled -- isolates whether any gain comes from the loop itself or the memory. "
+                        "Also skips HierarchicalMemory.build() entirely (cheaper, not just architecturally different).")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--max_steps", type=int, default=100000)
     p.add_argument("--max_time_minutes", type=float, default=15.0)
@@ -226,6 +230,7 @@ def main():
     model = Thinker(
         vocab_size=tok.vocab_size, d_model=args.d_model, n_register=args.n_register,
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
+        disable_kb=args.disable_kb,
         stream_dims={"answer": tok.vocab_size},
         stream_sequence={"answer": True}, max_target_len=args.t_tgt,
     ).to(device)

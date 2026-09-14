@@ -149,6 +149,7 @@ class Thinker(nn.Module):
                  stream_n_layers: dict = None, level_dropout_p: float = 0.0,
                  detach_sm_keys: bool = False, use_ff: bool = False, ff_hidden_mult: int = 4,
                  decouple_kv: bool = True, pool_n_head: int = 1, k_dim: int = None,
+                 disable_kb: bool = False,
                  stream_sequence: dict = None, max_target_len: int = None):
         super().__init__()
         self.d_model = d_model
@@ -156,6 +157,15 @@ class Thinker(nn.Module):
         self.sm_cap = sm_cap
         self.detach_sm_keys = detach_sm_keys
         self.use_ff = use_ff
+        # spec §9 Baseline B ("boucle pure, sans mémoire"): the recurrent
+        # register still loops n_step times, but external-memory (KB) access
+        # is disabled -- isolates whether any gain comes from the loop itself
+        # or from the memory. [DEFAUT] scope choice, 2026-09-14: disables
+        # only the KB term (o_kb), not the SM (o_sm) -- the SM is populated
+        # from the loop's own trajectory, not an external source, so it reads
+        # as part of "the loop mechanism" rather than "the memory" per the
+        # spec's own framing of this baseline's question.
+        self.disable_kb = disable_kb
 
         self.embed = nn.Embedding(vocab_size, d_model)
         self.register_init = nn.Parameter(torch.randn(n_register, d_model) * d_model ** -0.5)
@@ -245,8 +255,9 @@ class Thinker(nn.Module):
         B = kb_tokens.shape[0]
         device = kb_tokens.device
 
-        leaf_emb = self.embed(kb_tokens)
-        self.memory.build(leaf_emb, kb_source_ids, leaf_mask=kb_leaf_mask)
+        if not self.disable_kb:
+            leaf_emb = self.embed(kb_tokens)
+            self.memory.build(leaf_emb, kb_source_ids, leaf_mask=kb_leaf_mask)
 
         q_emb = self.embed(query_tokens).mean(dim=1, keepdim=True)  # (B, 1, d)
         register_base = (
@@ -259,7 +270,7 @@ class Thinker(nn.Module):
         sm_v = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
 
         for _ in range(n_step):
-            o_kb = self.memory.attend(R)
+            o_kb = torch.zeros_like(R) if self.disable_kb else self.memory.attend(R)
 
             if sm_k.shape[1] > 0:
                 q_sm = self.sm_q_proj(R)
