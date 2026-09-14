@@ -149,6 +149,16 @@ def evaluate(model, args, device, n_step: int, reveal_mask: torch.Tensor,
     gen = torch.Generator().manual_seed(seed)
     accs, retained_accs, evicted_accs = [], [], []
     acc_excl_last_l, recency_match_excl_last_l = [], []
+    # model-design (2026-09-14): experiment-manager's unconfounded acc_excl_last landed at
+    # 26.6-32.8% on all 8 "plateau" cells -- clearly above chance (3.1%) but far below the
+    # 98% the one escaped seed reaches, i.e. genuine but PARTIAL retrieval, not a pure
+    # shortcut. ~1/3 (the fraction of the excl_last subset made of the SECOND-to-last fact,
+    # query_idx=n_facts-2, at n_facts=4) matches this band closely enough to be worth
+    # checking directly rather than guessing: per-query_idx accuracy, to see whether the
+    # "partial" solution is actually "reliably recalls the last ~2 writes, nothing older"
+    # (a small effective window) rather than a diffuse partial signal across all indices.
+    acc_by_idx_correct = torch.zeros(args.n_facts)
+    acc_by_idx_count = torch.zeros(args.n_facts)
     with torch.no_grad():
         for _ in range(n_eval):
             x, target, query_idx = sample_batch(args.batch_size, args.n_facts, args.vocab_size,
@@ -175,7 +185,15 @@ def evaluate(model, args, device, n_step: int, reveal_mask: torch.Tensor,
             if not_last.any():
                 acc_excl_last_l.append(correct[not_last].float().mean().item())
                 recency_match_excl_last_l.append((preds[not_last] == recency_pred[not_last]).float().mean().item())
+
+            qidx_cpu = query_idx.cpu()
+            correct_cpu = correct.cpu()
+            for idx in range(args.n_facts):
+                m = qidx_cpu == idx
+                acc_by_idx_correct[idx] += correct_cpu[m].sum()
+                acc_by_idx_count[idx] += m.sum()
     model.train()
+    acc_by_idx = (acc_by_idx_correct / acc_by_idx_count.clamp(min=1)).tolist()
     return {
         "acc": sum(accs) / len(accs),
         "retained_acc": sum(retained_accs) / len(retained_accs) if retained_accs else float("nan"),
@@ -183,6 +201,7 @@ def evaluate(model, args, device, n_step: int, reveal_mask: torch.Tensor,
         "acc_excl_last": sum(acc_excl_last_l) / len(acc_excl_last_l) if acc_excl_last_l else float("nan"),
         "recency_match_excl_last": sum(recency_match_excl_last_l) / len(recency_match_excl_last_l)
             if recency_match_excl_last_l else float("nan"),
+        "acc_by_idx": acc_by_idx,  # [idx 0 (oldest write) .. idx n_facts-1 (most recent write)]
     }
 
 
@@ -278,7 +297,8 @@ def main():
                   f"acc={ev['acc']:.4f} retained_acc={ev['retained_acc']:.4f} "
                   f"evicted_acc={ev['evicted_acc']:.4f} (predicted_acc={ceiling['predicted_acc']:.4f}) "
                   f"acc_excl_last={ev['acc_excl_last']:.4f} "
-                  f"recency_match_excl_last={ev['recency_match_excl_last']:.4f}", flush=True)
+                  f"recency_match_excl_last={ev['recency_match_excl_last']:.4f} "
+                  f"acc_by_idx={['%.3f' % a for a in ev['acc_by_idx']]}", flush=True)
             if ev["acc"] > best_acc:
                 best_acc = ev["acc"]
 
@@ -299,6 +319,11 @@ def main():
           f"(on that same subset, fraction of predictions equal to 'echo the last-written value' -- near "
           f"1.0 alongside a chance-level acc_excl_last confirms the shortcut; near chance is consistent "
           f"with genuine query-conditioned retrieval instead)", flush=True)
+    print(f"acc_by_idx (index 0=oldest write .. {args.n_facts-1}=most recent write): "
+          f"{['%.4f' % a for a in final['acc_by_idx']]}  "
+          f"(a small effective window -- near-perfect on the last 1-2 indices, near chance on older ones "
+          f"-- would explain a partial-but-above-chance acc_excl_last as 'recalls the last few writes, not "
+          f"further back', distinct from either a pure recency shortcut or full n_memory-wide retrieval)", flush=True)
     print(f"most_common_value baseline: {mode_baseline['token_acc']:.4f}", flush=True)
     print(f"best_acc:             {best_acc:.4f}", flush=True)
     print(f"training_seconds:     {elapsed:.1f}", flush=True)
