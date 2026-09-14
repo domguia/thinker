@@ -490,6 +490,16 @@ Le diagnostic d'auto-appariement est **parfait sur les 3 graines** (mean_rank=0,
 
 **Protocole** : réutiliser `scripts/fetch_wiki.py`/`data/wiki_samples.json`, tokenizer réel, Baselines A/B/C reconduites.
 
+**[LANCÉ 2026-09-14]** — décision de l'utilisateur : démarrer Phase 3 en parallèle du reste (`depth=1`, appuyé par le résultat Phase 0bis ci-dessus), pendant que le travail sur `n_hops≥3` continue à petite échelle synthétique. Script d'entraînement écrit : `learn/indexed_attention/train_real_text.py`, premier câblage bout-en-bout de `Thinker` sur du texte réel — l'infrastructure existait déjà (`data/real_text_windows.py::RealTextWindowDataset`, spec §14.1 ; `Thinker.forward(register_init_override=..., target_input=...)`, spec §14.2/§14.3) mais aucune boucle d'entraînement ne les reliait encore.
+
+Deux décisions de conception non spécifiées par la spec, **[DÉFAUT]**, prises pour ce premier script :
+1. **`query_tokens`** (Thinker.forward en a besoin pour amorcer $R$, jamais spécifié pour du texte réel contrairement aux tâches synthétiques où la requête est naturelle) : la région **locale/récente** de la fenêtre elle-même (`kb_tokens[:, -t_local:]`) — "amorcer le registre avec un résumé de ce qu'on est en train de continuer". Simple, n'introduit aucun nouveau mécanisme.
+2. **Relais du registre entre fenêtres, en lockstep par lots** : $N$ « voies » parallèles, chacune suivant les fenêtres d'un document dans l'ordre ($R$ porté, détaché — troncature du BPTT aux frontières de fenêtre, spec §14.2 — remis à `register_init` sur `is_first_window`) ; une voie dont le document est épuisé est réalimentée avec le document suivant. Choix MVP — `batch_size=1` (un document à la fois) serait aussi correct mais bien moins efficace en GPU ; un lot mélangé sans respect de l'ordre casserait l'invariant de relais et n'a pas été envisagé.
+
+Testé localement (CPU, 3 documents jouets, `depth=1, n_ctx=16, block_size=16`) : tourne sans erreur, le relais/l'épuisement de voie s'activent correctement (`active_lanes` décroît quand un document se termine). **Pas encore de signal d'apprentissage réel** — le smoke test est trop court/trop petit pour ça, ce n'est pas son but. Baselines A/B/C (§9) **pas encore implémentées** dans ce script — suivi documenté, pas bloquant pour le premier run.
+
+**Pour un vrai run** : préparer un vrai corpus via `learn/distill/prepare_general_data.py` (TinyStories, déjà utilisé ailleurs dans le projet) plutôt que `data/wiki_samples.json` (mauvais format — un dict nommé, pas du JSONL avec un champ `"text"` par ligne, incompatible avec `RealTextWindowDataset`). **Balayer le LR avant de conclure quoi que ce soit** — aucune valeur n'a été validée pour cette configuration (nouvelle tâche, nouvelle échelle, nouveau mécanisme de relais) — même leçon que partout ailleurs ce soir.
+
 ## Phase 4 — Introduction d'un vrai Teacher (distillation, Option A d'abord)
 
 **Hypothèse** : la distillation Top-K KD (Option A, black-box) sur le stream `answer` converge au moins aussi bien qu'un entraînement CE pur, avec moins de données.
