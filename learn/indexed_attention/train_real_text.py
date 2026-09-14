@@ -79,21 +79,42 @@ class LockstepLaneBatcher:
         self.by_doc = {}
         for w_idx, (doc_id, p, is_first) in enumerate(self.ds.windows):
             self.by_doc.setdefault(doc_id, []).append(w_idx)
-        self.doc_order = list(self.by_doc.keys())
-        rng = torch.Generator().manual_seed(seed)
-        perm = torch.randperm(len(self.doc_order), generator=rng).tolist()
-        self.doc_order = [self.doc_order[i] for i in perm]
+        self._doc_ids = list(self.by_doc.keys())
+        assert self._doc_ids, "no document produced any window -- corpus too short/empty for these n_ctx/t_tgt settings"
+        self.seed = seed
+
+    def _shuffled_doc_order(self, epoch: int):
+        # deterministic-but-different order per epoch (seed+epoch), not the
+        # same fixed permutation replayed forever
+        rng = torch.Generator().manual_seed(self.seed + epoch)
+        perm = torch.randperm(len(self._doc_ids), generator=rng).tolist()
+        return [self._doc_ids[i] for i in perm]
 
     def __iter__(self):
+        # experiment-manager (2026-09-14): the original version stopped
+        # after exactly one pass over the corpus (refill() returning False
+        # once doc_order was exhausted) regardless of --max_time_minutes/
+        # --max_steps -- e.g. 2700 TinyStories+WikiText docs exhausted at
+        # step ~1537 no matter how generous the requested budget. Fixed to
+        # wrap around into a new (reshuffled) epoch instead of stopping,
+        # matching every other training script in this project (the corpus
+        # is meant to be a stream, not a single fixed-length pass) --
+        # --max_time_minutes/--max_steps are the only real stopping
+        # conditions the caller should rely on.
+        epoch = 0
+        doc_order = self._shuffled_doc_order(epoch)
         next_doc_ptr = 0
         lane_queues = [[] for _ in range(self.n_lanes)]  # list of window indices left, per lane
         lane_doc_id = [-1] * self.n_lanes
 
         def refill(lane):
-            nonlocal next_doc_ptr
-            if next_doc_ptr >= len(self.doc_order):
-                return False
-            doc_id = self.doc_order[next_doc_ptr]
+            nonlocal next_doc_ptr, doc_order, epoch
+            if next_doc_ptr >= len(doc_order):
+                epoch += 1
+                doc_order = self._shuffled_doc_order(epoch)
+                next_doc_ptr = 0
+                print(f"[LockstepLaneBatcher] corpus exhausted, starting epoch {epoch}", flush=True)
+            doc_id = doc_order[next_doc_ptr]
             next_doc_ptr += 1
             lane_queues[lane] = list(self.by_doc[doc_id])
             lane_doc_id[lane] = doc_id
@@ -111,12 +132,12 @@ class LockstepLaneBatcher:
                     if not refill(lane):
                         break
                 if not lane_queues[lane]:
-                    # this lane is permanently empty (ran out of documents) --
-                    # pad by repeating the last-seen document's final window
-                    # would corrupt carry-over, so instead just replay lane 0's
-                    # current item (its loss is masked out by the caller via
-                    # `lane_active`). Simpler: emit a dummy from doc 0 if any
-                    # lane is still active, else stop entirely below.
+                    # Unreachable in normal operation since the epoch-wraparound
+                    # fix above (refill() always succeeds -- self._doc_ids is
+                    # asserted non-empty at construction). Left as a defensive
+                    # fallback rather than removed, so a future change that
+                    # reintroduces a genuinely-exhaustible lane degrades safely
+                    # (masked-out dummy) instead of crashing/hanging.
                     batch_items.append(None)
                     batch_lane_doc.append(-1)
                     continue
