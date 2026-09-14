@@ -175,9 +175,16 @@ def main():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
 
-    expected_ctx = args.block_size ** args.depth if args.depth > 0 else args.n_ctx
-    assert args.depth == 0 or args.n_ctx == expected_ctx, (
-        f"--n_ctx={args.n_ctx} must equal block_size**depth={expected_ctx} when depth>0"
+    # HierarchicalMemory.build() only requires N % block_size**depth == 0
+    # (divisibility -- a "forest" of multiple top-level nodes is fine, see
+    # core/indexed_memory.py, fixed 2026-09-13 for exactly this reason: the
+    # OLD strict equality forced a single root, making "one node per chunk,
+    # no further hierarchy" -- e.g. n_ctx=256/block_size=16/depth=1 -> 16
+    # top-level nodes -- inexpressible for n_ctx > block_size**depth). This
+    # script re-imposed the stricter equality by mistake; fixed to match.
+    divisor = args.block_size ** args.depth if args.depth > 0 else 1
+    assert args.n_ctx % divisor == 0, (
+        f"--n_ctx={args.n_ctx} must be a multiple of block_size**depth={divisor} when depth>0"
     )
     assert 1 <= args.t_local <= args.n_ctx
 
