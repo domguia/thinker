@@ -271,7 +271,18 @@ def main():
     p.add_argument("--d_hid", type=int, default=128)
     p.add_argument("--nlayers", type=int, default=1)
     p.add_argument("--batch_size", type=int, default=128)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=1e-3, help="target/peak LR, reached at the end of warmup (or from step 0 if --lr_warmup_steps=0)")
+    p.add_argument("--lr_warmup_steps", type=int, default=0,
+                   help="experiment-manager (2026-09-14): cumsum seq_len=32 direct (no curriculum) at "
+                        "read_step=6 stays mixed/unstable across the WHOLE lr in {1e-3, 1.5e-3, 3e-3} sweep -- "
+                        "lowering lr alone did not stabilize it (worst case improved from total collapse to "
+                        "partial progress, but no lr gave 3/3 clean seeds). Next untried lead per the plan: "
+                        "linear LR warmup FROM --lr_warmup_init TO --lr over this many steps, then held constant "
+                        "-- distinct from lowering the peak lr itself. 0 (default) disables warmup, exactly "
+                        "reproducing the old behavior (constant --lr from step 0).")
+    p.add_argument("--lr_warmup_init", type=float, default=None,
+                   help="LR at step 0 when --lr_warmup_steps > 0 (linearly ramped up to --lr). Defaults to "
+                        "--lr / 10 if not set. Ignored when --lr_warmup_steps=0.")
     p.add_argument("--max_steps", type=int, default=100000)
     p.add_argument("--max_time_minutes", type=float, default=15.0)
     p.add_argument("--eval_every", type=int, default=200)
@@ -348,7 +359,19 @@ def main():
     if args.eval_read_step is not None:
         print_budget(args.eval_read_step, current_seq_len, "extrapolation")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    lr_warmup_init = args.lr_warmup_init if args.lr_warmup_init is not None else args.lr / 10
+    if args.lr_warmup_steps > 0:
+        print(f"lr_warmup: {lr_warmup_init:.2e} -> {args.lr:.2e} over {args.lr_warmup_steps} steps, "
+              f"then held constant at {args.lr:.2e}", flush=True)
+
+    def lr_at(step: int) -> float:
+        # experiment-manager (2026-09-14): cumsum seq_len=32 stayed mixed/unstable across the WHOLE
+        # peak-lr sweep {1e-3, 1.5e-3, 3e-3} -- distinct lead from lowering the peak lr itself.
+        if args.lr_warmup_steps <= 0 or step >= args.lr_warmup_steps:
+            return args.lr
+        return lr_warmup_init + (args.lr - lr_warmup_init) * (step / args.lr_warmup_steps)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr_at(0), weight_decay=1e-2)
 
     # Trivial baselines (learn/toy_memory/eval_metrics.py) -- depend on
     # seq_len, so recomputed whenever a --seq_len_curriculum promotion
@@ -408,6 +431,9 @@ def main():
                 print(f"Time budget of {args.max_time_minutes} minutes reached. Stopping.", flush=True)
                 break
 
+        for group in optimizer.param_groups:
+            group["lr"] = lr_at(step)
+
         inputs, targets = sample_batch(args.batch_size, current_seq_len, args.vocab_size,
                                        args.task, device)
         outs, preds = forward_and_predict(model, inputs, targets, args.n_latent,
@@ -430,7 +456,7 @@ def main():
             leak_ref = mode_baseline["token_acc"]
             leak_flag = "" if matched["leak_token_acc"] < leak_ref + 0.15 else \
                 " *** LEAK SUSPECTED (mismatch accuracy far above chance) ***"
-            print(f"step={step:6d} stage_read_step={current_read_step} stage_seq_len={current_seq_len} "
+            print(f"step={step:6d} lr={lr_at(step):.2e} stage_read_step={current_read_step} stage_seq_len={current_seq_len} "
                   f"elapsed={elapsed/60:.2f}m loss={loss.item():.4f} "
                   f"[matched read_step={current_read_step}] "
                   f"token_acc={matched['token_acc']:.4f} exact_match={matched['exact_match']:.4f} "
