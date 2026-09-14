@@ -185,15 +185,21 @@ def main():
     p.add_argument("--curriculum_promote_acc", type=float, default=0.9)
     p.add_argument("--curriculum_min_steps", type=int, default=500)
     p.add_argument("--final_stage_min_steps", type=int, default=1500,
-                   help="experiment-manager (2026-09-13): with a single shared --max_time_minutes/--max_steps "
-                        "budget across all curriculum stages, a run whose early stages happen to converge "
-                        "slowly can exhaust the whole budget before the LAST (target) stage gets a fair shot -- "
-                        "two runs in the same grid landed at different stages (16 vs 24) purely from this, "
-                        "not from a code bug in what gets scored (that part was already correct and clearly "
-                        "labeled via final_stage_seq_len/final_stage_read_step). Fix: once the last curriculum "
-                        "stage is entered, the run is guaranteed at least this many steps in it, EXTENDING "
-                        "past --max_time_minutes/--max_steps if needed (a message is printed when this "
-                        "happens) -- never cut short mid-dwell at the one stage that's actually being measured.")
+                   help="experiment-manager (2026-09-13, generalized same day after the cumsum LR sweep): "
+                        "with a single shared --max_time_minutes/--max_steps budget across all curriculum "
+                        "stages, a run whose early stages converge slowly can exhaust the whole budget before "
+                        "a LATER stage gets a fair shot. First found at the last stage (16 vs 24, purely a "
+                        "budget artifact, not an eval bug -- final_stage_seq_len/final_stage_read_step always "
+                        "labeled the reached stage correctly). Then found to apply to INTERMEDIATE stages too: "
+                        "cumsum at read_step=6 converges cleanly in ~4000 direct steps at seq_len=8 alone (LR "
+                        "ruled out -- the default lr=1e-3 works fine standalone), yet the curriculum run at the "
+                        "same read_step/lr stalled at seq_len=16, never promoting further -- stage 1 alone "
+                        "likely ate most of the shared budget, leaving too little for stage 2. Generalized fix: "
+                        "EVERY curriculum stage (not just the last) is now guaranteed at least this many steps "
+                        "before --max_time_minutes/--max_steps can end the run, extending past them if needed "
+                        "(a message is printed when this happens). Applies per-stage, so a 4-stage curriculum "
+                        "can take up to ~4x this floor in the worst case -- budget accordingly, or lower this "
+                        "for a cheaper/noisier read.")
     p.add_argument("--eval_read_step", type=int, default=None,
                    help="Exp. 1's extrapolation condition: additionally evaluate (never train) at this "
                         "alternate read_step, alongside the matched/current read_step above, at every eval "
@@ -309,38 +315,33 @@ def main():
     start_time = time.time()
     max_time_seconds = args.max_time_minutes * 60
     best_exact = 0.0
-    stage_start_step = 0
-    final_stage_entered_step = None  # set once both curricula reach their last stage
+    stage_start_step = 0  # step at which the CURRENT (read_step, seq_len) combo began -- reset on every promotion
     model.train()
-
-    def at_final_stage():
-        return stage_idx == len(stages) - 1 and seq_stage_idx == len(seq_stages) - 1
 
     step = 0
     while True:
         elapsed = time.time() - start_time
-        if final_stage_entered_step is None and at_final_stage():
-            final_stage_entered_step = step
-        final_stage_dwell = (step - final_stage_entered_step) if final_stage_entered_step is not None else 0
-        # Guarantee --final_stage_min_steps once the target stage is reached, even if that
-        # means running past --max_time_minutes/--max_steps -- see --final_stage_min_steps'
-        # help text for why (a slow-to-converge early stage must not eat the final stage's budget).
-        # Only meaningful with an actual curriculum (>1 stage) -- with a single fixed
-        # read_step/seq_len, "the final stage" is the whole run and the user's own
+        stage_dwell = step - stage_start_step
+        # Guarantee --final_stage_min_steps at EVERY curriculum stage, not just the last --
+        # experiment-manager found cumsum (read_step=6) converges cleanly in ~4000 direct
+        # steps at seq_len=8 alone (ruling out LR), yet the curriculum run at the same
+        # read_step/lr stalled at seq_len=16 -- stage 1 alone likely ate most of the shared
+        # budget, leaving too little for stage 2. Extends past --max_time_minutes/--max_steps
+        # if needed -- see --final_stage_min_steps' help text. Only meaningful with an actual
+        # curriculum (>1 stage) -- with a single fixed read_step/seq_len, the user's own
         # --max_steps/--max_time_minutes is already the intended budget, not a floor to override.
         curriculum_active = len(stages) > 1 or len(seq_stages) > 1
-        protecting_final_stage = (curriculum_active and at_final_stage()
-                                  and final_stage_dwell < args.final_stage_min_steps)
-        if step >= args.max_steps and not protecting_final_stage:
+        protecting_stage = curriculum_active and stage_dwell < args.final_stage_min_steps
+        if step >= args.max_steps and not protecting_stage:
             extended_note = f" (extended past the original --max_steps={args.max_steps} to protect the " \
-                            f"final stage's dwell)" if step > args.max_steps else ""
+                            f"current stage's dwell)" if step > args.max_steps else ""
             print(f"Step budget of {step} reached. Stopping.{extended_note}", flush=True)
             break
         if elapsed > max_time_seconds:
-            if protecting_final_stage:
-                if final_stage_dwell == 0:
+            if protecting_stage:
+                if stage_dwell == 0:
                     print(f"Time budget of {args.max_time_minutes} minutes reached, but extending to "
-                          f"guarantee --final_stage_min_steps={args.final_stage_min_steps} at the target "
+                          f"guarantee --final_stage_min_steps={args.final_stage_min_steps} at the current "
                           f"stage (read_step={current_read_step}, seq_len={current_seq_len}).", flush=True)
             else:
                 print(f"Time budget of {args.max_time_minutes} minutes reached. Stopping.", flush=True)
