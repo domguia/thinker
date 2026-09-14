@@ -234,7 +234,22 @@ def evaluate(model, args, device, n_step: int, reveal_mask: torch.Tensor,
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--n_facts", type=int, default=4, help="K distinct (key, value) pairs -- Exp.7's main axis, sweep alongside n_memory")
+    p.add_argument("--n_facts", type=int, default=4, help="K distinct (key, value) pairs -- Exp.7's main axis, sweep alongside n_memory. "
+                        "Ignored if --n_facts_curriculum is set; required otherwise.")
+    p.add_argument("--n_facts_curriculum", default=None,
+                   help="experiment-manager (2026-09-14): after fixing the x_reveal_mask step-0 bug "
+                        "(core/toy_model.py, commit 317545f), a 9-cell LR sweep at n_facts=4 found 0/9 "
+                        "seeds escaping to the genuine solution (vs. 4/15 before the fix, when a shortcut "
+                        "was available) -- consistent with this project's repeated 'the solution is rare "
+                        "in the loss landscape, hard to find from a random init' signature "
+                        "(experiment.log.md, 18 Dec 2023; ToyThinker copy curriculum; Indexed Attention "
+                        "n_facts=64 curriculum), now possibly WORSE since the easy shortcut is gone. Same "
+                        "fix as elsewhere on this project: comma-separated INCREASING n_facts stages (e.g. "
+                        "'2,3,4'), promotes to the next when held-out acc_excl_last crosses "
+                        "--curriculum_promote_acc (acc_excl_last, not raw acc, since acc alone can be "
+                        "inflated by the recency-echo coincidence -- see that metric's docstring). No "
+                        "model resizing needed between stages (ToyThinker's embedding tables don't depend "
+                        "on n_facts/T), just recomputes n_step/T/reveal_mask/baselines per stage.")
     p.add_argument("--n_memory", type=int, default=10000, help="FIFO cap on latents kept in memory -- the axis this task is designed to discriminate")
     p.add_argument("--extra_delay", type=int, default=0,
                    help="extra pure-recurrence compute steps after the query is revealed, before output -- "
@@ -258,6 +273,13 @@ def main():
     p.add_argument("--nlayers", type=int, default=1)
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--curriculum_promote_acc", type=float, default=0.9)
+    p.add_argument("--curriculum_min_steps", type=int, default=500)
+    p.add_argument("--final_stage_min_steps", type=int, default=1500,
+                   help="guarantees at least this many steps at EVERY curriculum stage before "
+                        "--max_time_minutes/--max_steps can end the run (same fix as "
+                        "train_toy_memory.py's flag of the same name, after that script's cumsum "
+                        "curriculum got starved at an intermediate stage by a shared budget).")
     p.add_argument("--max_steps", type=int, default=100000)
     p.add_argument("--max_time_minutes", type=float, default=15.0)
     p.add_argument("--eval_every", type=int, default=200)
@@ -265,58 +287,95 @@ def main():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
 
+    if args.n_facts_curriculum:
+        n_facts_stages = [int(v) for v in args.n_facts_curriculum.split(",")]
+        assert n_facts_stages == sorted(n_facts_stages) and len(set(n_facts_stages)) == len(n_facts_stages), (
+            "--n_facts_curriculum stages must be strictly increasing (start easy/small, end hard/large)"
+        )
+        assert n_facts_stages[-1] == args.n_facts or args.n_facts == 4, (
+            f"--n_facts_curriculum's last stage ({n_facts_stages[-1]}) should match --n_facts "
+            f"({args.n_facts}) if --n_facts was set explicitly -- kept as the single source of truth"
+        )
+    else:
+        n_facts_stages = [args.n_facts]
+
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
-    n_step = args.n_facts + 1 + args.extra_delay
-    T = 2 * args.n_facts + 1
-    reveal_mask = build_reveal_mask(args.n_facts, n_step, T)
-
+    # model-design (2026-09-14): ToyThinker's embedding tables (embd_latent/embd_out_pos) size
+    # off n_latent/max_output_len only, never off T/n_step -- so, unlike train_toy_memory.py's
+    # seq_len_curriculum, no "build for max, use a prefix at early stages" trick is needed here;
+    # the SAME model instance works unchanged as n_facts (hence T/n_step) grows across stages.
     model = ToyThinker(
         vocab_size=args.vocab_size, max_latent=max(args.n_latent, 16),
-        max_input_len=T, max_output_len=1,
+        max_input_len=2 * max(n_facts_stages) + 1, max_output_len=1,
         d_model=args.d_model, nhead=args.nhead, d_hid=args.d_hid, nlayers=args.nlayers,
         n_probe=0, dropout=0.0,
     ).to(device)
-
     n_params = sum(p_.numel() for p_ in model.parameters())
-    ceiling = capacity_ceiling(args.n_facts, args.n_memory, args.vocab_size)
-    print(f"n_facts={args.n_facts} n_memory={args.n_memory} n_step={n_step} T={T} "
-          f"vocab_size={args.vocab_size} params={n_params/1e3:.1f}K", flush=True)
-    print(f"capacity_ceiling: retain_frac={ceiling['retain_frac']:.4f}  "
-          f"predicted_acc={ceiling['predicted_acc']:.4f}  "
-          f"(perfect mechanism should land here -- see module docstring)", flush=True)
-    print(latent_capacity_note(args.n_latent, args.n_facts), flush=True)
-    recency_baseline_acc = recency_echo_predicted_acc(args.n_facts, args.vocab_size)
-    print(f"recency_echo_baseline: predicted_acc_if_always_echoes_last_value={recency_baseline_acc:.4f}  "
-          f"(trivial-shortcut control -- see recency_echo_predicted_acc docstring; the real diagnostic "
-          f"is acc_excl_last/recency_match_excl_last below, not whether acc lands near this number)", flush=True)
+    print(f"n_facts_stages={n_facts_stages} n_memory={args.n_memory} vocab_size={args.vocab_size} "
+          f"params={n_params/1e3:.1f}K", flush=True)
 
-    def target_sampler(n, seed):
-        gen = torch.Generator().manual_seed(seed)
-        _, t, _ = sample_batch(n, args.n_facts, args.vocab_size, "cpu", generator=gen)
-        return t.unsqueeze(1)
+    def setup_stage(n_facts):
+        """Recomputes every n_facts-dependent quantity for a new curriculum stage (or the
+        single fixed stage when no curriculum is used) -- mirrors train_toy_memory.py's
+        compute_baselines(seq_len), called once up front and again on every promotion."""
+        args.n_facts = n_facts  # evaluate()/sample_batch read args.n_facts directly
+        n_step = n_facts + 1 + args.extra_delay
+        T = 2 * n_facts + 1
+        reveal_mask = build_reveal_mask(n_facts, n_step, T)
+        ceiling = capacity_ceiling(n_facts, args.n_memory, args.vocab_size)
+        print(f"stage n_facts={n_facts}: n_step={n_step} T={T}", flush=True)
+        print(f"capacity_ceiling: retain_frac={ceiling['retain_frac']:.4f}  "
+              f"predicted_acc={ceiling['predicted_acc']:.4f}  "
+              f"(perfect mechanism should land here -- see module docstring)", flush=True)
+        print(latent_capacity_note(args.n_latent, n_facts), flush=True)
+        recency_baseline_acc = recency_echo_predicted_acc(n_facts, args.vocab_size)
+        print(f"recency_echo_baseline: predicted_acc_if_always_echoes_last_value={recency_baseline_acc:.4f}  "
+              f"(trivial-shortcut control -- see recency_echo_predicted_acc docstring; the real diagnostic "
+              f"is acc_excl_last/recency_match_excl_last below, not whether acc lands near this number)", flush=True)
 
-    mode_baseline = most_common_token_baseline(target_sampler, args.vocab_size, 1, seed=11111)
-    print(f"trivial baseline -- most_common_value: acc={mode_baseline['token_acc']:.4f}  "
-          f"vocab_chance={mode_baseline['vocab_chance']:.4f}", flush=True)
+        def target_sampler(n, seed):
+            gen = torch.Generator().manual_seed(seed)
+            _, t, _ = sample_batch(n, n_facts, args.vocab_size, "cpu", generator=gen)
+            return t.unsqueeze(1)
+
+        mode_baseline = most_common_token_baseline(target_sampler, args.vocab_size, 1, seed=11111)
+        print(f"trivial baseline -- most_common_value: acc={mode_baseline['token_acc']:.4f}  "
+              f"vocab_chance={mode_baseline['vocab_chance']:.4f}", flush=True)
+        return n_step, T, reveal_mask, ceiling, recency_baseline_acc, mode_baseline
+
+    stage_idx = 0
+    n_step, T, reveal_mask, ceiling, recency_baseline_acc, mode_baseline = setup_stage(n_facts_stages[stage_idx])
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
 
     start_time = time.time()
     max_time_seconds = args.max_time_minutes * 60
     best_acc = 0.0
+    stage_start_step = 0  # step at which the CURRENT n_facts stage began -- reset on every promotion
     model.train()
 
     step = 0
     while True:
         elapsed = time.time() - start_time
-        if step >= args.max_steps:
+        stage_dwell = step - stage_start_step
+        # Guarantee --final_stage_min_steps at EVERY curriculum stage, not just the last --
+        # same fix, same reason, as train_toy_memory.py's flag of the same name.
+        curriculum_active = len(n_facts_stages) > 1
+        protecting_stage = curriculum_active and stage_dwell < args.final_stage_min_steps
+        if step >= args.max_steps and not protecting_stage:
             print(f"Step budget of {step} reached. Stopping.", flush=True)
             break
         if elapsed > max_time_seconds:
-            print(f"Time budget of {args.max_time_minutes} minutes reached. Stopping.", flush=True)
-            break
+            if protecting_stage:
+                if stage_dwell == 0:
+                    print(f"Time budget of {args.max_time_minutes} minutes reached, but extending to "
+                          f"guarantee --final_stage_min_steps={args.final_stage_min_steps} at the current "
+                          f"stage (n_facts={args.n_facts}).", flush=True)
+            else:
+                print(f"Time budget of {args.max_time_minutes} minutes reached. Stopping.", flush=True)
+                break
 
         x, target, _ = sample_batch(args.batch_size, args.n_facts, args.vocab_size, device)
         outs = model(x, target=1, n_latent=args.n_latent, n_step=n_step,
@@ -333,7 +392,7 @@ def main():
 
         if step % args.eval_every == 0:
             ev = evaluate(model, args, device, n_step, reveal_mask)
-            print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={loss.item():.4f} "
+            print(f"step={step:6d} stage_n_facts={args.n_facts} elapsed={elapsed/60:.2f}m loss={loss.item():.4f} "
                   f"acc={ev['acc']:.4f} retained_acc={ev['retained_acc']:.4f} "
                   f"evicted_acc={ev['evicted_acc']:.4f} (predicted_acc={ceiling['predicted_acc']:.4f}) "
                   f"acc_excl_last={ev['acc_excl_last']:.4f} "
@@ -342,10 +401,24 @@ def main():
             if ev["acc"] > best_acc:
                 best_acc = ev["acc"]
 
+            # Promote on acc_excl_last, not raw acc -- raw acc is inflated by the ~1/n_facts
+            # recency-echo coincidence regardless of mechanism (see that metric's docstring),
+            # so it would let a pure shortcut satisfy the promotion criterion.
+            if (stage_idx < len(n_facts_stages) - 1
+                    and step - stage_start_step >= args.curriculum_min_steps
+                    and ev["acc_excl_last"] >= args.curriculum_promote_acc):
+                stage_idx += 1
+                stage_start_step = step
+                best_acc = 0.0
+                n_step, T, reveal_mask, ceiling, recency_baseline_acc, mode_baseline = setup_stage(n_facts_stages[stage_idx])
+                print(f"step={step:6d} CURRICULUM PROMOTE -> n_facts={n_facts_stages[stage_idx]}", flush=True)
+
         step += 1
 
     final = evaluate(model, args, device, n_step, reveal_mask, n_eval=16)
     print("\n---", flush=True)
+    print(f"n_facts_stages:        {n_facts_stages}", flush=True)
+    print(f"final_stage_n_facts:   {args.n_facts} (stage {stage_idx + 1}/{len(n_facts_stages)})", flush=True)
     print(f"final_acc:            {final['acc']:.4f}", flush=True)
     print(f"final_retained_acc:   {final['retained_acc']:.4f}  (should be near 1.0 if the mechanism works at all)", flush=True)
     print(f"final_evicted_acc:    {final['evicted_acc']:.4f}  (should be near vocab_chance={mode_baseline['vocab_chance']:.4f} -- info genuinely gone, not a mechanism failure)", flush=True)
