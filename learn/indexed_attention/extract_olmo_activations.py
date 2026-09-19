@@ -81,15 +81,32 @@ def main() -> None:
               f"\"elapsed_s\": {elapsed:.1f}, \"target_tokens\": {args.target_tokens}}}",
               flush=True)
 
-    for line in open(args.data):
-        if not line.strip():
-            continue
-        buffer_texts.append(json.loads(line)["text"])
-        if len(buffer_texts) >= 4:
-            flush_shard(buffer_texts)
-            buffer_texts = []
-        if total_tokens >= args.target_tokens:
+    # Wraps around the source file if it's exhausted before target_tokens --
+    # the 2700-document corpus this project uses elsewhere hit exactly this
+    # single-pass-exhaustion trap before (train_real_text.py's
+    # LockstepLaneBatcher, 2026-09-14 entry in experiment.log.md); a second
+    # pass over the same docs still gives fresh, real activations (the model
+    # is frozen, not overfitting to anything), just not bit-identical to a
+    # once-through corpus this size -- acceptable for a "get enough
+    # activations to work with" cache, not a training run.
+    epoch = 0
+    while total_tokens < args.target_tokens:
+        epoch += 1
+        any_line = False
+        for line in open(args.data):
+            any_line = True
+            if not line.strip():
+                continue
+            buffer_texts.append(json.loads(line)["text"])
+            if len(buffer_texts) >= 4:
+                flush_shard(buffer_texts)
+                buffer_texts = []
+            if total_tokens >= args.target_tokens:
+                break
+        if not any_line:
+            print(f"WARNING: {args.data} is empty, stopping.")
             break
+        print(f"progress: {{\"epoch\": {epoch}, \"total_tokens\": {total_tokens}}}", flush=True)
     if buffer_texts and total_tokens < args.target_tokens:
         flush_shard(buffer_texts)
 
