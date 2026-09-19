@@ -1022,3 +1022,26 @@ Both re-measured directly on real activations/nearest-neighbor tails (`diagnose_
 **Read**: this is a properly-posed substitutability tail statistic, and it's clean -- **near-duplicate FFN keys are genuinely rare everywhere**, including within a single layer's own 8192 keys (the intra-layer control, which should show the *highest* self-similarity of any comparison, still has essentially 0% of keys with a near-duplicate at `cos > 0.9`). Adjacent layers are mildly more self-similar than distant ones (0.12-0.19 vs 0.084-0.091 mean max-cosine) -- a small, consistent signal in the direction Geva's stratification predicts, but nowhere near "near-duplicates exist to exploit." **This reading survives the correction and can be kept**: a shared/universal-layer memory (S3) cannot be built by deduplication or nearest-neighbor merging -- any real compression there would need to be learned (distillation/projection), not found for free in the raw key geometry.
 
 Full numbers: `runs/olmo_ffn_geometry/result_v2.json`.
+
+## 2026-09-19/20 (nuit) — Piste A LR sweep at d_model=1024: A and C do NOT share an optimal LR, and step-matched != optimization-progress-matched
+
+`pistea_lrsweep_d1024` (A: `n_step=1`, C: main/`n_step=6`, both `d_model=1024`, `tokenizer=lfm2`, `max_steps=1000` matched, 3 seeds/cell), launched to resolve whether the retracted "A beats C, gap widens to 2.39" reading (above) survives a proper LR sweep instead of the shared, unvalidated `lr=3e-4`.
+
+**Wave 1 (`lr` in `{1e-5, 3e-5, 1e-4, 3e-4}`) mean `final_loss`**:
+
+| lr | A (`n_step=1`) | C (`n_step=6`, main) |
+|---|---|---|
+| 1e-5 | 7.014 | 7.761 |
+| 3e-5 | 6.587 | **7.672 -- clean bracketed minimum for C** (worse on both sides: 1e-5 and 1e-4) |
+| 1e-4 | 6.181 | 7.881 |
+| 3e-4 | **6.050 -- best A so far, still at the range's top edge** | 8.691, unstable (one seed 9.289) |
+
+**C's optimum is real and bracketed at `lr=3e-5`** -- not a boundary artifact. **A's optimum is not yet bracketed** (still improving at the range's top edge); wave 2 (`lr` in `{1e-3, 3e-3}`) is resolving it.
+
+**Central finding, independent of A's still-open optimum**: C's best LR (~3e-5) is **roughly 10x lower** than A's (>=3e-4) -- the looped mechanism (`n_step=6`) needs a substantially lower, narrower LR window than the flat baseline (`n_step=1`) at this scale. This on its own explains why the original shared-`lr=3e-4` comparison was invalid (C was unstable at that LR, A was fine).
+
+**[Methodological correction from `model-design`, catches a second confound the step-matching alone didn't remove]**: pairing `max_steps` removes the wall-clock/step-count confound (the original 2026-09-16 issue), but **introduces a different one once the two architectures' optimal LRs differ by an order of magnitude: at matched step count but each at its own optimal LR, the two architectures do not travel the same distance through parameter space.** C at `lr=3e-5` for 1000 steps moves far less than A at `lr=3e-4` for 1000 steps -- so a 1000-step comparison, however carefully LR-tuned, is not actually an apples-to-apples "does the loop help" measurement; it confounds "architecture quality" with "optimization progress made in the same step budget." **This is a limit of the comparison, not a result -- the 1000-step gap (currently 1.62 at each architecture's best-known LR) must not be reported as a negative finding on its own.** The only way to actually settle "does the loop help" is a longer, per-architecture-optimal-LR run where the loss curves either converge, cross, or stay apart -- see the extended-budget follow-up (next entry, queued once A's LR is bracketed).
+
+Not yet concluding anything from this entry (charte d'autonomie: pas de conclusion sur résultat partiel) -- wave 2 still running.
+
+**À arbitrer**: none yet from this thread -- flagged here as a placeholder since the eventual extended-budget read (curves crossing late vs. staying apart) may itself land in "ambiguous, needs a human call" territory depending on what the curves actually do.
