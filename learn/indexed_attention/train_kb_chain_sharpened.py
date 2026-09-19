@@ -46,6 +46,7 @@ from data.kb_chain_retrieval import KBChainDataset
 from core.indexed_thinker_model import Thinker
 from core.indexed_memory import HierarchicalMemory
 from core.layers import RMSNorm
+from core.run_logging import add_run_args, logger_from_args
 
 
 class SharpenedHierarchicalMemory(HierarchicalMemory):
@@ -184,16 +185,20 @@ def main():
     parser.add_argument("--eval_every", type=int, default=500)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    add_run_args(parser)
     args = parser.parse_args()
+    logger = logger_from_args(args)
 
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
     max_facts = args.n_hops + args.n_distractors
-    expected_leaves = args.block_size ** args.depth
-    assert expected_leaves == max_facts * 4, (
-        f"max_facts={max_facts} (-> {max_facts * 4} leaves) doesn't match "
-        f"block_size={args.block_size} ** depth={args.depth} = {expected_leaves}"
+    # N must be a MULTIPLE of block_size**depth, not equal to it -- see
+    # core/indexed_memory.py::HierarchicalMemory.build()'s divisibility fix.
+    divisor = args.block_size ** args.depth
+    assert (max_facts * 4) % divisor == 0, (
+        f"max_facts={max_facts} (-> {max_facts * 4} leaves) is not a multiple of "
+        f"block_size={args.block_size} ** depth={args.depth} = {divisor}"
     )
 
     ds = KBChainDataset(n_hops=args.n_hops, n_distractors=args.n_distractors, vocab_size=args.vocab_size,
@@ -228,6 +233,7 @@ def main():
 
         if step % args.log_every == 0:
             print(f"step {step:5d} loss {loss.item():.4f} elapsed {time.time() - start:.1f}s")
+            logger.progress(step, loss=loss.item())
         if step % args.eval_every == 0:
             acc = evaluate(model, eval_ds, args, device, n_step=args.n_step)
             temp_str = f" temperature={model.memory.temperature.item():.3f}" if args.sharpened else ""
@@ -250,6 +256,19 @@ def main():
         print(f"final_temperature: {model.memory.temperature.item():.4f}")
     print(f"seed:             {args.seed}")
     self_match_diagnostic(model, eval_ds, n_facts=max_facts, device=device)
+
+    logger.finish(
+        summary={"final_acc": final_acc, "best_loss": best_loss_t.item(),
+                 "num_steps": step, "num_params_M": num_params / 1e6,
+                 "sharpened": args.sharpened, "training_seconds": elapsed},
+        # Ce script n'instrumente pas de taux de fuite : son contrôle est le
+        # self_match_diagnostic imprimé juste au-dessus, qui n'est pas réduit
+        # à un scalaire. Déclaré None explicitement plutôt qu'omis, pour que
+        # collect.py signale la lacune au lieu de la masquer.
+        controls={"chance": 1.0 / args.vocab_size,
+                  "margin": final_acc - 1.0 / args.vocab_size,
+                  "leak_check": None},
+    )
 
 
 if __name__ == "__main__":

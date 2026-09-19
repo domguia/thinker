@@ -53,6 +53,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from core.indexed_thinker_model import Thinker
+from core.model_families import resolve_model_name
+from core.run_logging import add_run_args, logger_from_args
 from data.real_text_windows import RealTextWindowDataset
 
 
@@ -175,7 +177,7 @@ def collate_lane_batch(batch_items, pad_id: int):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data", required=True, help="JSONL path, one {'text': ...} per line")
-    p.add_argument("--tokenizer", default="gpt2")
+    p.add_argument("--tokenizer", default="lfm2", help="HF repo id, or a family alias from core/model_families.py (lfm2/olmo/qwen)")
     p.add_argument("--depth", type=int, default=1, help="0 = Baseline C (flat); 1 = the 2026-09-14 default (no index)")
     p.add_argument("--block_size", type=int, default=16)
     p.add_argument("--n_ctx", type=int, default=256, help="must equal block_size**depth")
@@ -206,7 +208,9 @@ def main():
     p.add_argument("--log_every", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    add_run_args(p)
     args = p.parse_args()
+    logger = logger_from_args(args)
 
     # HierarchicalMemory.build() only requires N % block_size**depth == 0
     # (divisibility -- a "forest" of multiple top-level nodes is fine, see
@@ -225,21 +229,27 @@ def main():
     device = torch.device(args.device)
 
     from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(args.tokenizer)
+    tok = AutoTokenizer.from_pretrained(resolve_model_name(args.tokenizer))
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
     pad_id = tok.pad_token_id
 
+    # tok.vocab_size is the BASE vocab size, excluding added/special tokens --
+    # some tokenizers (e.g. Qwen3) assign ids above it to added tokens, so
+    # sizing the embedding table from vocab_size alone crashes with
+    # `IndexError: index out of range in self` the first time such a token
+    # appears in the data. len(tok) is the true total vocab size.
+    vocab_size = len(tok)
     ds = RealTextWindowDataset(args.data, tok, n_ctx=args.n_ctx, t_local=args.t_local,
                                t_tgt=args.t_tgt, stride=args.stride, pad_id=pad_id)
-    print(f"loaded {len(ds.docs)} docs, {len(ds.windows)} windows, vocab_size={tok.vocab_size}", flush=True)
+    print(f"loaded {len(ds.docs)} docs, {len(ds.windows)} windows, vocab_size={vocab_size}", flush=True)
     batcher = LockstepLaneBatcher(ds, n_lanes=args.n_lanes, seed=args.seed)
 
     model = Thinker(
-        vocab_size=tok.vocab_size, d_model=args.d_model, n_register=args.n_register,
+        vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
         disable_kb=args.disable_kb, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
-        stream_dims={"answer": tok.vocab_size},
+        stream_dims={"answer": vocab_size},
         stream_sequence={"answer": True}, max_target_len=args.t_tgt,
     ).to(device)
     n_params = sum(t.numel() for t in model.parameters())
@@ -314,12 +324,23 @@ def main():
             ppl = torch.exp(torch.tensor(mean_loss)).item()
             print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={mean_loss:.4f} ppl={ppl:.2f} "
                   f"active_lanes={int(valid_f.sum().item())}/{args.n_lanes}", flush=True)
+            logger.progress(step, loss=mean_loss, ppl=ppl,
+                            active_lanes=int(valid_f.sum().item()))
         step += 1
 
     print("\n---", flush=True)
     print(f"final_loss: {sum(loss_hist[-50:]) / max(len(loss_hist[-50:]), 1):.4f}", flush=True)
     print(f"num_steps: {step}", flush=True)
     print(f"training_seconds: {time.time() - start_time:.1f}", flush=True)
+
+    # Pas de métrique d'accuracy ici : ce script optimise une perplexité de
+    # langage, donc aucun contrôle trivial n'est exigible (finish() ne les
+    # réclame que pour les métriques de type accuracy).
+    logger.finish(summary={
+        "final_loss": sum(loss_hist[-50:]) / max(len(loss_hist[-50:]), 1),
+        "num_steps": step,
+        "training_seconds": time.time() - start_time,
+    })
 
 
 if __name__ == "__main__":

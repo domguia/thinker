@@ -31,6 +31,7 @@ import torch.nn.functional as F
 
 from data.kb_retrieval import KBRetrievalDataset
 from core.indexed_thinker_model import Thinker
+from core.run_logging import add_run_args, logger_from_args
 from learn.indexed_attention.eval_metrics import (
     prediction_stats, trivial_baselines, format_report,
 )
@@ -191,7 +192,9 @@ def main():
     parser.add_argument("--eval_every", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    add_run_args(parser)
     args = parser.parse_args()
+    logger = logger_from_args(args)
 
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
@@ -205,16 +208,23 @@ def main():
 
     if args.depth == 0:
         # Baseline C: no compression, so block_size must equal n_leaves
-        # exactly (HierarchicalMemory.build() only checks N==block_size**depth
+        # exactly (HierarchicalMemory.build() only checks N%block_size**depth==0
         # when depth>0, so block_size is otherwise unused at depth=0 -- keep
         # it consistent anyway for clarity).
         args.block_size = max_facts * 4
     else:
-        expected_leaves = args.block_size ** args.depth
-        assert expected_leaves == max_facts * 4, (
-            f"max_facts={max_facts} (-> {max_facts * 4} leaves) doesn't match "
-            f"block_size={args.block_size} ** depth={args.depth} = {expected_leaves}; "
-            f"adjust --curriculum/--n_facts/--block_size/--depth so block_size**depth == max_facts*4"
+        # N must be a MULTIPLE of block_size**depth, not equal to it (see
+        # core/indexed_memory.py::HierarchicalMemory.build()'s 2026-09-13
+        # divisibility fix) -- the old strict equality forced the hierarchy
+        # to always reduce to a single top node, making "block_size=4,
+        # one node per fact, no further hierarchy" (depth=1) inexpressible
+        # for n_facts>1. With divisibility, block_size=4 works at every
+        # depth in {1..log4(max_facts*4)} for any max_facts.
+        divisor = args.block_size ** args.depth
+        assert (max_facts * 4) % divisor == 0, (
+            f"max_facts={max_facts} (-> {max_facts * 4} leaves) is not a multiple of "
+            f"block_size={args.block_size} ** depth={args.depth} = {divisor}; "
+            f"adjust --curriculum/--n_facts/--block_size/--depth so leaves % (block_size**depth) == 0"
         )
 
     def make_datasets(n_facts):
@@ -257,6 +267,7 @@ def main():
         if step % args.log_every == 0:
             elapsed = time.time() - start
             print(f"step {step:5d} stage_n_facts={stages[stage_idx]} loss {loss.item():.4f} elapsed {elapsed:.1f}s")
+            logger.progress(step, loss=loss.item(), stage_n_facts=stages[stage_idx])
 
         if step % args.eval_every == 0:
             acc = evaluate(model, eval_ds, args, device)
@@ -296,6 +307,15 @@ def main():
     print(f"pred_in_kb_rate:  {pred_in_kb_rate:.6f}")
     print(f"conditional_chance: {baselines['conditional_chance']:.6f}")
     print(format_report(final_acc, pred_in_kb_rate, baselines, n_hops=1))
+
+    logger.finish(
+        summary={"final_acc": final_acc, "best_loss": best_loss_t.item(),
+                 "final_stage_n_facts": stages[stage_idx], "num_steps": step,
+                 "num_params_M": num_params / 1e6, "training_seconds": elapsed},
+        controls={"chance": baselines["conditional_chance"],
+                  "margin": final_acc - baselines["conditional_chance"],
+                  "leak_check": pred_in_kb_rate},
+    )
 
 
 if __name__ == "__main__":

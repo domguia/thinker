@@ -30,6 +30,7 @@ import torch.nn.functional as F
 
 from data.kb_chain_retrieval import KBChainDataset, KEY_MARK, VAL_MARK
 from core.indexed_thinker_model import Thinker
+from core.run_logging import add_run_args, logger_from_args
 
 
 def build_model(args, total_vocab_size, device):
@@ -231,16 +232,20 @@ def main():
     parser.add_argument("--eval_every", type=int, default=500)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    add_run_args(parser)
     args = parser.parse_args()
+    logger = logger_from_args(args)
 
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
     max_facts = args.n_hops + args.n_distractors
-    expected_leaves = args.block_size ** args.depth
-    assert expected_leaves == max_facts * 4, (
-        f"max_facts={max_facts} (-> {max_facts * 4} leaves) doesn't match "
-        f"block_size={args.block_size} ** depth={args.depth} = {expected_leaves}"
+    # N must be a MULTIPLE of block_size**depth, not equal to it -- see
+    # core/indexed_memory.py::HierarchicalMemory.build()'s divisibility fix.
+    divisor = args.block_size ** args.depth
+    assert (max_facts * 4) % divisor == 0, (
+        f"max_facts={max_facts} (-> {max_facts * 4} leaves) is not a multiple of "
+        f"block_size={args.block_size} ** depth={args.depth} = {divisor}"
     )
     key_pos = key_positions(max_facts).to(device)
 
@@ -288,6 +293,8 @@ def main():
         if step % args.log_every == 0:
             aux_str = f" aux_loss {aux_loss.item():.4f}" if args.attn_supervised else ""
             print(f"step {step:5d} task_loss {task_loss.item():.4f}{aux_str} elapsed {time.time() - start:.1f}s")
+            logger.progress(step, loss=task_loss.item(),
+                            aux_loss=aux_loss.item() if args.attn_supervised else None)
         if step % args.eval_every == 0:
             acc = evaluate(model, eval_ds, args, device)
             print(f"step {step:5d} eval_acc {acc:.4f}")
@@ -307,6 +314,17 @@ def main():
     print(f"attn_supervised:  {args.attn_supervised}")
     print(f"seed:             {args.seed}")
     self_match_diagnostic(model, eval_ds, n_facts=max_facts, device=device)
+
+    logger.finish(
+        summary={"final_acc": final_acc, "best_task_loss": best_loss_t.item(),
+                 "num_steps": step, "num_params_M": num_params / 1e6,
+                 "attn_supervised": args.attn_supervised, "training_seconds": elapsed},
+        # Même remarque que dans train_kb_chain_sharpened.py : le contrôle de
+        # fuite de ce script est le self_match_diagnostic, non scalaire.
+        controls={"chance": 1.0 / args.vocab_size,
+                  "margin": final_acc - 1.0 / args.vocab_size,
+                  "leak_check": None},
+    )
 
 
 if __name__ == "__main__":

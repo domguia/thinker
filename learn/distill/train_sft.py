@@ -35,6 +35,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
+from data.real_text_windows import RealTextWindowDataset
+from core.model_families import resolve_model_name
+from core.run_logging import add_run_args, logger_from_args
+
 
 class JsonlTextDataset(Dataset):
     """Tokenizes "text" and, if teacher_targets is given, attaches that
@@ -110,6 +114,59 @@ def collate(batch, pad_id, k=None):
             teacher_residual=teacher_residual, teacher_mask=teacher_mask,
         )
     return out
+
+
+class RealTextWindowsSFT(Dataset):
+    """Baseline C (spec Sec 9): wraps `data.real_text_windows.RealTextWindowDataset`
+    so a plain (non-Thinker) causal LM is supervised on the EXACT same windows
+    -- same context, same target span -- as `train_real_text.py`'s Thinker runs,
+    instead of `JsonlTextDataset`'s whole-document supervision (which is not a
+    loss-comparable task: full self-attention over a mostly-trivial-to-predict
+    in-block context, vs. a held-out continuation conditioned only on a
+    compressed KB/register representation).
+
+    Per window: `input_ids = cat([kb_tokens, target_input])` (length
+    `n_ctx + t_tgt`); `target_input` already IS the teacher-forced, shifted-by-
+    one input for the target span (see `real_text_windows.py`'s docstring), so
+    concatenating it straight after `kb_tokens` reproduces the same
+    autoregressive alignment a standard HF causal LM expects -- no separate
+    shift needed here, `labels` is set at the SAME index as the token each
+    position should predict (masked to -100 over the KB region) and handled by
+    the existing `model(**batch).loss` path's automatic internal shift.
+    `attention_mask` reuses `kb_leaf_mask` to hide the padded prefix of short
+    documents' context, exactly like Thinker does.
+
+    Every window is a fixed, equal length -- no ragged-batch padding logic
+    needed (unlike `JsonlTextDataset`/`collate`), a plain stack collate
+    suffices (see `collate_real_text_windows`).
+
+    Does NOT carry `R`/register state across windows (`is_first_window` is
+    ignored) -- a plain transformer has no such state, each window is an
+    independent example. This means the Thinker run being compared against can
+    see information beyond its own `n_ctx` tokens (carried over from earlier
+    windows in the same document) that this baseline never can -- a known,
+    deliberate asymmetry (not a bug to fix here), see
+    dev_notes/experiment.log.md's Phase 3 Baselines A/B/C entry.
+    """
+
+    def __init__(self, path, tokenizer, n_ctx, t_local, t_tgt, stride=None):
+        self.ds = RealTextWindowDataset(path, tokenizer, n_ctx=n_ctx, t_local=t_local, t_tgt=t_tgt, stride=stride)
+        self.n_ctx = n_ctx
+        self.t_tgt = t_tgt
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        w = self.ds[idx]
+        input_ids = torch.cat([w["kb_tokens"], w["target_input"]])
+        attention_mask = torch.cat([w["kb_leaf_mask"].long(), torch.ones(self.t_tgt, dtype=torch.long)])
+        labels = torch.cat([torch.full((self.n_ctx,), -100, dtype=torch.long), w["labels"]])
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+
+def collate_real_text_windows(batch):
+    return {k: torch.stack([b[k] for b in batch]) for k in batch[0]}
 
 
 def is_mup_hidden_weight(name):
@@ -289,10 +346,40 @@ def topk_kd_loss(student_logits, teacher_indices, teacher_values, teacher_residu
     return per_token_kl.sum() / denom
 
 
+def evaluate_val(model, val_loader, device, args, width_mult):
+    """Full pass over --val_file/--val_teacher_targets, CE+KD averaged over
+    batches (no grad, eval mode) -- the train-vs-val curve this gives (called
+    every --val_every steps) is what shows WHEN KD memorization starts,
+    rather than just a single post-hoc number (see experiment.log.md).
+    """
+    model.eval()
+    total_ce, total_kd, n_batches = 0.0, 0.0, 0
+    with torch.no_grad():
+        for batch in val_loader:
+            batch = {kk: v.to(device) for kk, v in batch.items()}
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16 and device.type == "cuda"):
+                labels = batch.pop("labels")
+                teacher_indices = batch.pop("teacher_indices")
+                teacher_values = batch.pop("teacher_values")
+                teacher_residual = batch.pop("teacher_residual")
+                teacher_mask = batch.pop("teacher_mask")
+                logits = model(**batch).logits
+                if args.mup:
+                    logits = logits / width_mult
+                ce = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+                kd = topk_kd_loss(logits, teacher_indices, teacher_values, teacher_residual, teacher_mask)
+            total_ce += ce.item()
+            total_kd += kd.item()
+            n_batches += 1
+    model.train()
+    val_ce, val_kd = total_ce / n_batches, total_kd / n_batches
+    return val_ce, val_kd, (1 - args.kd_alpha) * val_ce + args.kd_alpha * val_kd
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train_file", required=True)
-    parser.add_argument("--tokenizer", default="gpt2")
+    parser.add_argument("--tokenizer", default="lfm2", help="HF repo id, or a family alias from core/model_families.py (lfm2/olmo/qwen)")
     parser.add_argument("--base_config", default="gpt2", help="HF model id to source the architecture config from")
     parser.add_argument("--n_layer", type=int, default=None, help="override config n_layer (smaller/faster smoke-test model)")
     parser.add_argument("--n_embd", type=int, default=None)
@@ -319,6 +406,14 @@ def main():
              "vocab-sized table; see apply_mup_init()'s docstring.",
     )
     parser.add_argument("--mup_base_width", type=int, default=64, help="reference n_embd the LR/init multipliers are computed against")
+    parser.add_argument("--bf16", action="store_true",
+                         help="run the forward pass (model + loss) under torch.autocast(dtype=bfloat16). "
+                              "Halves activation/logit memory (unlocks larger --batch_size, especially with "
+                              "the large Teacher-aligned tied vocab head) and lets matmuls use Tensor Cores, "
+                              "making achieved-vs-peak MFU comparisons meaningful (the peak FLOPS figures used "
+                              "in README.md are bf16 Tensor Core numbers -- an fp32 run isn't measuring the same "
+                              "thing). Master weights/optimizer state stay fp32; no GradScaler needed for bf16 "
+                              "(unlike fp16) since it has fp32-like dynamic range.")
     parser.add_argument(
         "--mup_untie_head", action="store_true",
         help="use canonical muP (untied LM head, zero-init) instead of this project's tied-head compromise",
@@ -364,11 +459,39 @@ def main():
              "resume) -- a known simplification, fine for the short validation-slice runs this project uses "
              "so far, revisit if resuming mid-epoch on a full-size dataset ever matters.",
     )
+    parser.add_argument(
+        "--val_file", default=None,
+        help="held-out JSONL (same 'text' field format as --train_file) to periodically evaluate CE/KD loss "
+             "against during training -- a train-vs-val curve over steps, not just a single post-hoc number, "
+             "to see WHEN (if at all) the KD term starts overfitting (see experiment.log.md's memorization "
+             "finding). Requires --val_teacher_targets when --teacher_targets is set (same K/tokenizer).",
+    )
+    parser.add_argument("--val_teacher_targets", default=None, help="precompute_teacher_targets.py .npz output for --val_file")
+    parser.add_argument("--val_every", type=int, default=0, help="if set (and --val_file is set), evaluate on --val_file every N steps")
+    parser.add_argument(
+        "--real_text_windows", action="store_true",
+        help="Baseline C (spec Sec 9, dev_notes/indexed_attention_experiment_plan.md Phase 3): supervise the "
+             "SAME context/target windows as a train_real_text.py Thinker run (via "
+             "data.real_text_windows.RealTextWindowDataset) instead of JsonlTextDataset's whole-document "
+             "supervision -- required for a loss-comparable baseline (see RealTextWindowsSFT's docstring). "
+             "--block_size is then derived as --n_ctx + --t_tgt, not read from --block_size directly. Not "
+             "compatible with --teacher_targets/--val_file yet.",
+    )
+    parser.add_argument("--n_ctx", type=int, default=256, help="--real_text_windows only; must match the Thinker run being compared against")
+    parser.add_argument("--t_local", type=int, default=32, help="--real_text_windows only; passed through to RealTextWindowDataset, not otherwise used by the plain-transformer path")
+    parser.add_argument("--t_tgt", type=int, default=32, help="--real_text_windows only; must match the Thinker run being compared against")
+    parser.add_argument("--stride", type=int, default=None, help="--real_text_windows only; defaults to --t_tgt like RealTextWindowDataset itself")
+    add_run_args(parser)
     args = parser.parse_args()
+    logger = logger_from_args(args)
+    if args.real_text_windows:
+        assert not args.teacher_targets, "--real_text_windows doesn't support --teacher_targets yet"
+        assert not args.val_file, "--real_text_windows doesn't support --val_file yet"
+        args.block_size = args.n_ctx + args.t_tgt  # derived, not read from a user-passed --block_size
 
     torch.manual_seed(args.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(resolve_model_name(args.tokenizer))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -424,13 +547,29 @@ def main():
         mlflow.start_run(run_name=args.run_name)
         mlflow.log_params(run_config)
 
-    train_ds = JsonlTextDataset(args.train_file, tokenizer, args.block_size, teacher_targets=args.teacher_targets)
-    print(f"Train examples: {len(train_ds)}" + (f" (KD against {args.teacher_targets}, K={train_ds.k})" if args.teacher_targets else ""))
-    k = train_ds.k if args.teacher_targets else None
-    train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
-        collate_fn=lambda b: collate(b, tokenizer.pad_token_id, k=k),
-    )
+    if args.real_text_windows:
+        train_ds = RealTextWindowsSFT(args.train_file, tokenizer, args.n_ctx, args.t_local, args.t_tgt, args.stride)
+        print(f"Train windows: {len(train_ds)} (real_text_windows mode, n_ctx={args.n_ctx} t_tgt={args.t_tgt} "
+              f"stride={args.stride if args.stride is not None else args.t_tgt} -> block_size={args.block_size})")
+        k = None
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_real_text_windows)
+    else:
+        train_ds = JsonlTextDataset(args.train_file, tokenizer, args.block_size, teacher_targets=args.teacher_targets)
+        print(f"Train examples: {len(train_ds)}" + (f" (KD against {args.teacher_targets}, K={train_ds.k})" if args.teacher_targets else ""))
+        k = train_ds.k if args.teacher_targets else None
+        train_loader = DataLoader(
+            train_ds, batch_size=args.batch_size, shuffle=True,
+            collate_fn=lambda b: collate(b, tokenizer.pad_token_id, k=k),
+        )
+
+    val_loader = None
+    if args.val_file and args.val_every:
+        val_ds = JsonlTextDataset(args.val_file, tokenizer, args.block_size, teacher_targets=args.val_teacher_targets)
+        val_loader = DataLoader(
+            val_ds, batch_size=args.batch_size, shuffle=False,
+            collate_fn=lambda b: collate(b, tokenizer.pad_token_id, k=k),
+        )
+        print(f"Val examples: {len(val_ds)} (evaluated every {args.val_every} steps)")
 
     if args.mup:
         optimizer = torch.optim.AdamW(build_mup_param_groups(model, args.lr, width_mult), weight_decay=args.weight_decay)
@@ -452,24 +591,25 @@ def main():
     while not done:
         for batch in train_loader:
             batch = {k: v.to(device) for k, v in batch.items()}
-            if args.teacher_targets:
-                labels = batch.pop("labels")
-                teacher_indices = batch.pop("teacher_indices")
-                teacher_values = batch.pop("teacher_values")
-                teacher_residual = batch.pop("teacher_residual")
-                teacher_mask = batch.pop("teacher_mask")
-                logits = model(**batch).logits
-                if args.mup:
-                    logits = logits / width_mult  # muP readout output scaling
-                ce = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
-                kd = topk_kd_loss(logits, teacher_indices, teacher_values, teacher_residual, teacher_mask)
-                loss = (1 - args.kd_alpha) * ce + args.kd_alpha * kd
-            elif args.mup:
-                labels = batch.pop("labels")
-                logits = model(**batch).logits / width_mult  # muP readout output scaling
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
-            else:
-                loss = model(**batch).loss
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16):
+                if args.teacher_targets:
+                    labels = batch.pop("labels")
+                    teacher_indices = batch.pop("teacher_indices")
+                    teacher_values = batch.pop("teacher_values")
+                    teacher_residual = batch.pop("teacher_residual")
+                    teacher_mask = batch.pop("teacher_mask")
+                    logits = model(**batch).logits
+                    if args.mup:
+                        logits = logits / width_mult  # muP readout output scaling
+                    ce = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+                    kd = topk_kd_loss(logits, teacher_indices, teacher_values, teacher_residual, teacher_mask)
+                    loss = (1 - args.kd_alpha) * ce + args.kd_alpha * kd
+                elif args.mup:
+                    labels = batch.pop("labels")
+                    logits = model(**batch).logits / width_mult  # muP readout output scaling
+                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+                else:
+                    loss = model(**batch).loss
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -482,12 +622,20 @@ def main():
                 else:
                     print(f"step {step} loss {loss.item():.4f}")
                     step_metrics = {"loss": loss.item()}
+                logger.progress(step, **step_metrics)
                 if args.wandb:
                     wandb.log(step_metrics, step=step)
                 if args.mlflow:
                     mlflow.log_metrics(step_metrics, step=step)
             if args.save_dir and args.checkpoint_every and step % args.checkpoint_every == 0:
                 save_checkpoint(os.path.join(args.save_dir, "checkpoint.pt"), model, optimizer, step, losses, args, width_mult, depth_mult)
+            if val_loader is not None and (step % args.val_every == 0 or step == 1):
+                val_ce, val_kd, val_loss = evaluate_val(model, val_loader, device, args, width_mult)
+                print(f"step {step} VAL loss {val_loss:.4f} (ce {val_ce:.4f} kd {val_kd:.4f})")
+                if args.wandb:
+                    wandb.log({"val_loss": val_loss, "val_ce": val_ce, "val_kd": val_kd}, step=step)
+                if args.mlflow:
+                    mlflow.log_metrics({"val_loss": val_loss, "val_ce": val_ce, "val_kd": val_kd}, step=step)
             elapsed_min = (time.time() - start) / 60
             if step >= args.max_steps or elapsed_min >= args.max_time_minutes:
                 done = True
@@ -501,6 +649,9 @@ def main():
     print(f"num_params_M:     {num_params / 1e6:.2f}")
 
     final_metrics = {"best_loss": min(losses), "training_seconds": elapsed, "num_steps": step}
+    # Objectif de distillation : pertes uniquement, pas d'accuracy — donc pas
+    # de contrôles triviaux exigibles.
+    logger.finish(summary=final_metrics)
     if args.wandb:
         wandb.log(final_metrics)
         wandb.finish()

@@ -16,6 +16,8 @@ import time
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
+from core.model_families import resolve_model_name
+
 CHATML_TEMPLATE = "<|im_start|>user\nContext:\n{context}\n\nQuestion: {question}<|im_end|>\n<|im_start|>assistant\n{answer}<|im_end|>"
 
 
@@ -57,7 +59,7 @@ def main():
     parser.add_argument("--dataset", default="hotpotqa/hotpot_qa")
     parser.add_argument("--config", default="distractor")
     parser.add_argument("--split", default="train")
-    parser.add_argument("--tokenizer", default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--tokenizer", default="lfm2", help="HF repo id, or a family alias from core/model_families.py (lfm2/olmo/qwen)")
     parser.add_argument("--n_samples", type=int, default=100, help="questions to pull via streaming")
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--val_ratio", type=float, default=0.1)
@@ -67,8 +69,9 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    print(f"Loading tokenizer {args.tokenizer} ...")
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    tokenizer_name = resolve_model_name(args.tokenizer)
+    print(f"Loading tokenizer {tokenizer_name} ...")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
     print(f"Streaming {args.dataset}/{args.config} split={args.split} (pulling only {args.n_samples} questions) ...")
     ds = load_dataset(args.dataset, args.config, split=args.split, streaming=True)

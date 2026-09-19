@@ -18,6 +18,8 @@ import time
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
+from core.model_families import resolve_model_name
+
 SOURCES = [
     {"name": "wikitext-103", "dataset": "Salesforce/wikitext", "config": "wikitext-103-raw-v1", "split": "train"},
     {"name": "tinystories", "dataset": "roneneldan/TinyStories", "config": None, "split": "train"},
@@ -70,7 +72,7 @@ def collect_from_source(source, tokenizer, n_samples, max_length, min_length, ra
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tokenizer", default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--tokenizer", default="lfm2", help="HF repo id, or a family alias from core/model_families.py (lfm2/olmo/qwen)")
     parser.add_argument("--n_samples", type=int, default=100, help="documents to pull PER SOURCE via streaming")
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--min_length", type=int, default=32)
@@ -81,8 +83,9 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    print(f"Loading tokenizer {args.tokenizer} ...")
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    tokenizer_name = resolve_model_name(args.tokenizer)
+    print(f"Loading tokenizer {tokenizer_name} ...")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
     examples = []
     for source in SOURCES:

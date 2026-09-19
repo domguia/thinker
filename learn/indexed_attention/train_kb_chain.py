@@ -30,6 +30,7 @@ import torch.nn.functional as F
 
 from data.kb_chain_retrieval import KBChainDataset
 from core.indexed_thinker_model import Thinker
+from core.run_logging import add_run_args, logger_from_args
 from learn.indexed_attention.eval_metrics import (
     prediction_stats, trivial_baselines, format_report,
 )
@@ -45,11 +46,14 @@ def build_model(args, total_vocab_size, device):
         n_slots=args.n_slots,
         n_head=args.n_head,
         sm_cap=args.sm_cap,
+        disable_sm=args.disable_sm,
         use_ff=args.use_ff,
         ff_hidden_mult=args.ff_hidden_mult,
         detach_sm_keys=args.detach_sm_keys,
         level_dropout_p=args.level_dropout_p,
         decouple_kv=not args.shared_kv_pooling,
+        pool_n_head=args.pool_n_head,
+        k_dim=args.k_dim,
     ).to(device)
 
 
@@ -115,7 +119,14 @@ def main():
                               "parent K and parent V with the SAME softmax. That variant cannot "
                               "represent a key->value association and was the root cause of the "
                               "n_hops>=2 plateau -- use it only to reproduce the old behavior.")
+    parser.add_argument("--pool_n_head", type=int, default=1,
+                         help="multi-head pooling in LevelCompressor (spec 5.1bis); default 1 = unchanged behavior")
+    parser.add_argument("--k_dim", type=int, default=None,
+                         help="asymmetric dim(K) != dim(V) (spec 5.4); default None = symmetric, == d_model")
     parser.add_argument("--sm_cap", type=int, default=None)
+    parser.add_argument("--disable_sm", action="store_true",
+                         help="ABLATION: skip the short-term-memory buffer entirely (write and read), "
+                              "stronger test than --sm_cap 1 -- does the SM contribute anything beyond R itself?")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--max_steps", type=int, default=200000)
@@ -127,7 +138,9 @@ def main():
     parser.add_argument("--extrapolate_n_steps", default=None,
                          help="comma-separated N_step_test values > training N_step to probe in-memory "
                               "after training finishes, no checkpoint needed (e.g. '8,16,24')")
+    add_run_args(parser)
     args = parser.parse_args()
+    logger = logger_from_args(args)
 
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
@@ -142,10 +155,15 @@ def main():
     if args.depth == 0:
         args.block_size = max_facts * 4
     else:
-        expected_leaves = args.block_size ** args.depth
-        assert expected_leaves == max_facts * 4, (
-            f"max_facts={max_facts} (-> {max_facts * 4} leaves) doesn't match "
-            f"block_size={args.block_size} ** depth={args.depth} = {expected_leaves}"
+        # N must be a MULTIPLE of block_size**depth, not equal to it (see
+        # core/indexed_memory.py::HierarchicalMemory.build()'s 2026-09-13
+        # divisibility fix) -- strict equality forces the hierarchy down to
+        # a single top node, making e.g. max_facts=8/block_size=4/depth=2
+        # (a genuine 2-level, 2-root-node hierarchy) inexpressible.
+        divisor = args.block_size ** args.depth
+        assert (max_facts * 4) % divisor == 0, (
+            f"max_facts={max_facts} (-> {max_facts * 4} leaves) is not a multiple of "
+            f"block_size={args.block_size} ** depth={args.depth} = {divisor}"
         )
 
     def make_datasets(n_hops):
@@ -190,6 +208,7 @@ def main():
         if step % args.log_every == 0:
             elapsed = time.time() - start
             print(f"step {step:5d} stage_n_hops={stages[stage_idx]} n_step={n_step} loss {loss.item():.4f} elapsed {elapsed:.1f}s")
+            logger.progress(step, loss=loss.item(), stage_n_hops=stages[stage_idx], n_step=n_step)
 
         if step % args.eval_every == 0:
             acc = evaluate(model, eval_ds, args, device, n_step=n_step_eval)
@@ -226,6 +245,16 @@ def main():
     print(f"pred_in_kb_rate:  {pred_in_kb_rate:.6f}")
     print(f"conditional_chance: {baselines['conditional_chance']:.6f}")
     print(format_report(final_acc, pred_in_kb_rate, baselines, n_hops=stages[stage_idx]))
+
+    logger.finish(
+        summary={"final_acc": final_acc, "best_loss": best_loss_t.item(),
+                 "final_stage_n_hops": stages[stage_idx], "n_step_eval": n_step_eval,
+                 "num_steps": step, "num_params_M": num_params / 1e6,
+                 "training_seconds": elapsed},
+        controls={"chance": baselines["conditional_chance"],
+                  "margin": final_acc - baselines["conditional_chance"],
+                  "leak_check": pred_in_kb_rate},
+    )
 
     if args.extrapolate_n_steps:
         # In-memory extrapolation probe (thinker-e9's suggestion): no

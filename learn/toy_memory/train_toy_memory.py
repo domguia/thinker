@@ -90,6 +90,7 @@ import torch
 import torch.nn as nn
 
 from core.toy_model import ToyThinker, all_losses_compute
+from core.run_logging import add_run_args, logger_from_args
 from learn.toy_memory.eval_metrics import (
     token_accuracy, exact_match_rate, per_position_accuracy,
     copy_input_baseline, most_common_token_baseline, format_report, capacity_budget,
@@ -288,7 +289,9 @@ def main():
     p.add_argument("--eval_every", type=int, default=200)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    add_run_args(p)
     args = p.parse_args()
+    logger = logger_from_args(args)
 
     if args.read_step_curriculum:
         stages = [int(x) for x in args.read_step_curriculum.split(",")]
@@ -461,6 +464,12 @@ def main():
                   f"[matched read_step={current_read_step}] "
                   f"token_acc={matched['token_acc']:.4f} exact_match={matched['exact_match']:.4f} "
                   f"leak_check={matched['leak_token_acc']:.4f}{leak_flag}", flush=True)
+            logger.progress(step, loss=loss.item(), lr=lr_at(step),
+                            token_acc=matched["token_acc"],
+                            exact_match=matched["exact_match"],
+                            leak_check=matched["leak_token_acc"],
+                            stage_read_step=current_read_step,
+                            stage_seq_len=current_seq_len)
 
             if args.eval_read_step is not None:
                 extrap = evaluate(model, args, device, read_step=args.eval_read_step, bos_id=bos_id,
@@ -520,6 +529,22 @@ def main():
     print(f"final_exact_match: {final['exact_match']:.4f}", flush=True)
     print(f"training_seconds:  {elapsed:.1f}", flush=True)
     print(f"num_steps:         {step}", flush=True)
+
+    logger.finish(
+        summary={"final_exact_match": final["exact_match"],
+                 "final_token_acc": final["token_acc"],
+                 "best_exact_match": best_exact,
+                 "final_stage_read_step": current_read_step,
+                 "final_stage_seq_len": current_seq_len,
+                 "num_steps": step, "training_seconds": elapsed},
+        # leak_ref, pas vocab_chance : add/subtract a une moitié déterministe
+        # que n'importe quel prédicteur obtient gratuitement, et vocab_chance
+        # seul faisait crier au LEAK sur tous les runs (voir le commentaire de
+        # leak_flag dans la boucle d'éval).
+        controls={"chance": leak_ref,
+                  "margin": final["token_acc"] - leak_ref,
+                  "leak_check": final["leak_token_acc"]},
+    )
 
     if args.eval_read_step is not None:
         extrap_final = evaluate(model, args, device, read_step=args.eval_read_step, bos_id=bos_id,

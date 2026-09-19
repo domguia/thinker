@@ -61,12 +61,14 @@ was designed to produce but structurally couldn't.
 """
 
 import argparse
+import math
 import time
 
 import torch
 import torch.nn.functional as F
 
 from core.toy_model import ToyThinker
+from core.run_logging import add_run_args, logger_from_args
 from learn.toy_memory.eval_metrics import most_common_token_baseline
 
 
@@ -285,7 +287,9 @@ def main():
     p.add_argument("--eval_every", type=int, default=200)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    add_run_args(p)
     args = p.parse_args()
+    logger = logger_from_args(args)
 
     if args.n_facts_curriculum:
         n_facts_stages = [int(v) for v in args.n_facts_curriculum.split(",")]
@@ -392,6 +396,10 @@ def main():
 
         if step % args.eval_every == 0:
             ev = evaluate(model, args, device, n_step, reveal_mask)
+            logger.progress(step, loss=loss.item(), acc=ev["acc"],
+                            retained_acc=ev["retained_acc"],
+                            acc_excl_last=ev.get("acc_excl_last"),
+                            stage_n_facts=args.n_facts)
             print(f"step={step:6d} stage_n_facts={args.n_facts} elapsed={elapsed/60:.2f}m loss={loss.item():.4f} "
                   f"acc={ev['acc']:.4f} retained_acc={ev['retained_acc']:.4f} "
                   f"evicted_acc={ev['evicted_acc']:.4f} (predicted_acc={ceiling['predicted_acc']:.4f}) "
@@ -404,9 +412,16 @@ def main():
             # Promote on acc_excl_last, not raw acc -- raw acc is inflated by the ~1/n_facts
             # recency-echo coincidence regardless of mechanism (see that metric's docstring),
             # so it would let a pure shortcut satisfy the promotion criterion.
+            # At n_facts=1 there is structurally no "excl_last" episode (the query always
+            # targets the only fact ever written), so acc_excl_last is nan and `nan >= threshold`
+            # is always False -- a curriculum starting at n_facts=1 could never promote past
+            # stage 0 without this fallback. acc alone is safe here specifically because the
+            # shortcut/genuine-retrieval distinction acc_excl_last exists to make doesn't apply
+            # when there is only one fact to begin with.
+            promote_metric = ev["acc"] if math.isnan(ev["acc_excl_last"]) else ev["acc_excl_last"]
             if (stage_idx < len(n_facts_stages) - 1
                     and step - stage_start_step >= args.curriculum_min_steps
-                    and ev["acc_excl_last"] >= args.curriculum_promote_acc):
+                    and promote_metric >= args.curriculum_promote_acc):
                 stage_idx += 1
                 stage_start_step = step
                 best_acc = 0.0
@@ -441,6 +456,24 @@ def main():
     print(f"best_acc:             {best_acc:.4f}", flush=True)
     print(f"training_seconds:     {elapsed:.1f}", flush=True)
     print(f"num_steps:            {step}", flush=True)
+
+    logger.finish(
+        summary={"final_acc": final["acc"],
+                 "final_retained_acc": final["retained_acc"],
+                 "final_evicted_acc": final["evicted_acc"],
+                 "acc_excl_last": final["acc_excl_last"],
+                 "recency_match_excl_last": final["recency_match_excl_last"],
+                 "predicted_acc": ceiling["predicted_acc"],
+                 "best_acc": best_acc, "final_stage_n_facts": args.n_facts,
+                 "num_steps": step, "training_seconds": elapsed},
+        # Ici le raccourci de récence est le vrai risque de surinterprétation,
+        # pas une fuite d'entrée : acc_excl_last au niveau du hasard avec un
+        # recency_match_excl_last proche de 1.0 signe le raccourci. C'est donc
+        # lui qui sert de leak_check.
+        controls={"chance": mode_baseline["vocab_chance"],
+                  "margin": final["acc_excl_last"] - mode_baseline["vocab_chance"],
+                  "leak_check": final["recency_match_excl_last"]},
+    )
 
 
 if __name__ == "__main__":
