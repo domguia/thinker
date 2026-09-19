@@ -24,6 +24,13 @@ MODEL_FAMILIES = {
         # verifie directement identique a OLMo-2-1124-7B et OLMo-2-1124-13B le 2026-09-20 (dictionnaires
         # identiques) -- ces tailles restent des Teachers surs pour du KD aligne sur ce tokenizer.
     "qwen": "Qwen/Qwen3-0.6B",
+    "qwen_big": "Qwen/Qwen3.8-27B-FP8",  # NOT the same tokenizer family as "qwen" -- verifie
+        # directement le 2026-09-20 (dev_notes/experiments/distillation.md) : "qwen" (Qwen3-0.6B)
+        # a vocab_size=151643/len=151669, ce Teacher a vocab_size=248044/len=248077, ids differents
+        # sur une phrase test -- incompatibilite totale, pas un simple ecart de tokens speciaux
+        # comme lfm2/lfm2-thinking. C'est le Teacher deja utilise pour la distillation Qwen de ce
+        # projet (§13.1 de la spec) ; tout script KD visant ce Teacher doit passer explicitement
+        # "--tokenizer qwen_big", jamais l'alias "qwen" par defaut.
 }
 
 
