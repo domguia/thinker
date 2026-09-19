@@ -310,3 +310,9 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 ## 2026-09-20 — Bug reel: prepare_reasoning_data.py pas synchronise (commit d844928 avec champ `answer` manquant sur Rennes)
 - Constat : le premier `prepare_reasoning_data.py` transfere/lance sur Rennes etait perime (n'avait pas le champ `answer`/`solution` ajoute par le commit `d844928`) -- exactement l'avertissement de model-design ("ReasoningPromptDataset skip silencieusement tout exemple sans `answer`"). Resultat : `train_prompt_response.py --dataset_type reasoning` a charge 0 exemple, crash immediat (`num_samples=0`).
 - Fix : script re-transfere depuis le repo local (a jour), ancien train/val renomme en `.bak`, regenere depuis zero. Lecon : toujours verifier `git log --oneline` du script cote local avant de le transferer/lancer sur le cluster si un pair a mentionne un commit recent dessus -- ne pas supposer qu'un transfert precedent couvre les changements suivants.
+
+## 2026-09-20 — KD precompute LFM2-1.2B (val split): 2 bugs mineurs corriges, tourne
+- Nancy `graffiti-3` (100% inactif au moment du lancement -- pistea_ext2 termine), GPU0=reasoning, GPU1=retrieval.
+- Bug 1 : `accelerate` absent de l'env `teacher311` sur Nancy (jamais eu besoin avant sur ce site) -- installe.
+- Bug 2 : OOM sur reasoning a `--max_length 4096` (traces longues, ~2591 tokens moyenne, RTX 2080 Ti 11Go) -- reduit a `--max_length 2048`, tourne sans OOM (~1.4 ex/s).
+- Retrieval (hotpotqa, max_length=4096 inchange) tourne sans probleme (~1.9 ex/s) -- contextes plus courts.
