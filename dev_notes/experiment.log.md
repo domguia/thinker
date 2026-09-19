@@ -1,5 +1,19 @@
 # Experiment Log
 
+## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
+
+**En cours de rédaction, mis à jour au fil de la nuit -- lire la version la plus récente en tête de ce fichier au réveil.**
+
+Réservations posées avant expiration :
+- GPU : job 4121144 (7 GPU, abacus11/17/18, jusqu'à ~20:54) -- relève posée job **4121241** (7 GPU, cluster élargi abacus3/10/11/17/18/19/20/21/22/25/29, besteffort, walltime 12h, soumis ~15:38, Waiting).
+- CPU : job 4121204 (paradoxe-27, jusqu'à ~21:21) -- relève posée job **4121245** (paradoxe, host=2, walltime 14h, queue normale, soumis ~15:39, Waiting).
+
+Fils lancés ce soir (voir entrées datées ci-dessous pour le détail) : I1 (11/12, 1 cellule manquante en file), I4 (fait), Piste A step-matched (fait, **partiellement rétracté** -- LR non revalidé à d_model=1024), A1/A2 (fait, v1 rétracté pour artefact de mesure, v2 corrigé), I3 (en cours), I2 (en cours), I5 (en file), B1 (en cours, 20 graines). Balayage LR Piste A à d_model=1024 (item [1] de la file de nuit) lancé ~15:38.
+
+**Points "à arbitrer" (à trancher par un humain, pas décidés seuls cette nuit)** -- liste vide pour l'instant, sera remplie au fil des résultats ambigus.
+
+---
+
 ## 05 Dec 2023
 We got the error below only on GPU, the code worked well on CPU!
 ```RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.cuda.FloatTensor [27, 4, 606, 8]], which is output 0 of AsStridedBackward0, is at version 19; expected version 18 instead. Hint: the backtrace further above shows the operation that failed to compute its gradient. The variable in question was changed in there or anywhere later. Good luck!```
