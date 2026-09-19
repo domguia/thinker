@@ -48,6 +48,60 @@ class TestHierarchicalMemoryShapes(unittest.TestCase):
             mem.build(leaves, source_ids)
 
 
+class TestBuildStatic(unittest.TestCase):
+    """
+    Phase 12 (dev_notes/indexed_attention_experiment_plan.md, S0/curriculum
+    ffn2attn): build_static injects a pre-computed (K, V) level directly,
+    bypassing k_proj/v_proj/compressor -- needed because build() always
+    derives K and V from the SAME leaf_embeddings via two learned
+    projections, which cannot express two independent fixed matrices
+    (K=W_in^T, V=W_out) as S0's exact FFN->attention conversion requires.
+    """
+
+    def test_shapes_and_attend(self):
+        d, B, S, Tq = 8, 2, 5, 3
+        mem = HierarchicalMemory(d_model=d, block_size=4, depth=0)
+        K = torch.randn(B, S, d)
+        V = torch.randn(B, S, d)
+        mem.build_static(K, V)
+        self.assertEqual(len(mem._levels_k), 1)
+        self.assertEqual(mem._levels_k[0].shape, (B, S, d))
+        out = mem.attend(torch.randn(B, Tq, d))
+        self.assertEqual(out.shape, (B, Tq, d))
+
+    def test_depth_gt_zero_raises(self):
+        mem = HierarchicalMemory(d_model=8, block_size=4, depth=1)
+        K = torch.randn(1, 5, 8)
+        V = torch.randn(1, 5, 8)
+        with self.assertRaises(AssertionError):
+            mem.build_static(K, V)
+
+    def test_mask_excludes_padded_entries(self):
+        # a fully-masked-out static entry must receive zero attention weight,
+        # same masking convention as build()'s leaf_mask.
+        d = 8
+        mem = HierarchicalMemory(d_model=d, block_size=4, depth=0)
+        K = torch.zeros(1, 2, d)
+        V = torch.stack([torch.ones(d), torch.full((d,), 100.0)], dim=0).unsqueeze(0)
+        mask = torch.tensor([[True, False]])
+        mem.build_static(K, V, mask=mask)
+        out = mem.attend(torch.randn(1, 1, d))
+        # only the unmasked entry (value=1) can contribute -> output must equal it exactly
+        torch.testing.assert_close(out[0, 0], torch.ones(d))
+
+    def test_does_not_affect_existing_build_path(self):
+        # build_static must be purely additive: a fresh instance's build()/attend()
+        # path is unaffected by build_static's existence.
+        d, block_size, depth, B = 8, 4, 1, 2
+        N = block_size ** depth
+        mem = HierarchicalMemory(d, block_size, depth)
+        leaves = torch.randn(B, N, d)
+        source_ids = torch.zeros(B, N, dtype=torch.long)
+        mem.build(leaves, source_ids)
+        out = mem.attend(torch.randn(B, 3, d))
+        self.assertEqual(out.shape, (B, 3, d))
+
+
 class TestLeafPaddingMask(unittest.TestCase):
     def test_no_nan_with_fully_masked_blocks(self):
         # curriculum use case: only the first block is real, the rest is padding

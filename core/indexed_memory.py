@@ -304,6 +304,42 @@ class HierarchicalMemory(nn.Module):
         self._levels_v = levels_v
         self._levels_mask = levels_mask
 
+    def build_static(self, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor = None) -> None:
+        """
+        Phase 12 (dev_notes/indexed_attention_experiment_plan.md, S0/curriculum
+        ffn2attn) escape hatch: injects a single, pre-computed level of (K, V)
+        pairs directly, bypassing `k_proj`/`v_proj`/`compressor` entirely.
+
+        `build()` always derives K and V from the SAME `leaf_embeddings` tensor
+        via two learned projections -- correct when K/V come from a shared
+        embedding space, but S0's exact FFN->attention conversion needs K and V
+        to be two INDEPENDENT fixed matrices sharing only a neuron index
+        (`K = W_in^T`/`W_gate^T`, `V = W_out`/`W_down`, spec §"Conversion
+        analytique sans Softmax") -- not expressible as two projections of one
+        input. `attend()` only ever reads `self._levels_k/_v/_mask`, so this is
+        purely additive: no change to any existing `build()` caller or shape.
+
+        K: (B, S, k_dim), V: (B, S, d_model) -- already in this memory's K/V
+            spaces (no k_proj/v_proj/source_bias applied). For S0's frozen,
+            per-layer FFN-as-KB use case, B is typically 1 (broadcast by the
+            caller) and S = d_ff (one static (k_i, v_i) pair per FFN neuron).
+        mask: optional (B, S) bool, True = real entry -- same convention as
+            `build`'s `leaf_mask`.
+        depth must be 0 for this path (a single level, no compressor tree) --
+        asserted below since compressing static, weight-derived K/V through
+        the leaf-embedding compressor would silently reintroduce a learned
+        transform on top of what is meant to stay an exact/frozen conversion.
+        """
+        assert self.depth == 0, (
+            "build_static is for a single static K/V level (S0's exact FFN "
+            "conversion); depth>0 would run these through LevelCompressor, "
+            "which expects leaf embeddings, not frozen weight-derived K/V"
+        )
+        B, S, _ = K.shape
+        self._levels_k = [K]
+        self._levels_v = [V]
+        self._levels_mask = [mask if mask is not None else torch.ones(B, S, dtype=torch.bool, device=K.device)]
+
     def attend(self, query_input: torch.Tensor) -> torch.Tensor:
         """
         query_input: (B, T, d) raw register state (pre Q-projection).
