@@ -247,3 +247,9 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 - Constat: `tools/g5kstat.sh -g kwollect` sans restriction de site a timeout (>100s) sur un scan multi-site complet -- probablement un site sans job actif qui traîne côté SSH/API. Restreint à `-s rennes` (là où les ressources actives sont), fonctionne correctement.
 - Result: charge CPU réelle correcte pour les 3 nœuds actifs, **0 claim orphelin détecté** -- cohérent, rien de cassé sur Rennes en ce moment. Confirme indépendamment le travail de `research-opmization` (3 bugs déjà trouvés/corrigés : scan local vs distant, FQDN vs nom court, portée `-j` insuffisante pour la détection d'orphelins).
 - Notes / follow-up: le timeout en scan multi-site complet (sans `-s`) reste à investiguer -- signalé à `research-opmization`, pas encore un mode par défaut de `/g5kstat` tant que ce point n'est pas réglé.
+
+## 2026-09-19/20 (nuit) — Sondage lecture-seule des 7 sites jamais vérifiés cette session
+- Site/cluster: lyon, grenoble, toulouse, lille, strasbourg, sophia, nantes (API status, lecture seule, aucune action)
+- Resources: aucune -- juste `soft` status par nœud via l'API Grid'5000
+- Result: nœuds `free` (non exhaustif, à vérifier lesquels sont GPU avant de réserver) -- lyon 57/147, toulouse 20/22, lille 5/30, strasbourg 5/19, nantes 21/74, grenoble 26/156, sophia 57/155 (+1 free_busy). Grenoble et Sophia ont un vrai taux `busy_besteffort` notable (34 et 25) -- signe que d'autres utilisateurs besteffort sont déjà actifs là, pas forcément un signal négatif pour nous mais à noter.
+- Notes / follow-up: ce sondage ne distingue pas GPU vs CPU par cluster -- avant de réserver sur un site jamais utilisé cette session, vérifier `.../clusters/<cluster>/nodes.json` pour `gpu_devices` et la compute capability (règle déjà dans la skill grid5000 -- Pascal/Volta incompatibles avec l'env torch actuel). Pas d'action prise, juste l'information demandée par model-design.
