@@ -48,6 +48,7 @@ Phase 3), not blocking.
 import argparse
 import time
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -55,6 +56,67 @@ from torch.utils.data import DataLoader
 from core.indexed_thinker_model import Thinker
 from core.model_families import resolve_model_name
 from core.run_logging import add_run_args, logger_from_args
+from learn.distill.train_sft import topk_kd_loss
+
+
+class TeacherTargets:
+    """Loads a precompute_teacher_targets.py .npz and slices per-window Top-K
+    targets aligned to RealTextWindowDataset windows.
+
+    Row-alignment convention (dev_notes/experiments/real_text_baselines.md,
+    2026-09-20 design note -- derived, not assumed): the Teacher's row q
+    (0-indexed within a document) is `out.logits[0][q]`, the standard causal-LM
+    convention of predicting token q+1 having seen tokens 0..q. A Thinker
+    window starting at `window_pos` feeds `target_input[t] = ids[window_pos+t-1]`
+    as its query at step t and predicts `labels[t] = ids[window_pos+t]` -- so
+    the matching Teacher row for step t is `q = window_pos + t - 1`.
+    """
+
+    def __init__(self, path: str):
+        npz = np.load(path)
+        self.indices = npz["indices"]      # (N, K) int32
+        self.values = npz["values"]        # (N, K) fp16
+        self.residual = npz["residual"]    # (N,) fp16
+        self.offsets = npz["offsets"]      # (n_docs+1,) int64
+        self.k = int(npz["k"])
+
+    def slice_window(self, doc_id: int, window_pos: int, t_tgt: int):
+        """Returns (indices, values, residual, mask), each length t_tgt --
+        rows outside the Teacher's precomputed range for this document (e.g.
+        --max_length at precompute time was shorter than window_pos+t_tgt-1)
+        are zero-filled and masked out, not treated as an error: a partially-
+        covered window still contributes KD loss on its covered positions."""
+        doc_start, doc_end = int(self.offsets[doc_id]), int(self.offsets[doc_id + 1])
+        n_doc = doc_end - doc_start
+        idx = torch.zeros(t_tgt, self.k, dtype=torch.long)
+        val = torch.zeros(t_tgt, self.k, dtype=torch.float32)
+        res = torch.zeros(t_tgt, dtype=torch.float32)
+        mask = torch.zeros(t_tgt, dtype=torch.bool)
+        for t in range(t_tgt):
+            q = window_pos + t - 1
+            if 0 <= q < n_doc:
+                idx[t] = torch.from_numpy(self.indices[doc_start + q].astype(np.int64))
+                val[t] = torch.from_numpy(self.values[doc_start + q].astype(np.float32))
+                res[t] = float(self.residual[doc_start + q])
+                mask[t] = True
+        return idx, val, res, mask
+
+    def build_batch_targets(self, doc_ids, window_positions, t_tgt: int, lane_valid):
+        """doc_ids/window_positions: (B,) LongTensor (e.g. the batcher's
+        lane_doc and collate_lane_batch's window_pos). lane_valid: (B,) bool,
+        an already-invalid lane (exhausted/padding) is masked out entirely
+        regardless of what slice_window would return for doc_id=0."""
+        B = doc_ids.shape[0]
+        idx_b = torch.zeros(B, t_tgt, self.k, dtype=torch.long)
+        val_b = torch.zeros(B, t_tgt, self.k, dtype=torch.float32)
+        res_b = torch.zeros(B, t_tgt, dtype=torch.float32)
+        mask_b = torch.zeros(B, t_tgt, dtype=torch.bool)
+        for b in range(B):
+            if not bool(lane_valid[b]):
+                continue
+            idx, val, res, mask = self.slice_window(int(doc_ids[b]), int(window_positions[b]), t_tgt)
+            idx_b[b], val_b[b], res_b[b], mask_b[b] = idx, val, res, mask
+        return idx_b, val_b, res_b, mask_b
 from data.real_text_windows import RealTextWindowDataset
 
 
@@ -163,12 +225,19 @@ def collate_lane_batch(batch_items, pad_id: int):
     template = next(item for item in batch_items if item is not None)
     out = {}
     for k in keys:
-        if k in ("doc_id", "is_first_window"):
+        if k in ("doc_id", "is_first_window", "window_pos"):
             continue
         vals = [item[k] if item is not None else torch.zeros_like(template[k]) for item in batch_items]
         out[k] = torch.stack(vals, dim=0)
     out["is_first_window"] = torch.tensor(
         [item["is_first_window"] if item is not None else True for item in batch_items], dtype=torch.bool
+    )
+    # window_pos: plain python int per window (not a tensor in the source dict, see
+    # data/real_text_windows.py), needed to align a window against a precomputed
+    # Teacher's per-document targets (--teacher_targets) -- invalid lanes get 0,
+    # harmless since lane_valid already excludes them from any loss.
+    out["window_pos"] = torch.tensor(
+        [item["window_pos"] if item is not None else 0 for item in batch_items], dtype=torch.long
     )
     out["lane_valid"] = lane_valid
     return out
@@ -286,6 +355,16 @@ def main():
     p.add_argument("--lr_warmup_init", type=float, default=None,
                    help="LR at step 0 when --lr_warmup_steps > 0 (linearly ramped up to --lr). Defaults to "
                         "--lr / 10 if not set. Ignored when --lr_warmup_steps=0.")
+    p.add_argument("--teacher_targets", default=None,
+                    help="path to a precompute_teacher_targets.py .npz computed on the SAME --data file "
+                         "(same document order/tokenizer) -- enables logit-level KD via topk_kd_loss() "
+                         "(learn/distill/train_sft.py, reused as-is). See TeacherTargets' docstring for "
+                         "the row-alignment convention. Requires --kd_alpha > 0 to have any effect.")
+    p.add_argument("--val_teacher_targets", default=None,
+                    help="same as --teacher_targets, computed on --val_data instead, for held-out KD loss reporting.")
+    p.add_argument("--kd_alpha", type=float, default=0.5,
+                    help="loss = (1-kd_alpha)*ce + kd_alpha*kd, same convention as train_sft.py. Ignored "
+                         "when --teacher_targets is not given (pure CE, prior behavior).")
     p.add_argument("--max_steps", type=int, default=100000)
     p.add_argument("--max_time_minutes", type=float, default=15.0)
     p.add_argument("--log_every", type=int, default=20)
@@ -346,6 +425,16 @@ def main():
                                         t_tgt=args.t_tgt, stride=args.stride, pad_id=pad_id)
         print(f"loaded held-out val: {len(val_ds.docs)} docs, {len(val_ds.windows)} windows "
               f"from {args.val_data}", flush=True)
+
+    teacher = TeacherTargets(args.teacher_targets) if args.teacher_targets else None
+    if teacher is not None:
+        print(f"loaded Teacher targets from {args.teacher_targets}: K={teacher.k}, "
+              f"{len(teacher.offsets) - 1} docs -- KD enabled, kd_alpha={args.kd_alpha}", flush=True)
+        assert len(teacher.offsets) - 1 == len(ds.docs), (
+            f"--teacher_targets has {len(teacher.offsets) - 1} documents but --data has {len(ds.docs)} -- "
+            f"must be precomputed on the exact same file (same order) for doc_id alignment to be valid"
+        )
+    val_teacher = TeacherTargets(args.val_teacher_targets) if args.val_teacher_targets else None
 
     model = Thinker(
         vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
@@ -417,7 +506,16 @@ def main():
         per_pos_loss = F.cross_entropy(logits.transpose(1, 2), labels, reduction="none")  # (B, t_tgt)
         per_lane_loss = per_pos_loss.mean(dim=1)  # (B,)
         valid_f = lane_valid.float()
-        loss = (per_lane_loss * valid_f).sum() / valid_f.sum().clamp(min=1.0)
+        ce_loss = (per_lane_loss * valid_f).sum() / valid_f.sum().clamp(min=1.0)
+
+        if teacher is not None:
+            t_idx, t_val, t_res, t_mask = teacher.build_batch_targets(
+                lane_doc, batch["window_pos"], args.t_tgt, batch["lane_valid"]
+            )
+            kd_loss = topk_kd_loss(logits, t_idx.to(device), t_val.to(device), t_res.to(device), t_mask.to(device))
+            loss = (1 - args.kd_alpha) * ce_loss + args.kd_alpha * kd_loss
+        else:
+            loss = ce_loss
 
         for group in optimizer.param_groups:
             group["lr"] = lr_at(step)
@@ -438,10 +536,12 @@ def main():
         if step % args.log_every == 0:
             mean_loss = sum(loss_hist[-args.log_every:]) / len(loss_hist[-args.log_every:])
             ppl = torch.exp(torch.tensor(mean_loss)).item()
-            print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={mean_loss:.4f} ppl={ppl:.2f} "
+            kd_str = f" ce={ce_loss.item():.4f} kd={kd_loss.item():.4f}" if teacher is not None else ""
+            print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={mean_loss:.4f} ppl={ppl:.2f}{kd_str} "
                   f"lr={lr_at(step):.2e} active_lanes={int(valid_f.sum().item())}/{args.n_lanes}", flush=True)
+            log_kwargs = {"ce": ce_loss.item(), "kd": kd_loss.item()} if teacher is not None else {}
             logger.progress(step, loss=mean_loss, ppl=ppl, lr=lr_at(step),
-                            active_lanes=int(valid_f.sum().item()))
+                            active_lanes=int(valid_f.sum().item()), **log_kwargs)
         if val_ds is not None and step % args.val_every == 0 and step > 0:
             val_loss = evaluate_at_nstep(model, val_ds, pad_id, args.n_lanes, args.t_local, args.seed,
                                           device, args.n_step, n_eval_batches=args.val_batches)

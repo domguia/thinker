@@ -124,4 +124,8 @@ class RealTextWindowDataset(Dataset):
             "labels": labels,
             "doc_id": doc_id,
             "is_first_window": is_first_window,
+            "window_pos": p,  # absolute position in ids[] where the target span starts --
+                               # needed to align this window against a precomputed Teacher's
+                               # per-document, per-position KD targets (see train_real_text.py's
+                               # --teacher_targets: teacher row q=window_pos+t-1 predicts labels[t]).
         }
