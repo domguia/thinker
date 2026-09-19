@@ -60,7 +60,17 @@ def mass_on_true_region(scores: torch.Tensor, region_of: torch.Tensor, y: torch.
 
 def train_router(X: torch.Tensor, y: torch.Tensor, K_all: torch.Tensor, region_of: torch.Tensor,
                   d_model: int, scale: float, test_frac: float = 0.3, epochs: int = 300,
-                  lr: float = 1e-2, seed: int = 0) -> dict:
+                  lr: float = 1e-2, seed: int = 0, batch_size: int = None) -> dict:
+    """
+    batch_size: None (default) trains on the full X_train in one batch per
+    epoch, exact prior behavior -- fine for a handful of layers (small
+    n_regions*d_ff). At the full 16-layer scale (n_regions*d_ff = 131072),
+    scores is (N_train, 131072) recomputed every epoch -- mini-batching
+    (batch_size set) keeps each step's matmul bounded regardless of how many
+    layers/regions are unioned, trading some gradient-noise for tractability.
+    Eval (train/test accuracy after training) stays a single full pass --
+    a one-time cost, not multiplied by epochs, so left unbatched.
+    """
     g = torch.Generator().manual_seed(seed)
     n = X.shape[0]
     perm = torch.randperm(n, generator=g)
@@ -71,13 +81,18 @@ def train_router(X: torch.Tensor, y: torch.Tensor, K_all: torch.Tensor, region_o
 
     q_proj = nn.Linear(d_model, d_model, bias=False)
     opt = torch.optim.Adam(q_proj.parameters(), lr=lr)
+    n_train = X_train.shape[0]
+    bs = batch_size if batch_size is not None else n_train
     for _ in range(epochs):
-        opt.zero_grad()
-        scores = (q_proj(X_train) @ K_all.T) * scale
-        mass_true, _ = mass_on_true_region(scores, region_of, y_train)
-        loss = -(mass_true.clamp_min(1e-8).log()).mean()
-        loss.backward()
-        opt.step()
+        epoch_perm = torch.randperm(n_train, generator=g)
+        for start in range(0, n_train, bs):
+            idx = epoch_perm[start:start + bs]
+            opt.zero_grad()
+            scores = (q_proj(X_train[idx]) @ K_all.T) * scale
+            mass_true, _ = mass_on_true_region(scores, region_of, y_train[idx])
+            loss = -(mass_true.clamp_min(1e-8).log()).mean()
+            loss.backward()
+            opt.step()
 
     with torch.no_grad():
         scores_tr = (q_proj(X_train) @ K_all.T) * scale
@@ -109,6 +124,10 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--lr", type=float, default=1e-2)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--batch_size", type=int, default=None,
+                     help="mini-batch size for training (default: full batch, matches prior "
+                          "behavior). Set this at large layer counts (e.g. 2048) to keep the "
+                          "per-step scores matmul bounded regardless of the union bank size.")
     ap.add_argument("--out", default="runs/olmo_ffn_geometry/layer_router_train.json")
     args = ap.parse_args()
 
@@ -139,7 +158,8 @@ def main() -> None:
     X = torch.cat([activations[l] for l in layers], dim=0)
     y = torch.cat([torch.full((activations[l].shape[0],), i, dtype=torch.long) for i, l in enumerate(layers)])
 
-    result = train_router(X, y, K_all, region_of, d_model, scale, seed=args.seed, epochs=args.epochs, lr=args.lr)
+    result = train_router(X, y, K_all, region_of, d_model, scale, seed=args.seed, epochs=args.epochs,
+                           lr=args.lr, batch_size=args.batch_size)
     result["layers"] = layers
     print(f"\n[router] train_mass={result['train_mass_on_true_region_mean']:.4f}  "
           f"test_mass={result['test_mass_on_true_region_mean']:.4f}  "
