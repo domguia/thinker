@@ -1148,3 +1148,27 @@ Confusion matrix (main probe) is banded near the diagonal, not scattered -- 38.8
 | 128 | 100% | 100% | 100% |
 
 **Read: unambiguous.** Both scales reach **100% task accuracy, all 6 seeds**, at the same 12000-step budget. This directly settles the question flagged back on 2026-09-13 (`experiment_plan.md`'s "why did CPU (`d_model=32`) show a recovery to 99.2% while GPU (`d_model=128`) didn't?"): **it was a training-budget confound, not a scale-transfer failure.** The historical GPU result that seemed not to replicate the CPU finding was under-trained relative to what CPU got (and, per the earlier-logged correction, also predated the `decouple_kv` fix -- two compounding reasons that result was never comparable in the first place). At matched budget, `attn_supervised` resolves `n_hops=2` cleanly at both scales -- no evidence of a real `d_model` scale effect on this specific question. Closes I5 with a clean positive, no further follow-up needed on this thread.
+
+## 2026-09-19/20 (nuit) — item [5] complete (45/45): N_step plateau confirmed cleanly, LR law is a ceiling not a smooth 1/N_step decay
+
+`item5_nstep_lrlaw` (Nancy, `graffiti-3`, 4x RTX 2080 Ti), `train_kb_chain.py`, hardened `n_hops=4, n_distractors=4, d_model=256`, `n_step` in `{2,4,6,8,12}` x `lr` in `{1e-4,3e-4,1e-3}` x 3 seeds, trained directly at each `n_step` (not an eval-time generalization probe like the retracted I7 -- no training-margin confound here, each cell is genuinely trained at its own `n_step`).
+
+**Accuracy vs `n_step`, at each cell's best `lr`**:
+
+| n_step | 2 | 4 | 6 | 8 | 12 |
+|---|---|---|---|---|---|
+| best acc | 89.7% | **99.9%** | 99.8% | 99.9% | 99.8% |
+
+**Read (N_step plateau)**: clean and exactly as the central thesis predicts. `n_step=2` is below the 4 real hops needed and correctly can't fully solve the task (89.7%, still far above chance but not saturated). **From `n_step=4` onward (matching the hop count) accuracy saturates near 100% and stays there flat through `n_step=12` (3x the needed count) -- no degradation from extra iterations.** This is the training-time version of the plateau I7 tried and failed to show cleanly (I7's checkpoint had a huge training margin baked in, confounding the read); this result has no such confound since every cell here is actually trained at its stated `n_step`. **This is the cleanest, most direct confirmation tonight that the loop's iteration count is not a fragile, fixed quantity -- the model trained with more steps than strictly needed doesn't get worse, matching the "iteration count can be free" thesis.**
+
+**Full table, all lr**:
+
+| n_step | lr=1e-4 | lr=3e-4 | lr=1e-3 |
+|---|---|---|---|
+| 2 | 84.6% | **89.7%** | 83.5% |
+| 4 | **99.9%** | 99.8% | 14.4% |
+| 6 | **99.8%** | 99.7% | 14.8% |
+| 8 | **99.9%** | 99.7% | 14.8% |
+| 12 | **99.8%** | 99.7% | 12.4% |
+
+**Read (LR "law")**: **not** a smooth `lr ~ 1/n_step` decay as hypothesized after the Piste A finding -- the best `lr` stays at `1e-4` (with `3e-4` a close second) from `n_step=4` all the way to `n_step=12`, it doesn't keep shrinking as `n_step` grows further past the hop count. What the data actually shows is a **ceiling effect**: `lr=1e-3` is fine-ish at `n_step=2` (83.5%, only slightly worse than the other two) but **collapses catastrophically once `n_step>=4`** (12-15% at every `n_step` from 4 to 12, near the `1/vocab_size`-ish floor) -- consistent with Piste A's finding that looped configs need a substantially lower LR than flat ones, but the mechanism here reads more like "there's a stability boundary between `3e-4` and `1e-3` that appears once the loop is deep enough to matter" than a continuously-decreasing optimum. **Correcting the earlier prediction**: report this as a threshold, not a `1/n_step` power law -- the data doesn't support the smoother hypothesis as stated.
