@@ -143,8 +143,25 @@ def forward_with_optional_supervision(model, kb_tokens, kb_source_ids, query_tok
             delta = model.fuse_proj(model.fuse_norm(fused))
         R = R + delta
         new_k, new_v = model.sm_write_proj(R).chunk(2, dim=-1)
+        if model.detach_sm_keys:
+            # 2026-09-20: this manual unroll was missing the stop-gradient-on-keys
+            # branch that Thinker.forward() applies (spec Sec.4.1 reading A) --
+            # dormant with --detach_sm_keys unset (the default, and what I3's
+            # étape 2 grid used), but a real divergence from "same equations as
+            # core/indexed_thinker_model.py" whenever that flag IS passed. Found
+            # while diagnosing the 10%-vs-99.9% train_kb_chain.py discrepancy
+            # (root cause identified as a default-hyperparameter mismatch, see
+            # dev_notes/experiments/i3_attention_supervision.md) -- fixed here
+            # regardless, since it's a correctness gap independent of that cause.
+            new_k = new_k.detach()
         sm_k = torch.cat([sm_k, new_k], dim=1)
         sm_v = torch.cat([sm_v, new_v], dim=1)
+        if model.sm_cap is not None and sm_k.shape[1] > model.sm_cap:
+            # Same omission as detach_sm_keys above -- Thinker.forward() trims
+            # sm_k/sm_v to the last sm_cap entries; this unroll didn't, so
+            # --sm_cap silently had no effect through this script until now.
+            sm_k = sm_k[:, -model.sm_cap:]
+            sm_v = sm_v[:, -model.sm_cap:]
 
     stream_out = model.streams['answer'](sm_k, sm_v)[:, 0]
     if attn_supervised:
