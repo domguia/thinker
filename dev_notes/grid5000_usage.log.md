@@ -306,3 +306,7 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 - CPU pur, `paradoxe-5` (marge disponible, load ~15-20/104 au moment du lancement).
 - Bug de lancement mineur trouve : `ModuleNotFoundError: No module named 'core'` -- besoin de `PYTHONPATH=$(pwd)` explicite depuis la racine du repo (pas un probleme du script, juste l'invocation). Corrige, confirme tournant (streaming HF reel, ~34-115 ex/s selon le dataset).
 - Fichiers cibles : `data/distill/openr1_math/train.jsonl` (reasoning, avec le champ `answer` ajoute recemment par model-design), `data/distill/hotpotqa/train.jsonl` (retrieval).
+
+## 2026-09-20 — Bug reel: prepare_reasoning_data.py pas synchronise (commit d844928 avec champ `answer` manquant sur Rennes)
+- Constat : le premier `prepare_reasoning_data.py` transfere/lance sur Rennes etait perime (n'avait pas le champ `answer`/`solution` ajoute par le commit `d844928`) -- exactement l'avertissement de model-design ("ReasoningPromptDataset skip silencieusement tout exemple sans `answer`"). Resultat : `train_prompt_response.py --dataset_type reasoning` a charge 0 exemple, crash immediat (`num_samples=0`).
+- Fix : script re-transfere depuis le repo local (a jour), ancien train/val renomme en `.bak`, regenere depuis zero. Lecon : toujours verifier `git log --oneline` du script cote local avant de le transferer/lancer sur le cluster si un pair a mentionne un commit recent dessus -- ne pas supposer qu'un transfert precedent couvre les changements suivants.
