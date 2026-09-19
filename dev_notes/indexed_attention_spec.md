@@ -82,6 +82,32 @@ Trois options manuscrites pour combiner l'index long-terme avec la structuration
 
 **[OUVERT]** — aucune de ces trois options n'est tranchée. Nécessaire de clarifier avec l'utilisateur laquelle (ou quelle combinaison) retenir, idéalement en revenant aux schémas visuels originaux si disponibles.
 
+### 3.1 Les trois mémoires sont distinctes **[CONFIRMÉ 2026-09-19]**
+
+Une formulation antérieure (session `ff2attn`) réduisait l'architecture à deux mémoires en assimilant le cache KV d'un transformer à la SM. C'est faux. Thinker en a **trois** :
+
+| Notation | Rôle |
+|---|---|
+| $K^{in}, V^{in}$ | la **séquence d'entrée** elle-même |
+| $K^{sm}, V^{sm}$ | **mémoire court terme**, écrite par `APPEND` à chaque itération de la boucle |
+| $K^{lm}, V^{lm}$ | **mémoire long terme** (KB), connaissance accumulée à travers les exemples |
+
+Écart à retenir pour toute conversion depuis un modèle préentraîné : dans un transformer standard, $K^{in}$ et le cache KV **sont la même chose** — le cache *est* la séquence vue jusqu'ici. Thinker les sépare délibérément. De plus, le cache KV s'étend le long de l'**axe des tokens** (un `APPEND` par token généré) alors que $K^{sm}$ s'étend le long de l'**axe des itérations** (un `APPEND` par pas de raisonnement, à séquence constante). Ce ne sont pas les mêmes `APPEND`.
+
+### 3.2 Espace K/V commun aux trois mémoires — **idéal recherché, non obligatoire** **[CONFIRMÉ 2026-09-19]**
+
+**Cible** : $K^{in}$, $K^{sm}$ et $K^{lm}$ vivent dans **un seul espace** ; idem pour les $V$. Motivation première : permettre qu'une entrée de la mémoire court terme soit **promue** vers la mémoire long terme par simple recopie, sans traduction apprise — c'est ce qui rend implémentable l'accumulation de connaissance à travers les exemples (plan, Phase 10) et une extension continue type Titans. Bénéfices secondaires : le softmax unifié sur $[K^{in} ; K^{sm} ; K^{lm}]$ (option 1 ci-dessus) devient bien défini ; un seul jeu de projections à apprendre au lieu de trois, cohérent avec l'argument de simplification représentationnelle de §-1 ; les diagnostics d'attribution s'appliquent uniformément aux trois sources.
+
+**Statut : objectif, pas contrainte dure.** Si l'espace commun s'avère coûteux ou instable, **des espaces séparés restent acceptables** et ne remettent pas en cause l'architecture — on perd la promotion par recopie (elle redevient une correspondance à apprendre) et le softmax unifié (il faut alors des lectures séparées puis une fusion), pas la séparation raisonnement/mémoire qui est la thèse. Choisir la variante la plus simple à faire fonctionner, et documenter laquelle a été retenue plutôt que de forcer l'unification par principe.
+
+**Risque principal si unifié — masse contre pic** : $K^{lm}$ peut compter $10^4$–$10^5$ entrées quand $K^{sm}$ en compte une poignée. Même avec un poids individuel faible, la **masse cumulée** des entrées LM peut noyer les entrées SM. Problème de masse, pas de pertinence ; il croît avec la taille de la KB, donc **invisible aux petites échelles déjà testées**. Primitif déjà présent dans le code : un biais de provenance appris ajouté avant projection (`v_proj(embed(x) + source_bias(...))`), à généraliser aux trois sources, complété au besoin par une température par source. Métrique de surveillance obligatoire dès que la KB grandit : **masse d'attention totale par source**, pas seulement le top-1.
+
+**Réserve de normalisation** : même dans un espace commun, les entrées LM (accumulées sur la distribution d'entraînement) et SM (écrites à l'instant) ont des statistiques de norme différentes, ce qui biaise les produits scalaires. Un contrôle de norme sur les entrées mémoire est probablement nécessaire.
+
+**Ce que l'unification ne résout pas** : elle rend la promotion SM → LM *possible*, pas *décidable*. Quoi promouvoir et quand reste une question ouverte (critère de surprise à la Titans, fréquence de réutilisation, autre) — relève de la Phase 10.
+
+**Conséquence sur la conversion FFN→attention (plan, Phase 12)** : dans un modèle préentraîné, $K^{lm}$ dériverait de $W_{in}^\top$ et $K^{in}$ de $W_K x$ — **espaces différents par construction**. L'unification y est donc incompatible avec une conversion exacte : elle impose une distillation. Approche retenue : partir de la conversion exacte à espaces séparés (point de départ vérifiable), puis **recuire vers l'espace commun** en mesurant la dégradation, plutôt que de payer d'emblée une distillation en aveugle.
+
 ## 4. Gradient et entraînement (encadré notes, Page 2)
 
 Citation directe : *« Bien qu'il serait bien d'éviter de donner des rôles multiples à $Q_e$ (afin de le rendre moins précis dans sa recherche de $K_e^{lr}$), le même souci peut être aussi pour $K_e^{lr}$. Un stop-gradient peut aider ? Ou peut-être mieux éviter de les réutiliser et recalculer tout à partir du nouveau contexte. »* **[NOTES]**
@@ -271,6 +297,29 @@ Quatre stratégies évaluées (lignes 1577-1651), synthèse comparative de Gemin
 - **Ligne ~543-544** : *Titans* (Google) et *Infini-Transformer* — mémoire neuronale **persistante et différentiable**, mise à jour par une règle d'apprentissage associatif (métrique de surprise), qui compresse l'historique **sans limite de taille de contexte** ; et les systèmes de mémoire étagée (MemGPT/Letta, MemWalker) qui distinguent mémoire de travail (VRAM/contexte) et mémoire persistante externe. **Différence importante à trancher** : Titans/Infini-Transformer *écrivent* dans leur mémoire en continu, y compris à l'inférence (mise à jour test-time via la règle associative) — alors que Product-Key Memory n'apprend que par le gradient d'entraînement standard, mémoire figée à l'inférence. La proposition ci-dessus (PKM-style) est la plus simple à implémenter en premier (pas de règle d'écriture différentiable dédiée à concevoir) — une extension test-time façon Titans reste une piste **[OUVERT]**, à ne considérer qu'après un premier résultat PKM-style.
 - **Ligne 1290** : *Perceiver Cross-Attention* (learned query tokens interrogeant des blocs K/V sous-jacents) — déjà le principe du `LevelCompressor` existant (§5.1), rassurant sur la cohérence de cette famille de mécanismes avec ce qui est déjà implémenté.
 - **Ligne 1313** : *Sentinel/No-Op token* — une paire $(\mathbf{k}_\emptyset, \mathbf{v}_\emptyset)$ **apprise**, absorbant l'attention quand aucune mémoire n'est nécessaire. C'est en fait un cas particulier, à 1 seul slot, exactement de ce qui est proposé ici (un $(K,V)$ appris, non dérivé de l'input) — déjà noté comme hors scope MVP (§7.1) mais conceptuellement le même mécanisme de base ; les deux pourraient être unifiés (le slot No-Op devient un slot de plus dans la KB persistante) plutôt qu'implémentés séparément.
+
+## 8ter. KB construite dynamiquement par un pass d'ingestion du modèle lui-même **[NOTES, idée de l'utilisateur 2026-09-20 — omise plus tôt par souci de simplification, à introduire maintenant]**
+
+**Distinction avec §8 et §8bis** : §8 dérive $K,V$ d'une projection directe (`k_proj`/`v_proj`) sur les tokens bruts d'un document fourni en contexte — aucun traitement récurrent, la KB est une fonction quasi-statique de l'input. §8bis rend $K,V$ **purs paramètres appris** (Product-Key Memory), pas dérivés d'un contenu du tout. **Cette section propose une troisième voie** : $K,V$ produits en faisant traverser **chaque document individuellement** au **mécanisme récurrent complet** de Thinker (mêmes poids que pour le raisonnement), déclenché par un **token spécial d'ingestion**, puis en récupérant les $(K,V)$ produits (via `sm_write_proj`, le même mécanisme qui alimente déjà la SM à chaque itération) comme entrée de la KB pour les requêtes ultérieures sur ce document — y compris les distracteurs, ingérés de la même façon.
+
+**Pourquoi c'est important, au-delà d'un détail d'implémentation** : ça transforme la construction de la KB d'une opération purement mécanique (projection) en une **capacité apprise** — le modèle apprend, via le signal de la tâche en aval (la QA), à encoder un document de façon utile pour une récupération future, pas seulement à le stocker tel quel. C'est directement la réponse concrète à la question laissée ouverte dans `indexed_attention_experiment_plan.md` §"Espace K/V unifié" ("l'espace commun rend la promotion SM → LM possible, il ne dit pas quoi promouvoir ni quand... la 'surprise' de Titans en est une réponse connue, la fréquence de réutilisation une autre") — ici, le critère de promotion devient **explicite et supervisé** (un token dédié déclenche l'ingestion), pas une heuristique de surprise non supervisée à la Titans. Rejoint aussi directement le précédent Titans/Infini-Transformer déjà noté en §8bis ("mémoire neuronale persistante et différentiable, mise à jour par une règle d'apprentissage associatif") — mais ici la "règle d'écriture" est le mécanisme récurrent existant lui-même (`sm_write_proj`), pas une règle dédiée à concevoir séparément.
+
+**Mécanisme concret, tel que proposé** :
+1. Un token/marqueur dédié (nouvel embedding, pas un token du vocabulaire naturel) signale au modèle "ceci est un document à ingérer, pas une question à répondre directement."
+2. Le document traverse la boucle récurrente normale ($n_{\text{step}}$ itérations, mêmes poids que le raisonnement) — le registre $R$ et l'écriture SM (`sm_write_proj(R)`) fonctionnent exactement comme pendant un épisode de raisonnement normal.
+3. Le(s) $(K,V)$ résultant(s) de ce passage sont extraits et devenus une entrée de la KB (persistante ou au moins réutilisable au sein d'un batch/epoch), au lieu de rester dans la SM éphémère de l'épisode qui les a produits.
+4. À la requête (QA), ces entrées KB pré-encodées sont interrogées comme n'importe quel niveau de `HierarchicalMemory` (softmax unifié, §5.2) — mécaniquement, c'est la même injection directe de $(K,V)$ précalculés que `HierarchicalMemory.build_static()` (ajoutée le 2026-09-20 pour le fil ffn2attn/Phase 12), sauf que la source de ces $(K,V)$ est ici le modèle lui-même sur un document réel, pas les poids d'un FFN externe préentraîné — le même point d'injection technique sert les deux usages.
+
+**Coût réel signalé par l'utilisateur, à ne pas sous-estimer** : cette approche multiplie le calcul par (au moins) le nombre de documents à ingérer par exemple — pour HotpotQA (§ `RetrievalPromptDataset`, `data/prompt_response_dataset.py`), ~10 passages d'ingestion complets (boucle récurrente entière, pas juste une projection) **avant** le passage QA lui-même, par exemple d'entraînement. C'est un changement d'ordre de grandeur du coût par exemple, pas un détail.
+
+**Mitigation proposée par l'utilisateur — réutiliser les distracteurs à travers le batch** : si plusieurs exemples d'un même batch partagent un distracteur (pool de documents réutilisé), l'ingérer **une seule fois** et réutiliser le $(K,V)$ résultant pour tous les exemples du batch qui le référencent, plutôt que de le réingérer à chaque fois.
+
+**Analyse du risque de fuite de gradient signalé (`model-design`, 2026-09-20), avec recommandation** : la sécurité de ce partage dépend de la **portée** du graphe de calcul partagé, pas juste du fait de partager le tenseur :
+- **Sûr, et même souhaitable** : réutiliser le $(K,V)$ (avec son graphe de calcul **vivant**, non détaché) pour plusieurs exemples **à l'intérieur d'un même batch/backward()** — PyTorch accumule alors correctement le gradient de tous les exemples qui l'ont utilisé dans les poids d'ingestion (`sm_write_proj` et tout ce qui précède dans la boucle). C'est le comportement désiré : le mécanisme d'ingestion reçoit un signal d'apprentissage de chaque usage en aval, pas seulement d'un exemple.
+- **Dangereux si fait naïvement** : garder ce même tenseur (graphe vivant) en cache **à travers plusieurs batches/pas d'optimiseur séparés** — soit PyTorch lève une erreur ("Trying to backward through the graph a second time") si on tente un second `backward()` dessus sans `retain_graph=True`, soit, avec `retain_graph=True`, le graphe et toute la mémoire associée ne sont **jamais libérés** — une vraie fuite mémoire progressive, pas juste un abus de terme.
+- **Recommandation concrète** : ingestion + réutilisation à graphe vivant **strictement à l'intérieur d'un seul batch** (sûr, gratuit en risque) ; pour une réutilisation **à travers les batches/epochs** (le vrai gain d'efficacité recherché), **détacher explicitement** (`.detach()`) le $(K,V)$ mis en cache avant de le réutiliser dans un batch ultérieur — accepter qu'un document servi depuis le cache ne transmette pas de gradient au mécanisme d'ingestion ce coup-ci, et rafraîchir le cache périodiquement (ré-ingestion à graphe vivant, à intervalle à définir) pour que l'ingestion continue de recevoir un signal d'apprentissage au fil du temps, pas jamais.
+
+**[OUVERT]** : fréquence de rafraîchissement du cache inter-batch, format exact du token d'ingestion (nouvel embedding dédié vs réutilisation d'un token spécial existant), et comment ceci s'articule avec la KB persistante purement paramétrique de §8bis (les deux mécanismes pourraient coexister — §8bis pour une connaissance stable across tout l'entraînement, cette section pour une KB reconstruite/rafraîchie par corpus ou par session) — non tranché, à discuter avant implémentation.
 
 ## 9. Baselines & protocole d'évaluation (cadre de test, pas encore implémenté)
 
@@ -515,3 +564,61 @@ Réutilise tel quel l'infrastructure de `learn/distill/train_sft.py` : CE standa
 **Ce qu'il reste pour un run réel bout-en-bout** (voir plan Phase 11) : une boucle d'entraînement qui (a) itère les fenêtres d'un même document dans l'ordre, (b) applique le stop-gradient de §14.2 avant de passer `R` en `register_init_override` à la fenêtre suivante, (c) aligne/précalcule les cibles Teacher par fenêtre (§14.4) plutôt que par exemple entier, (d) fixe des valeurs concrètes de $N_{\text{ctx}}$/$T_{\text{local}}$/$T_{\text{tgt}}$/`block_size`/`depth` — aucune de ces quatre n'est encore validée empiriquement pour un run à l'échelle.
 
 Relation avec le plan : voir Phase 11 (`dev_notes/indexed_attention_experiment_plan.md`), qui référence cette section pour le protocole de test.
+
+## 7.2 Agnosticisme à l'étape : contrainte définitionnelle de Thinker **[CONFIRMÉ 2026-09-19]**
+
+**Décision** : dans l'architecture Thinker, l'étape $t$ **ne doit pas être connaissable par le modèle**. Aucun paramètre, aucune entrée, aucun plongement ne dépend de $t$. Dans les expériences de conversion FFN→attention (plan, Phase 12 / `ffn2attn`), au contraire, **l'indice de couche est légitime** — on y émule une pile préentraînée dont les couches *sont* indexées par la profondeur.
+
+Ce sont donc **deux objets distincts**, à ne jamais présenter comme un continuum :
+
+| | `ffn2attn` / S3 | Thinker |
+|---|---|---|
+| Indice d'étape | connu, légitime | **interdit** |
+| Régime (cf. plan, S3 §« cinq régimes ») | (3)/(4) | **(5)** |
+| Nature | émulation / démarrage à chaud | architecture cible |
+| Nombre d'itérations | fixé par la profondeur émulée | **libre** |
+
+La transition de l'un à l'autre n'est pas une continuité mais une **ablation explicite** : entraîner avec plongement d'étape (régime 3/4), puis le retirer et mesurer si le registre seul porte la phase. C'est le pont entre les deux, et il doit être nommé comme tel dans le papier.
+
+### Ce que ça implique, et qui change l'ordre du plan
+
+Si rien n'indique $t$ au modèle, alors **ce qui distingue l'itération 1 de l'itération 5 est uniquement l'état du registre**. Le registre doit donc développer de lui-même une trajectoire organisée en phases. Deux conséquences :
+
+1. **Le No-Op, la largeur adaptative et les steps compute-only cessent d'être des extensions optionnelles** (« après la Phase 7 » dans le plan) : dès lors que $t$ est inconnaissable, l'arrêt ne peut être que **fondé sur le contenu** de $R_t$. C'est aussi la piste d'unification que §7.1 laissait ouverte sans la trouver — la décision d'arrêt/No-Op calculée à partir de $R_t$ seul est le candidat naturel, précisément parce qu'aucune autre information n'est disponible.
+2. **Un entraînement à $N_{\text{step}}$ fixe reste compatible** avec cette contrainte : le modèle applique la même fonction à chaque pas et la lecture de sortie est externe. Rien ne fuit tant qu'aucun paramètre ni aucune entrée ne dépend de $t$. Les expériences actuelles ne sont donc pas invalidées.
+
+### Diagnostic associé : sonde de phase sur le registre **[proposé, non encore fait]**
+
+Signature testable et bon marché : **une sonde linéaire entraînée à prédire $t$ à partir de $R_t$**.
+
+- Sonde précise ⇒ la boucle a développé des **phases distinctes** sans qu'on les lui ait données — c'est la démonstration directe que l'itération fait quelque chose.
+- Sonde au niveau du hasard ⇒ les pas ne sont pas différenciés, la boucle tourne à vide (comportement de point fixe), et une accuracy qui monte avec $N_{\text{step}}$ s'expliquerait alors autrement.
+
+Aucun entraînement du modèle requis : la sonde se monte sur des checkpoints existants, comme la mesure douce d'attribution (plan, I4). Contrôle trivial obligatoire : la même sonde sur un registre de pas mélangés aléatoirement.
+
+### 7.2bis Correction : ce n'est pas $t$ qui est interdit, c'est $t$ **paramétré** **[utilisateur, 2026-09-19]**
+
+Objection de l'utilisateur, décisive : **Thinker peut connaître $t$ implicitement, puisque la mémoire évolue au fil des itérations.** La SM grandit d'une entrée par `APPEND`, donc $|K^{sm}| = f(t)$ — le modèle peut lire sa propre progression dans sa mémoire. « $t$ inconnaissable » est donc inatteignable au sens strict, et la formulation de §7.2 était trop forte.
+
+**Formulation corrigée** : la contrainte ne porte pas sur la *connaissabilité* de $t$ mais sur **l'endroit où vit la dépendance à $t$**.
+
+| Forme | Statut | Raison |
+|---|---|---|
+| $t$ **paramétré** (poids, plongement ou adaptateur par étape) | **interdit** | fige le nombre d'itérations : le modèle ne peut pas fonctionner au-delà du $N$ vu à l'entraînement |
+| $t$ **observable dans l'état** (taille/contenu de la SM, trajectoire de $R_t$) | **inévitable et souhaitable** | dérivé du contenu, mêmes poids à tout $t$ ; un arrêt fondé sur le contenu *exige* une forme de conscience de la progression |
+
+C'est exactement la thèse de §-1 appliquée à l'indice d'étape lui-même : **le compteur d'étapes est une connaissance de plus, qui doit vivre dans la mémoire et non dans les poids.** Cohérent, et c'est le bon argument à porter dans le papier.
+
+### Le risque réel que cette correction fait apparaître
+
+Si le modèle s'appuie sur la **taille** de la SM comme simple compteur (« à l'étape 3, faire X ») plutôt que sur son **contenu**, il a appris une stratégie dégénérée — fonctionnellement équivalente à un plongement d'étape, simplement dérivée de la mémoire au lieu d'un paramètre. La généralisation à un autre nombre d'itérations serait tout aussi morte.
+
+**La question empirique qui compte n'est donc pas « le modèle connaît-il $t$ ? » mais « utilise-t-il le CONTENU de la SM ou sa TAILLE ? »**
+
+### Conséquence sur les diagnostics
+
+1. **La sonde de phase (§7.2, I6) change de statut.** Une sonde qui prédit $t$ depuis $R_t$ est désormais **attendue**, donc peu informative en soi. Son intérêt s'inverse : c'est un **échec** de la sonde qui serait surprenant (le registre ne suivrait pas la progression, ce qui compromettrait tout arrêt fondé sur le contenu). Le contrôle « sonde sur la norme seule » gagne en importance : si un scalaire suffit, c'est un compteur, pas une structure.
+
+2. **Le test décisif, et il est quasi gratuit** : entraîner à $N_{\text{step}}$ fixe, puis **évaluer à d'autres $N_{\text{step}}$ sans réentraîner** ($N \in \{2,4,6,8,12\}$ depuis un checkpoint entraîné à 6). Dégradation progressive ⇒ mécanisme fondé sur le contenu, la boucle généralise. Effondrement hors du $N$ d'entraînement ⇒ le modèle comptait, et l'agnosticisme à l'étape n'est pas atteint en pratique.
+   Variante confirmatoire : **découpler taille et étape** en remplissant la SM d'entrées neutres, pour que $|K^{sm}|$ cesse de coder $t$. Une chute de performance signe l'usage du compteur.
+   Aucun entraînement requis — évaluation pure sur checkpoints existants.
