@@ -86,6 +86,8 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 
 - **2026-09-20** -- [LFM2-1.2B precompute train scale (18k), jamais laisser un GPU modeste inactif](experiments/distillation.md)
 
+- **2026-09-20** -- [§8ter KB ingestion MVP: smoke test reel, aucun crash, cout x7 confirme](experiments/kb_ingestion_8ter.md)
+
 ## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
 
 **En cours de rédaction, mis à jour au fil de la nuit -- lire la version la plus récente en tête de ce fichier au réveil.**
