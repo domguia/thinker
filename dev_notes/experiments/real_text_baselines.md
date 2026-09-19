@@ -116,3 +116,19 @@ Extended-budget follow-up (item [2], each architecture at its own bracketed opti
 | 1024 | **3.205** (3.179, 3.231) | 5.699 (5.645, 5.754) |
 
 **Read: A (flat, no loop) beats C (main, looped) at both scales, and the gap widens at larger `d_model`** (128: 1.90 loss points; 1024: 2.49 points) -- same direction and pattern as the earlier step-matched result, now at extended budget rather than the earlier 1000-step matched grid. Consistent with the LR-sweep finding above (A and C do not share an optimal LR) -- this comparison still uses the shared `lr=3e-4`, so **the gap here should be read as "at a shared, not-necessarily-optimal-for-either-arm LR," not yet the fairest possible comparison** (the untested revalidated-LR-per-arm comparison remains the open item). Full grid in `runs/pistea_extended_budget/state/*.json` (Rennes home).
+
+## 2026-09-20 — User reframing: A>C is expected at this stage (C is novel, needs more optimization research than classical A), don't stop -- keep exploring C in parallel; new evaluation toolkit built for the actual project goal
+
+User's point: it's not surprising A beats C right now -- A is architecturally compatible with well-understood classical training practice, C (the loop) is novel and plausibly needs more hyperparameter/schedule research before being judged. Don't conclude, explore C harder. Dispatched (see this file's later entries once results land): `pistea_ext2` (progressive budget escalation 12k/16k/20k steps, not a single jump), `pistea_c_nstep_sweep` (n_step in {2,4,6,8,10,12} at d_model 128/1024), `pistea_c_lr_warmup_sweep` (LR fine grid x warmup_steps in {0,200,500}). New code: `--lr_warmup_steps`/`--lr_warmup_init` added to `train_real_text.py` (same convention as `learn/toy_memory/train_toy_memory.py`), verified via unit-checked ramp logic + a live smoke run (commit `f48192f`).
+
+**Restated project priority (user, explicit)**: architecture-variant exploration (n_slots, etc.) is useful for information/cluster utilization but secondary -- the priority is a working, evaluable Thinker on real text that can "think for long" and be compared to real LLMs on general tasks, while also behaving consistently with the architecture's own hypotheses (memory manipulation, step extrapolation).
+
+**Evaluation toolkit built for this goal (none of it existed before today)**:
+- `--val_data` (commit `f1c06aa`): genuine held-out split for `train_real_text.py` -- this project had NO held-out mechanism for real text before this (only training loss was ever reported).
+- `--save_checkpoint_path`/`--extrapolate_n_steps` (commit `657cd39`): checkpoint saving + in-memory n_step extrapolation probe, same convention as `train_kb_chain.py`'s flags of the same name.
+- `eval_checkpoint.py` (commit `e958c8b`): loads a saved checkpoint, runs (a) a **memory ablation** (toggles `model.disable_kb` between two held-out eval passes -- if disabling the KB/long-range read barely hurts, the model isn't manipulating memory the way spec Sec.-1 hypothesizes, reported as a real finding rather than assumed) and (b) the step-extrapolation probe on held-out data. Refuses to run without `--val_data`.
+- `eval_llm_baseline.py` (commit `6b1f8d7`): evaluates a reference LLM (default LFM2-350M, already this project's own tokenizer alias -- no vocab mismatch) on the exact same held-out windows, for a directly comparable loss/ppl number against Thinker's own.
+
+All four verified end-to-end via smoke runs (tiny CPU models/corpora) before being reported here; 76/76 existing tests green throughout.
+
+**Next milestone once the C-exploration sweeps above produce a result**: pick the best C config, run a proper (not smoke-scale) training with `--val_data`/`--save_checkpoint_path`, then run `eval_checkpoint.py` + `eval_llm_baseline.py` on the resulting checkpoint -- this is the first candidate for "a working Thinker we can evaluate," the project's stated priority ahead of further architecture-variant exploration.
