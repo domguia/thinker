@@ -261,8 +261,18 @@ def main():
     )
 
     if args.save_checkpoint_path:
-        torch.save(model.state_dict(), args.save_checkpoint_path)
-        print(f"checkpoint saved to {args.save_checkpoint_path}")
+        # A directory (grid-friendly, one fixed value for every cell) or a
+        # literal file path both work: if it names an existing directory
+        # (or ends in "/"), the checkpoint is saved as "<run_id>.pt" inside
+        # it -- run_id is unique per cell (tools/exp/gridgen.py's hash of
+        # script+config), so a single --fixed value in a grid never collides.
+        import os
+        ckpt_path = args.save_checkpoint_path
+        if ckpt_path.endswith("/") or os.path.isdir(ckpt_path):
+            os.makedirs(ckpt_path, exist_ok=True)
+            ckpt_path = os.path.join(ckpt_path, f"{args.run_id or 'adhoc'}.pt")
+        torch.save(model.state_dict(), ckpt_path)
+        print(f"checkpoint saved to {ckpt_path}")
 
     if args.extrapolate_n_steps:
         # In-memory extrapolation probe (thinker-e9's suggestion): no
