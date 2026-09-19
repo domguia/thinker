@@ -49,6 +49,14 @@ def build_example(ex, tokenizer, max_length):
         "num_tokens": num_tokens,
         "source": ex.get("source"),
         "uuid": ex.get("uuid"),
+        # 2026-09-20: the raw dataset's own canonical answer/solution --
+        # NOT extracted before (only problem/trace/text were kept). Needed
+        # for Thinker's `answer` output stream: the short verified answer is
+        # a cleaner training target than re-parsing the generated text after
+        # </think> (a model paraphrase, not guaranteed well-formed on every
+        # example), see data/prompt_response_dataset.py.
+        "answer": ex.get("answer"),
+        "solution": ex.get("solution"),
     }
 
 
