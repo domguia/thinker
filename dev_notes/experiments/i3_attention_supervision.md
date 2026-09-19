@@ -78,3 +78,32 @@ tools/exp/gridgen.py --out runs/i3_etape3/grid.jsonl \
 ## 2026-09-20 — i3_etape3 launch bug found and fixed: n_distractors missing from --fixed
 
 First launch of `i3_etape3` (the n_head-isolation grid) crashed all 20 cells immediately (rc=1, ~2-3s each): `AssertionError: max_facts=6 (-> 24 leaves) is not a multiple of block_size=4 ** depth=2 = 16`. Cause: `n_distractors` was not in the gridgen `--fixed` list, so the script's own default kicked in, giving `max_facts=n_hops+n_distractors=4+2=6`, not divisible per the hierarchy's leaf-count constraint. item[5]/item6's own grids always set `n_distractors=4` explicitly for `n_hops=4` -- this was silently omitted here. Fixed by adding `n_distractors=4` to `--fixed`, regenerated the grid, relaunched -- confirmed running (not crashing) on the second attempt. No compute wasted (crashed in seconds, caught via log check before drawing any conclusion from it), but ~15 min of wall-clock lost to the failed-launch-not-yet-checked window -- reinforces the standing "verify a launch actually produced real progress before moving on" discipline.
+
+## 2026-09-20 — i3_etape3 complete (20/20): n_head=1 default confirmed as sole cause -- unsupervised recovers to ~90-100%, supervision now looks genuinely harmful
+
+`i3_etape3` (`n_hops=4, depth=2, block_size=4, d_model=256, n_head=4` explicite -- isole strictement `n_head`, tout le reste identique à `i3_step2_bothArms`/`item[5]`), `attn_supervised` on/off x `lr` in {1e-4,2e-4} x 5 seeds.
+
+| | lr=1e-4 | lr=2e-4 |
+|---|---|---|
+| unsupervised (`False`) | 4/5 (0.92-0.99), 1/5 collapsed (0.153) | **5/5 (0.99+)** |
+| supervised (`True`) | 0/5, tous collapsés (0.135-0.181) | 1/5 (0.962), 4/5 collapsés (0.14-0.31) |
+
+**Confirmé : `n_head=1` (défaut silencieux du script, jamais fixé dans `i3_step2_bothArms`) était bien la cause du 10%-vs-99.9% -- avec `n_head=4` explicite, l'arm non-supervisé remonte à 9/10 succès, cohérent avec `item[5]`'s 99.9% sur la même config.** Ça règle la question méthodologique laissée ouverte : ce n'était pas un vrai résultat sur la supervision, juste un artefact de config.
+
+**Mais maintenant que la config est correcte des deux côtés, l'écart supervisé/non-supervisé est encore plus net qu'avant, dans le sens inverse de l'hypothèse initiale d'I3 : non-supervisé réussit 9/10, supervisé seulement 1/10.** Ce n'est plus explicable par un artefact de config -- **la supervision d'attention semble activement nuire à ce `n_hops=4`, pas juste redondante ou peu fiable.** Lecture provisoire, à confirmer/discuter avec `model-design` avant de la considérer comme définitive (le mécanisme causal reste à comprendre -- est-ce que la perte auxiliaire crée un optimum local différent, ou une interférence avec le gradient principal ?).
+
+Full grid : `runs/i3_etape3/state/*.json` (Rennes home).
+
+## 2026-09-20 — n_slots sweep complete (9/9): M=1 fails completely, M>=2 needed for this task
+
+`nslots_sweep` (`n_hops=3, n_distractors=5, depth=2, block_size=4, d_model=256, n_head=4, n_step=8, lr=3e-4`), `n_slots` in {1,2,4} x 3 seeds.
+
+| n_slots | résultat |
+|---|---|
+| 1 | **0/3, tous collapsés** (0.129-0.145, margin ~0) |
+| 2 | 2/3 (0.99+, margin 0.87), 1/3 collapsé (0.122) |
+| 4 | **3/3 (0.998+, margin 0.87)** |
+
+**Read: un signal architectural réel et net.** `n_slots=1` (mémoire à un seul créneau) échoue systématiquement sur cette tâche (`n_hops=3, n_distractors=5`) -- contrairement au résultat `sm_cap=1≈None` plus tôt cette nuit (qui concernait le *sm buffer*, pas `n_slots`, et sur une tâche `n_hops=2` plus facile). `n_slots>=2` est nécessaire ici, avec `n_slots=4` légèrement plus fiable (3/3 vs 2/3). Premier test empirique de cette variante "confirmée à tester" (spec §5.2) -- confirme qu'elle importe réellement, au moins à cette difficulté de tâche.
+
+Full grid : `runs/nslots_sweep/state/*.json` (Rennes home).

@@ -79,6 +79,9 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 
 - **2026-09-20** -- [pistea_c_nstep_sweep complet (24/24): degradation monotone confirmee a d_model=1024, sweep croise lance](experiments/real_text_baselines.md)
 
+- **2026-09-20** -- [i3_etape3 (20/20): n_head=1 confirme cause unique, supervision semble nuire une fois corrige](experiments/i3_attention_supervision.md)
+- **2026-09-20** -- [n_slots sweep (9/9): M=1 echoue completement, M>=2 necessaire](experiments/i3_attention_supervision.md)
+
 ## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
 
 **En cours de rédaction, mis à jour au fil de la nuit -- lire la version la plus récente en tête de ce fichier au réveil.**
