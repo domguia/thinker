@@ -22,12 +22,18 @@ CHATML_TEMPLATE = "<|im_start|>user\nContext:\n{context}\n\nQuestion: {question}
 
 
 def format_context(ctx):
+    """Returns (flattened_text, docs_list) -- docs_list is the raw
+    per-document strings BEFORE joining, added 2026-09-20 for
+    data/prompt_response_dataset.py::RetrievalPromptDataset's document-aware
+    hierarchical chunking (HotpotQA distractor config bundles ~10 separate
+    documents -- treating them as one flat blob loses that structure, see
+    that class's docstring). The joined text is kept too, for the existing
+    dense-baseline ChatML pipeline (learn/distill/train_sft.py) which reads
+    it as one flat string."""
     titles = ctx.get("title", [])
     sentences = ctx.get("sentences", [])
-    docs = []
-    for title, sents in zip(titles, sentences):
-        docs.append(f"[{title}] " + " ".join(sents))
-    return "\n".join(docs)
+    docs = [f"[{title}] " + " ".join(sents) for title, sents in zip(titles, sentences)]
+    return "\n".join(docs), docs
 
 
 def build_example(ex, tokenizer, max_length):
@@ -37,7 +43,7 @@ def build_example(ex, tokenizer, max_length):
     if not question or not answer or not context:
         return None
 
-    context_text = format_context(context)
+    context_text, context_docs = format_context(context)
     text = CHATML_TEMPLATE.format(context=context_text, question=question, answer=answer)
     num_tokens = len(tokenizer(text, truncation=False)["input_ids"])
     if num_tokens > max_length:
@@ -47,6 +53,7 @@ def build_example(ex, tokenizer, max_length):
         "question": question,
         "answer": answer,
         "context": context_text,
+        "context_docs": context_docs,
         "text": text,
         "num_tokens": num_tokens,
         "num_hops": len(ex.get("supporting_facts", {}).get("title", [])),

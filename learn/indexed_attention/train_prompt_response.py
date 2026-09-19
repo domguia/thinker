@@ -54,34 +54,42 @@ def build_dataset(dataset_type: str, path: str, tokenizer, args):
                                        max_thinking_len=args.max_thinking_len,
                                        max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id)
     if dataset_type == "retrieval":
-        return RetrievalPromptDataset(path, tokenizer, n_ctx=args.n_ctx, t_local=args.t_local,
+        # block_size/n_docs_max, NOT n_ctx/t_local (2026-09-20 redesign, user
+        # decision: treat HotpotQA's multiple documents as distinct indexable
+        # blocks, depth=1, rather than one flattened truncated window --
+        # see RetrievalPromptDataset's docstring). --block_size here is the
+        # SAME value as Thinker's own --block_size constructor arg (must
+        # match for HierarchicalMemory's depth=1 to compress one node per
+        # document correctly).
+        return RetrievalPromptDataset(path, tokenizer, block_size=args.block_size, n_docs_max=args.n_docs_max,
                                        max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id)
     raise ValueError(f"unknown --dataset_type {dataset_type!r} (expected 'reasoning' or 'retrieval' -- "
                       f"'general' stays on train_real_text.py's sliding-window pipeline, not this script)")
 
 
-def query_tokens_for(dataset_type: str, batch, t_local: int):
+def query_tokens_for(dataset_type: str, batch, block_size: int):
     """What seeds the register (spec: mean-pooled embedding added to
     register_init) -- real-text uses the last t_local context tokens
     (recency); here, the natural analogue per dataset:
-      - retrieval: the question portion (the local/source_id=0 tail of
-        kb_tokens, same convention as RealTextWindowDataset).
+      - retrieval: the question's own block (the LAST block_size positions
+        of kb_tokens, see RetrievalPromptDataset -- always the question,
+        regardless of n_docs_max).
       - reasoning: the WHOLE problem (no local/long-range split there --
         source_id is uniformly 0, see ReasoningPromptDataset)."""
     if dataset_type == "retrieval":
-        return batch["kb_tokens"][:, -t_local:]
+        return batch["kb_tokens"][:, -block_size:]
     return batch["kb_tokens"]
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, dataset_type: str, n_step: int, n_batches: int = 20):
+def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: int, n_batches: int = 20):
     model.eval()
     losses = {"answer": [], "thinking": []} if dataset_type == "reasoning" else {"answer": []}
     for i, batch in enumerate(loader):
         if i >= n_batches:
             break
         batch = {k: v.to(device) for k, v in batch.items()}
-        query_tokens = query_tokens_for(dataset_type, batch, getattr(evaluate, "_t_local", 0))
+        query_tokens = query_tokens_for(dataset_type, batch, block_size)
         target_input = {"answer": batch["answer_target_input"]}
         if dataset_type == "reasoning":
             target_input["thinking"] = batch["thinking_target_input"]
@@ -102,12 +110,19 @@ def main() -> None:
     p.add_argument("--data", required=True)
     p.add_argument("--val_data", default=None)
     p.add_argument("--tokenizer", default="lfm2")
-    p.add_argument("--n_ctx", type=int, default=256, help="prompt length (block_size**depth when depth>0)")
-    p.add_argument("--t_local", type=int, default=32, help="retrieval only: last t_local prompt tokens = question")
+    p.add_argument("--n_ctx", type=int, default=256, help="reasoning only: prompt length (flat, depth=0)")
+    p.add_argument("--n_docs_max", type=int, default=10,
+                   help="retrieval only: max context documents per example, each its own block_size-token "
+                        "block -- HotpotQA distractor config has ~10 (2 supporting + up to 8 distractors)")
     p.add_argument("--max_thinking_len", type=int, default=1024, help="reasoning only")
     p.add_argument("--max_answer_len", type=int, default=64)
-    p.add_argument("--depth", type=int, default=0)
-    p.add_argument("--block_size", type=int, default=16)
+    p.add_argument("--depth", type=int, default=0,
+                   help="reasoning: 0 (flat, single prompt block, no multi-document structure to index). "
+                        "retrieval: MUST be 1 -- see RetrievalPromptDataset, one summary node per document.")
+    p.add_argument("--block_size", type=int, default=16,
+                   help="reasoning: HierarchicalMemory's block_size (depth=0 -> unused). "
+                        "retrieval: tokens per document block -- MUST match what RetrievalPromptDataset "
+                        "used to build kb_tokens (same --block_size value drives both).")
     p.add_argument("--n_register", type=int, default=8)
     p.add_argument("--d_model", type=int, default=128)
     p.add_argument("--n_head", type=int, default=2)
@@ -201,7 +216,7 @@ def main() -> None:
                 break
 
             batch = {k: v.to(device) for k, v in batch.items()}
-            query_tokens = query_tokens_for(args.dataset_type, batch, args.t_local)
+            query_tokens = query_tokens_for(args.dataset_type, batch, args.block_size)
             target_input = {"answer": batch["answer_target_input"]}
             if args.dataset_type == "reasoning":
                 target_input["thinking"] = batch["thinking_target_input"]
@@ -234,7 +249,7 @@ def main() -> None:
                 logger.progress(step, loss=mean_loss, ce_answer=ce_answer.item(), lr=lr_at(step))
             if val_loader is not None and (step % args.val_every == 0 or step == 1):
                 val_losses = evaluate(model, val_loader, device, args.dataset_type, args.n_step,
-                                       n_batches=args.val_batches)
+                                       args.block_size, n_batches=args.val_batches)
                 print(f"step={step:6d} VAL {val_losses}", flush=True)
                 logger.progress(step, **{f"val_{k}": v for k, v in val_losses.items()})
 
@@ -257,7 +272,7 @@ def main() -> None:
     if args.extrapolate_n_steps and val_loader is not None:
         print("--- extrapolation probe (n_step_test vs training n_step), held-out ---", flush=True)
         for n_step_test in [int(x) for x in args.extrapolate_n_steps.split(",")]:
-            r = evaluate(model, val_loader, device, args.dataset_type, n_step_test, n_batches=args.val_batches)
+            r = evaluate(model, val_loader, device, args.dataset_type, n_step_test, args.block_size, n_batches=args.val_batches)
             extrapolation_results[n_step_test] = r
             marker = " <- training n_step" if n_step_test == args.n_step else ""
             print(f"  n_step_test={n_step_test:3d} {r}{marker}", flush=True)

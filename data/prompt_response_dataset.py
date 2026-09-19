@@ -116,49 +116,94 @@ class ReasoningPromptDataset(Dataset):
 
 
 class RetrievalPromptDataset(Dataset):
-    def __init__(self, path, tokenizer, n_ctx: int, t_local: int, max_answer_len: int, pad_id: int = None):
-        """n_ctx/t_local: same convention as RealTextWindowDataset -- the
-        last t_local positions of the n_ctx-token prompt are the question
-        (source_id=0, local), everything before is context (source_id=1,
-        KB/long-range) -- context is truncated from the FRONT if it doesn't
-        fit, question is truncated from the END (keep its start, the part
-        most likely to carry the actual question if it runs long)."""
-        assert 1 <= t_local <= n_ctx
+    """2026-09-20 redesign (user decision: treat HotpotQA separately, not
+    flattened like the other two datasets): HotpotQA's distractor config
+    bundles ~10 SEPARATE documents (2 supporting + up-to-8 distractors) --
+    exactly the "search among candidates" scenario HierarchicalMemory's
+    indexing (depth>0) was designed for, unlike a single continuous window.
+    The earlier version concatenated everything into one flat blob truncated
+    to n_ctx, silently dropping distractors past the token budget and never
+    exercising the hierarchy at all (depth=0/1 equivalent in effect).
+
+    Each of up to `n_docs_max` context documents occupies its OWN dedicated
+    block of `block_size` tokens (source_id=1, KB) -- pad/truncate per
+    document, not globally -- so a short distractor never starves a long
+    supporting document's budget and vice versa. Missing documents (fewer
+    than n_docs_max in this example) get an entirely-masked block. The
+    question occupies one more block (source_id=0, local) as-is. This gives
+    `HierarchicalMemory(depth=1, block_size=block_size)` one summary NODE
+    per document (spec's actual "index over candidates" mechanism) in
+    addition to the raw per-document tokens, both attended in the unified
+    softmax -- not just a bigger flat window.
+
+    `data/kb_chain_retrieval.py` is the project's SYNTHETIC analogue of this
+    same idea (fixed-size fact blocks); this is its real-text counterpart.
+
+    `n_docs_max=0` (user idea, 2026-09-20): drops every context document,
+    keeping only the question -> answer, everything else unchanged.
+    Directly tests parametric memorization (can the model's own weights
+    learn the answer from training exposure alone, with no document to
+    retrieve from at all?) vs retrieval from context -- distinct from
+    Thinker's own --disable_kb baseline (which removes the RETRIEVAL
+    MECHANISM but keeps documents in the data); this removes the DOCUMENTS
+    from the data while keeping the mechanism intact.
+    """
+
+    def __init__(self, path, tokenizer, block_size: int, n_docs_max: int, max_answer_len: int, pad_id: int = None):
         self.tokenizer = tokenizer
-        self.n_ctx, self.t_local = n_ctx, t_local
+        self.block_size = block_size
+        self.n_docs_max = n_docs_max
         self.max_answer_len = max_answer_len
         self.pad_id = pad_id if pad_id is not None else (tokenizer.pad_token_id or 0)
         self.examples = []
-        with open(path) as f:
-            for line in f:
-                row = json.loads(line)
-                if not row.get("answer"):
-                    continue
-                self.examples.append({"question": row["question"], "context": row["context"], "answer": str(row["answer"])})
+        n_truncated_docs = 0
+        for line in open(path):
+            row = json.loads(line)
+            if not row.get("answer"):
+                continue
+            # Prefer a raw per-document list if present (context_docs, added
+            # 2026-09-20 to prepare_retrieval_data.py); fall back to
+            # splitting the flattened "context" string on "\n" (format_context's
+            # own join separator) for data already generated before that change.
+            docs = row.get("context_docs")
+            if docs is None:
+                docs = row["context"].split("\n")
+            if len(docs) > n_docs_max:
+                n_truncated_docs += 1
+                docs = docs[:n_docs_max]
+            self.examples.append({"question": row["question"], "docs": docs, "answer": str(row["answer"])})
+        if n_truncated_docs:
+            print(f"WARNING: {n_truncated_docs}/{len(self.examples)} examples in {path} had more than "
+                  f"n_docs_max={n_docs_max} context documents -- extra documents dropped (increase "
+                  f"n_docs_max if this fraction is large).")
 
     def __len__(self):
         return len(self.examples)
 
     def __getitem__(self, idx):
         ex = self.examples[idx]
-        q_ids = self.tokenizer(ex["question"], truncation=True, max_length=self.t_local)["input_ids"]
-        ctx_budget = self.n_ctx - len(q_ids)
-        ctx_ids = self.tokenizer(ex["context"], truncation=True, max_length=max(ctx_budget, 0))["input_ids"] if ctx_budget > 0 else []
+        n_blocks = self.n_docs_max + 1  # + 1 for the question's own block
+        N = n_blocks * self.block_size
+        kb_tokens = torch.full((N,), self.pad_id, dtype=torch.long)
+        kb_leaf_mask = torch.zeros(N, dtype=torch.bool)
+        kb_source_ids = torch.zeros(N, dtype=torch.long)
 
-        kb_tokens = torch.full((self.n_ctx,), self.pad_id, dtype=torch.long)
-        kb_leaf_mask = torch.zeros(self.n_ctx, dtype=torch.bool)
-        kb_source_ids = torch.zeros(self.n_ctx, dtype=torch.long)
-        n_ctx_real, n_q_real = len(ctx_ids), len(q_ids)
-        pad_front = self.n_ctx - n_ctx_real - n_q_real  # left-pad, same convention as RealTextWindowDataset
-        if n_ctx_real > 0:
-            kb_tokens[pad_front:pad_front + n_ctx_real] = torch.tensor(ctx_ids, dtype=torch.long)
-            kb_leaf_mask[pad_front:pad_front + n_ctx_real] = True
-            kb_source_ids[pad_front:pad_front + n_ctx_real] = 1  # context = KB/long-range
-        if n_q_real > 0:
-            qs = pad_front + n_ctx_real
-            kb_tokens[qs:qs + n_q_real] = torch.tensor(q_ids, dtype=torch.long)
-            kb_leaf_mask[qs:qs + n_q_real] = True
-            kb_source_ids[qs:qs + n_q_real] = 0  # question = local/recency
+        for i in range(self.n_docs_max):
+            start = i * self.block_size
+            if i >= len(ex["docs"]):
+                continue  # fewer real documents than n_docs_max -- block stays fully masked
+            ids = self.tokenizer(ex["docs"][i], truncation=True, max_length=self.block_size)["input_ids"]
+            n = len(ids)
+            kb_tokens[start:start + n] = torch.tensor(ids, dtype=torch.long)
+            kb_leaf_mask[start:start + n] = True
+            kb_source_ids[start:start + self.block_size] = 1  # this document = KB (whole block, incl. its padding)
+
+        q_start = self.n_docs_max * self.block_size
+        q_ids = self.tokenizer(ex["question"], truncation=True, max_length=self.block_size)["input_ids"]
+        n_q = len(q_ids)
+        kb_tokens[q_start:q_start + n_q] = torch.tensor(q_ids, dtype=torch.long)
+        kb_leaf_mask[q_start:q_start + n_q] = True
+        kb_source_ids[q_start:q_start + self.block_size] = 0  # question block = local
 
         ans_ids, ans_mask = _tokenize_padded(self.tokenizer, ex["answer"], self.max_answer_len, self.pad_id)
         ans_input, ans_labels = _teacher_forced_target(ans_ids, ans_mask, self.pad_id)
