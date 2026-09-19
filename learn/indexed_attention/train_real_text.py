@@ -202,7 +202,19 @@ def main():
                    help="spec §9 Baseline B: loop still runs n_step times, but external-memory (KB) access is "
                         "disabled -- isolates whether any gain comes from the loop itself or the memory. "
                         "Also skips HierarchicalMemory.build() entirely (cheaper, not just architecturally different).")
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--lr", type=float, default=3e-4, help="target/peak LR, reached at the end of warmup "
+                   "(or from step 0 if --lr_warmup_steps=0)")
+    p.add_argument("--lr_warmup_steps", type=int, default=0,
+                    help="linear LR warmup FROM --lr_warmup_init TO --lr over this many steps, then held "
+                         "constant (0 = no warmup, exact prior behavior). Same convention as "
+                         "learn/toy_memory/train_toy_memory.py's --lr_warmup_steps -- Piste A's real-text "
+                         "architectures (A: single-pass, C: looped) were only ever LR-swept without warmup; "
+                         "C is the novel, less-understood-by-classical-practice architecture, so its "
+                         "reported disadvantage vs A could reflect an under-tuned optimization recipe "
+                         "rather than an architectural ceiling -- untested until now.")
+    p.add_argument("--lr_warmup_init", type=float, default=None,
+                   help="LR at step 0 when --lr_warmup_steps > 0 (linearly ramped up to --lr). Defaults to "
+                        "--lr / 10 if not set. Ignored when --lr_warmup_steps=0.")
     p.add_argument("--max_steps", type=int, default=100000)
     p.add_argument("--max_time_minutes", type=float, default=15.0)
     p.add_argument("--log_every", type=int, default=20)
@@ -257,7 +269,17 @@ def main():
           f"t_tgt={args.t_tgt} n_lanes={args.n_lanes} pool_n_head={args.pool_n_head} k_dim={args.k_dim} "
           f"params={n_params/1e6:.2f}M device={device}", flush=True)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    lr_warmup_init = args.lr_warmup_init if args.lr_warmup_init is not None else args.lr / 10
+    if args.lr_warmup_steps > 0:
+        print(f"lr_warmup: {lr_warmup_init:.2e} -> {args.lr:.2e} over {args.lr_warmup_steps} steps, "
+              f"then held constant at {args.lr:.2e}", flush=True)
+
+    def lr_at(step: int) -> float:
+        if args.lr_warmup_steps <= 0 or step >= args.lr_warmup_steps:
+            return args.lr
+        return lr_warmup_init + (args.lr - lr_warmup_init) * (step / args.lr_warmup_steps)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr_at(0), weight_decay=1e-2)
 
     lane_R = [None] * args.n_lanes  # carried register state per lane, detached across windows
 
@@ -306,6 +328,9 @@ def main():
         valid_f = lane_valid.float()
         loss = (per_lane_loss * valid_f).sum() / valid_f.sum().clamp(min=1.0)
 
+        for group in optimizer.param_groups:
+            group["lr"] = lr_at(step)
+
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -323,8 +348,8 @@ def main():
             mean_loss = sum(loss_hist[-args.log_every:]) / len(loss_hist[-args.log_every:])
             ppl = torch.exp(torch.tensor(mean_loss)).item()
             print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={mean_loss:.4f} ppl={ppl:.2f} "
-                  f"active_lanes={int(valid_f.sum().item())}/{args.n_lanes}", flush=True)
-            logger.progress(step, loss=mean_loss, ppl=ppl,
+                  f"lr={lr_at(step):.2e} active_lanes={int(valid_f.sum().item())}/{args.n_lanes}", flush=True)
+            logger.progress(step, loss=mean_loss, ppl=ppl, lr=lr_at(step),
                             active_lanes=int(valid_f.sum().item()))
         step += 1
 
