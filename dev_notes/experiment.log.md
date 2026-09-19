@@ -84,6 +84,8 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 
 - **2026-09-20** -- [KD alignment: 0/2000 answer spans alignes sur openr1_math -- fallback CE-only total](experiments/distillation.md)
 
+- **2026-09-20** -- [LFM2-1.2B precompute train scale (18k), jamais laisser un GPU modeste inactif](experiments/distillation.md)
+
 ## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
 
 **En cours de rédaction, mis à jour au fil de la nuit -- lire la version la plus récente en tête de ce fichier au réveil.**
