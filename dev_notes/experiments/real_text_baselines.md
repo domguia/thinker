@@ -157,3 +157,18 @@ All four verified end-to-end via smoke runs (tiny CPU models/corpora) before bei
 3. `collate_lane_batch` : propager `window_pos` (actuellement ignoré comme `doc_id`/`is_first_window`, à traiter pareil -- métadonnée, pas une entrée du modèle).
 
 Implémentation en cours.
+
+## 2026-09-19/20 (nuit) — pistea_ext2 complete (24/24): A bat C reste vrai à budget encore plus élevé, gap ne se referme pas
+
+`pistea_ext2` (Nancy `graffiti-3`, relancé correctement via `oarsh` après le fix frontend), `n_step` in {1 (A), 6 (C)}, `d_model` in {128, 1024}, `max_steps` in {12000, 16000, 20000}, `lr=3e-4` fixe, 2 seeds.
+
+**Moyennes par (n_step, d_model), toutes valeurs de max_steps/seeds confondues** :
+
+| | d_model=128 | d_model=1024 |
+|---|---|---|
+| A (n_step=1) | **~3.99** | **~2.77** |
+| C (n_step=6) | ~4.12 | ~3.69 |
+
+**Read: A bat C à budget encore plus élevé (12k-20k pas) qu'auparavant (8000 pas), le gap ne se referme pas, et s'élargit même à `d_model=1024`** (0.92 pt d'écart vs 0.13 pt à `d_model=128`) -- cohérent avec `pistea_extended_budget` (8000 pas) et l'escalade de budget déjà loguée. **Rappel du garde-fou déjà posé** (entrée précédente) : ce sweep tient `lr=3e-4` fixe, potentiellement pas optimal pour C -- le sweep croisé `n_step`x`lr` (lancé séparément) est ce qui distinguera "C a juste besoin d'un LR différent" de "la boucle est intrinsèquement pire à budget égal". Ne pas lire ce résultat isolément comme définitif sur la boucle.
+
+Full grid : `runs/pistea_ext2/state/*.json` (Nancy home).
