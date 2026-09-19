@@ -88,3 +88,15 @@ Executed on `paradoxe-5` (P1, no dedicated reservation): both étape-1 diagnosti
 
 Full JSON: `runs/olmo_ffn_geometry/layer_source_attribution_16layers.json`, `layer_linear_probe_16layers.json` (Rennes home).
 
+
+## 2026-09-19/20 (nuit) — S3 étape 2, router entraîné: mécanisme de routage validé (3 couches + couches distantes)
+
+`train_layer_router.py` (query projection entraînée, softmax sur banque de clés FFN unifiée), exécuté sur `paradoxe-2/5`.
+
+**Router 3 couches (0,8,15)** : `train_mass=0.999`, `test_mass=0.998`, `train_top1=1.0`, `test_top1=0.9993` (chance=0.333).
+
+**Router couches distantes (0,7,15)** : `train_mass=1.0`, `test_mass=0.99999`, `test_top1=1.0` (parfait, chance=0.333).
+
+**Read: le mécanisme de retrieval (pas juste la classification) route correctement vers la bonne région mémoire.** Confirme étape 2 : au-delà du fait que l'information de profondeur soit décodable (probe linéaire, entrée précédente), une projection de requête entraînée dans un cadre attention softmax réel apprend à l'exploiter presque parfaitement. **Régime 4 (adressage appris, pas de signal de boucle explicite) est validé comme mécanisme, pas seulement comme possibilité théorique.** Full JSON : `runs/olmo_ffn_geometry/layer_router_train.json`, `layer_router_distant.json` (Rennes home).
+
+Note opérationnelle : le premier lancement du router adjacent (0,1,2) a été perdu (lancé sans redirection de log via un `timeout ssh` qui a fini par tuer le process sans laisser de trace) -- relancé proprement avec `nohup > log 2>&1`, résultat à suivre séparément.
