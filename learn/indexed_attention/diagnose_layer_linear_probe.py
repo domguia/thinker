@@ -125,21 +125,41 @@ def main() -> None:
     X = torch.cat([activations[l] for l in layers], dim=0)
     y = torch.cat([torch.full((activations[l].shape[0],), i, dtype=torch.long) for i, l in enumerate(layers)])
 
-    result = train_probe(X, y, n_classes=len(layers), d_model=d_model, seed=args.seed)
-    result["layers"] = layers
-    print(f"\n[probe] train_acc={result['train_acc']:.4f}  test_acc={result['test_acc']:.4f}  "
-          f"chance_floor={result['chance_floor']:.4f}  n_train={result['n_train']} n_test={result['n_test']}",
-          flush=True)
-    verdict = ("test_acc clears chance by a wide margin -> reading (b): information IS present, "
-               "learnable-tag regime worth pursuing"
-               if result["test_acc"] > result["chance_floor"] + 0.15 else
-               "test_acc near chance -> reading (a): no separable depth signal in x_l, "
-               "an explicit step signal (regime 3) is likely required")
-    print(f"[verdict] {verdict}")
+    # A1 already found ||k_attn|| growing sharply with depth (15.8 -> 70.3) --
+    # a linear probe on raw x_l could trivially separate layers on NORM alone,
+    # which would say nothing about direction-based (attention/dot-product)
+    # retrievability. Re-run on L2-normalized x_l (unit norm, direction only)
+    # to isolate whether the signal survives once magnitude is removed.
+    X_norm = X / X.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+
+    results = {}
+    for tag, Xi in [("raw", X), ("l2_normalized", X_norm)]:
+        r = train_probe(Xi, y, n_classes=len(layers), d_model=d_model, seed=args.seed)
+        results[tag] = r
+        print(f"\n[probe:{tag}] train_acc={r['train_acc']:.4f}  test_acc={r['test_acc']:.4f}  "
+              f"chance_floor={r['chance_floor']:.4f}  n_train={r['n_train']} n_test={r['n_test']}",
+              flush=True)
+
+    raw_hit = results["raw"]["test_acc"] > results["raw"]["chance_floor"] + 0.15
+    norm_hit = results["l2_normalized"]["test_acc"] > results["l2_normalized"]["chance_floor"] + 0.15
+    if not raw_hit:
+        verdict = ("raw test_acc near chance -> reading (a): no separable depth signal in x_l, "
+                   "an explicit step signal (regime 3) is likely required")
+    elif norm_hit:
+        verdict = ("raw AND l2-normalized test_acc both clear chance -> reading (b), DIRECTIONAL "
+                   "signal confirmed (not just a norm/scale artifact): a learned, dot-product- "
+                   "compatible per-layer tag (regime 4) is genuinely worth pursuing")
+    else:
+        verdict = ("raw test_acc clears chance but l2-normalized does NOT -> the depth signal in "
+                   "raw x_l is (at least mostly) a norm/scale artifact (consistent with A1's "
+                   "||k_attn|| growing with depth), not directional structure a dot-product-based "
+                   "retrieval could naturally exploit -- regime 4 would need an explicit norm-based "
+                   "cue to use this, which is functionally closer to regime 3 than 'for free' routing")
+    print(f"\n[verdict] {verdict}")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps({**result, "verdict": verdict}, indent=2))
+    out_path.write_text(json.dumps({**results, "layers": layers, "verdict": verdict}, indent=2))
     print(f"wrote {out_path}")
 
 
