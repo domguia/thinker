@@ -1262,3 +1262,9 @@ Full result in `runs/olmo_ffn_geometry/layer_linear_probe.json` (Rennes home).
 Re-run per `model-design`'s extension (norm-artifact control, motivated by A1's earlier `||k_attn||` depth-growth finding): `diagnose_layer_linear_probe.py --layers 0,8,15` now trains the probe on both raw `x_l` and L2-normalized `x_l` (unit norm, direction only). Executed on `paradoxe-2`, same 10844 tokens/layer as the previous run.
 
 **`raw`: test_acc=0.9998. `l2_normalized`: test_acc=0.9995.** Both clear chance (0.3333) by the same huge margin -- the signal survives removing magnitude entirely. **Verdict: directional structure confirmed, not a norm/scale artifact** -- a learned, dot-product-compatible per-layer tag (regime 4) is genuinely viable, not just an accident of `||x_l||` growing with depth. Full JSON in `runs/olmo_ffn_geometry/layer_linear_probe.json` (Rennes home, overwritten).
+
+## 2026-09-19/20 (nuit) — S0.5 complete: full-layer composition (real attn + converted FFN) exact on all 5 layers tested
+
+Executed on `paradoxe-5` on behalf of `model-design`: `check_layer_composition_exact.py --layers 0,4,8,11,15` -- verifies S0's exact FFN conversion, embedded in OLMo-2's real Post-Norm residual structure with the real (unconverted) self-attention, reconstructs the full decoder layer output bit-for-bit, not just the isolated FFN.
+
+**PASS, `max_abs_err=0.0` / `max_rel_err=0.0` on all 5 layers, no exceptions.** Full-layer composition introduces no silent bug -- confirms the checkpoint needed before Phase 12's étape 2 (composing a converted FFN-KB read with a sequence-side read inside one Thinker-style layer) can be trusted. Full JSON in `runs/olmo_ffn_geometry/s0_5_layer_composition_check.json` (Rennes home).
