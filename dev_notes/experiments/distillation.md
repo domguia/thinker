@@ -238,3 +238,11 @@ python3 learn/indexed_attention/train_prompt_response.py \
 ```
 (LFM2-1.2B v1, not the "Thinking"/2.5 variant -- see `core/model_families.py`'s `lfm2` comment for why the tokenizer must match exactly.)
 
+
+## 2026-09-20 — KD alignment diagnostic: 0/2000 answer spans aligned on openr1_math (total CE-only fallback)
+
+Diagnostic demandé par `model-design` (mesure du taux réel de fallback CE-only sur le stream `answer`, `ReasoningPromptDataset` + Teacher targets LFM2-1.2B) exécuté sur `graffiti-3` (Nancy) : **0/2000 exemples ont un span `answer` aligné** -- fallback total, aucun signal KD sur ce stream tel que généré actuellement.
+
+Confirme la limitation explicitement anticipée par `model-design` avant ce diagnostic ("`answer` canonique/pas forcément verbatim dans le texte généré"). Le signal KD sur `reasoning` portera donc entièrement sur le stream `thinking` (le trace `<think>...</think>` lui-même, qui est verbatim par construction) -- pas bloquant pour le KD global, mais confirme qu'il faut soit ignorer/pondérer à zéro le KD sur `answer` pour ce dataset, soit revoir `prepare_reasoning_data.py` pour que l'`answer` canonique corresponde à un span verbatim du texte généré (si l'un des deux streams doit avoir du KD).
+
+Commande exécutée : script fourni par `model-design` (`ReasoningPromptDataset` chargé avec `teacher_targets=data/distill/openr1_math/val_topk32_lfm2-1.2b.npz`), sur les 2000 exemples du split val.
