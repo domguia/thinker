@@ -320,3 +320,7 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 ## 2026-09-20 — Sur-souscription CPU trouvee sur paradoxe-5 (load 157/104) -- cause identifiee, pas d'action corrective destructrice
 - Constat : `paradoxe-5` a un load moyen de 157/104 (verifie via `uptime`). Cause : les 3 lancements directs de `train_prompt_response.py` (pas via `tools/exp/worker.py`) n'ont pas de `OMP_NUM_THREADS`/`MKL_NUM_THREADS` limite -- chaque process PyTorch peut utiliser tous les coeurs visibles en intra-op parallelism, en plus des 16 workers deja actifs (toy_nmemory/b1_curriculum_promote, ceux-la bien limites a 1 thread chacun).
 - Decision : ne pas tuer/relancer les 3 runs prompt_response (P0, deja 15-20 min de progres reel, load eleve ralentit mais ne fait pas planter) -- correctif applique uniquement en amont : tout futur lancement direct (hors `tools/exp/worker.py`) de script d'entrainement doit fixer `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1` explicitement si colocale avec d'autres charges CPU sur le meme noeud, ou etre lance seul sur un noeud degage.
+
+## 2026-09-20 — Nettoyage claims orphelins useff_sweep + lancement joint sweep sur GPU liberes post-preemption
+- `pistea_c_useff_sweep` : 8 claims orphelins trouves (jamais demarres avant la preemption -- aucun state.json), nettoyes, relance sur `abacus11-1`.
+- `pistea_c_nstep_lr_joint` (40 cellules) lance sur `abacus17-1` (2 GPU RTX 6000, totalement inactif) des la fin de `nstep_sweep` (24/24).
