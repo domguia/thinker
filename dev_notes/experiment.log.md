@@ -1256,3 +1256,9 @@ Executed on `paradoxe-2` (CPU, Rennes -- `paradoxe-27`'s job expired mid-session
 **Result: `test_acc=0.9997` vs `chance_floor=0.3333`** (train_acc=1.0000, 22773 train / 9759 test tokens) -- clears the script's own `chance+0.15` bar by a huge margin. **Reading (b) confirmed: layer-depth information IS present in `x_l`, essentially perfectly linearly separable -- it just isn't accessible via a raw, untrained dot product against `gate_proj` rows (étape 1's negative result was about that specific untrained-geometry test, not about whether the information exists at all).** A learned per-layer/depth signal is viable -- `model-design`'s own framing, relayed for their read/decision on next steps (regime 4's content-addressed tag stays alive per this result, per their own decision table).
 
 Full result in `runs/olmo_ffn_geometry/layer_linear_probe.json` (Rennes home).
+
+## 2026-09-19/20 (nuit) — S3 linear probe, norm-artifact control: directional signal confirmed, not a scale artifact
+
+Re-run per `model-design`'s extension (norm-artifact control, motivated by A1's earlier `||k_attn||` depth-growth finding): `diagnose_layer_linear_probe.py --layers 0,8,15` now trains the probe on both raw `x_l` and L2-normalized `x_l` (unit norm, direction only). Executed on `paradoxe-2`, same 10844 tokens/layer as the previous run.
+
+**`raw`: test_acc=0.9998. `l2_normalized`: test_acc=0.9995.** Both clear chance (0.3333) by the same huge margin -- the signal survives removing magnitude entirely. **Verdict: directional structure confirmed, not a norm/scale artifact** -- a learned, dot-product-compatible per-layer tag (regime 4) is genuinely viable, not just an accident of `||x_l||` growing with depth. Full JSON in `runs/olmo_ffn_geometry/layer_linear_probe.json` (Rennes home, overwritten).
