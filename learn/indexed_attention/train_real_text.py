@@ -229,6 +229,16 @@ def evaluate_at_nstep(model, ds, pad_id: int, n_lanes: int, t_local: int, seed: 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data", required=True, help="JSONL path, one {'text': ...} per line")
+    p.add_argument("--val_data", default=None,
+                    help="optional separate JSONL path (same format as --data) for a genuine "
+                         "held-out evaluation -- this project had NO held-out mechanism for real "
+                         "text before this flag (training loss/ppl only). Required for any fair "
+                         "loss/ppl comparison against a reference LLM (both must be scored on data "
+                         "neither saw), and used as the extrapolation probe's data when given "
+                         "(falls back to --data, NOT held-out, if omitted -- see "
+                         "--extrapolate_n_steps' own docstring).")
+    p.add_argument("--val_every", type=int, default=500)
+    p.add_argument("--val_batches", type=int, default=20)
     p.add_argument("--tokenizer", default="lfm2", help="HF repo id, or a family alias from core/model_families.py (lfm2/olmo/qwen)")
     p.add_argument("--depth", type=int, default=1, help="0 = Baseline C (flat); 1 = the 2026-09-14 default (no index)")
     p.add_argument("--block_size", type=int, default=16)
@@ -320,6 +330,13 @@ def main():
                                t_tgt=args.t_tgt, stride=args.stride, pad_id=pad_id)
     print(f"loaded {len(ds.docs)} docs, {len(ds.windows)} windows, vocab_size={vocab_size}", flush=True)
     batcher = LockstepLaneBatcher(ds, n_lanes=args.n_lanes, seed=args.seed)
+
+    val_ds = None
+    if args.val_data:
+        val_ds = RealTextWindowDataset(args.val_data, tok, n_ctx=args.n_ctx, t_local=args.t_local,
+                                        t_tgt=args.t_tgt, stride=args.stride, pad_id=pad_id)
+        print(f"loaded held-out val: {len(val_ds.docs)} docs, {len(val_ds.windows)} windows "
+              f"from {args.val_data}", flush=True)
 
     model = Thinker(
         vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
@@ -415,6 +432,12 @@ def main():
                   f"lr={lr_at(step):.2e} active_lanes={int(valid_f.sum().item())}/{args.n_lanes}", flush=True)
             logger.progress(step, loss=mean_loss, ppl=ppl, lr=lr_at(step),
                             active_lanes=int(valid_f.sum().item()))
+        if val_ds is not None and step % args.val_every == 0 and step > 0:
+            val_loss = evaluate_at_nstep(model, val_ds, pad_id, args.n_lanes, args.t_local, args.seed,
+                                          device, args.n_step, n_eval_batches=args.val_batches)
+            val_ppl = torch.exp(torch.tensor(val_loss)).item()
+            print(f"step={step:6d} val_loss={val_loss:.4f} val_ppl={val_ppl:.2f} (held-out)", flush=True)
+            logger.progress(step, val_loss=val_loss, val_ppl=val_ppl)
         step += 1
 
     print("\n---", flush=True)
@@ -434,11 +457,19 @@ def main():
         torch.save(model.state_dict(), ckpt_path)
         print(f"checkpoint saved to {ckpt_path}", flush=True)
 
+    final_val_loss = None
+    if val_ds is not None:
+        final_val_loss = evaluate_at_nstep(model, val_ds, pad_id, args.n_lanes, args.t_local, args.seed,
+                                            device, args.n_step, n_eval_batches=max(args.val_batches, 20))
+        print(f"final_val_loss: {final_val_loss:.4f} (held-out, n_step={args.n_step})", flush=True)
+
     extrapolation_results = {}
     if args.extrapolate_n_steps:
-        print("--- extrapolation probe (n_step_test vs training n_step) ---", flush=True)
+        probe_ds = val_ds if val_ds is not None else ds
+        print(f"--- extrapolation probe (n_step_test vs training n_step), "
+              f"{'held-out' if val_ds is not None else 'NOT held-out, see flag docstring'} ---", flush=True)
         for n_step_test in [int(x) for x in args.extrapolate_n_steps.split(",")]:
-            probe_loss = evaluate_at_nstep(model, ds, pad_id, args.n_lanes, args.t_local, args.seed,
+            probe_loss = evaluate_at_nstep(model, probe_ds, pad_id, args.n_lanes, args.t_local, args.seed,
                                             device, n_step_test, n_eval_batches=20)
             probe_ppl = torch.exp(torch.tensor(probe_loss)).item()
             extrapolation_results[n_step_test] = probe_loss
@@ -450,9 +481,11 @@ def main():
     # réclame que pour les métriques de type accuracy).
     logger.finish(summary={
         "final_loss": sum(loss_hist[-50:]) / max(len(loss_hist[-50:]), 1),
+        "final_val_loss": final_val_loss,
         "num_steps": step,
         "training_seconds": time.time() - start_time,
         "extrapolation": extrapolation_results or None,
+        "extrapolation_held_out": val_ds is not None,
     })
 
 
