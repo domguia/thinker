@@ -23,6 +23,21 @@ Two modes:
 Output format at the end matches program.md's convention (best_loss /
 training_seconds / num_steps / num_params_M) for consistency with the rest
 of the repo's experiment scripts.
+
+Multi-GPU (2026-09-20, user request: "allow the code to do data parallel,
+we'll see at run time if it's worth it even with a large batch"): opt-in
+DistributedDataParallel, zero behavior change for the existing single-process
+invocation. This project's own established pattern (dev_notes/compute_scheduling.md)
+is to pack independent runs onto a GPU rather than DDP a single one -- at
+this model size (tens to a few hundred M params) DDP is not expected to be
+necessary, but the option is now there to test directly rather than assume.
+
+    # single GPU, unchanged:
+    python3 learn/distill/train_sft.py --train_file ... [...]
+    # multi-GPU DDP, same script, same flags, no code path change needed:
+    torchrun --nproc_per_node=N learn/distill/train_sft.py --train_file ... [...]
+
+Only rank 0 prints/logs (wandb/mlflow)/checkpoints, to avoid N-way duplication.
 """
 import argparse
 import json
@@ -31,8 +46,11 @@ import time
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from data.real_text_windows import RealTextWindowDataset
@@ -507,7 +525,17 @@ def main():
         if args.mup_untie_head:
             config.tie_word_embeddings = False  # canonical muP: readout scaled independently of the input embedding
         width_mult = args.n_embd / args.mup_base_width
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    is_distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    if is_distributed:
+        dist.init_process_group(backend="nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        rank, world_size = dist.get_rank(), dist.get_world_size()
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        rank, world_size = 0, 1
+    is_main = rank == 0
     model = AutoModelForCausalLM.from_config(config)  # random init: architecture only, no pretrained weights
     core_params = sum(p.numel() for n, p in model.named_parameters() if "wte" not in n and "lm_head" not in n)
     head_params = sum(p.numel() for n, p in model.named_parameters() if "wte" in n or "lm_head" in n)
@@ -537,10 +565,10 @@ def main():
         "depth_mup": args.depth_mup, "mup_base_depth": args.mup_base_depth if args.depth_mup else None, "depth_mult": depth_mult,
         "weight_decay": args.weight_decay,
     }
-    if args.wandb:
+    if args.wandb and is_main:
         import wandb
         wandb.init(project=args.wandb_project, name=args.run_name, group=args.wandb_group, config=run_config)
-    if args.mlflow:
+    if args.mlflow and is_main:
         import mlflow
         mlflow.set_tracking_uri(args.mlflow_tracking_uri)
         mlflow.set_experiment(args.mlflow_experiment)
@@ -552,15 +580,26 @@ def main():
         print(f"Train windows: {len(train_ds)} (real_text_windows mode, n_ctx={args.n_ctx} t_tgt={args.t_tgt} "
               f"stride={args.stride if args.stride is not None else args.t_tgt} -> block_size={args.block_size})")
         k = None
-        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_real_text_windows)
+        train_collate = collate_real_text_windows
     else:
         train_ds = JsonlTextDataset(args.train_file, tokenizer, args.block_size, teacher_targets=args.teacher_targets)
         print(f"Train examples: {len(train_ds)}" + (f" (KD against {args.teacher_targets}, K={train_ds.k})" if args.teacher_targets else ""))
         k = train_ds.k if args.teacher_targets else None
-        train_loader = DataLoader(
-            train_ds, batch_size=args.batch_size, shuffle=True,
-            collate_fn=lambda b: collate(b, tokenizer.pad_token_id, k=k),
-        )
+        train_collate = lambda b: collate(b, tokenizer.pad_token_id, k=k)
+
+    # DistributedSampler shards+shuffles the dataset itself (each rank sees a
+    # disjoint 1/world_size slice per epoch) -- DataLoader's own shuffle=True
+    # must NOT also be set when a sampler is given (mutually exclusive in
+    # torch's API). --batch_size stays PER-PROCESS, so the effective global
+    # batch size under DDP is batch_size * world_size -- report both so a
+    # scaled run isn't silently compared against a single-GPU one at a
+    # different effective batch size.
+    train_sampler = DistributedSampler(train_ds, shuffle=True) if is_distributed else None
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=(train_sampler is None),
+                               sampler=train_sampler, collate_fn=train_collate)
+    if is_distributed and is_main:
+        print(f"DDP: world_size={world_size}, per-process batch_size={args.batch_size}, "
+              f"effective global batch_size={args.batch_size * world_size}", flush=True)
 
     val_loader = None
     if args.val_file and args.val_every:
@@ -571,24 +610,42 @@ def main():
         )
         print(f"Val examples: {len(val_ds)} (evaluated every {args.val_every} steps)")
 
+    # Optimizer built from the RAW (pre-DDP) model: build_mup_param_groups
+    # matches on parameter NAMES (is_mup_hidden_weight), which DDP's wrapper
+    # would prefix with "module." -- DDP only wraps forward/backward, the
+    # underlying Parameter tensors are unchanged, so building the optimizer
+    # first and wrapping in DDP after is safe (same objects, no name lookup
+    # needed post-wrap).
     if args.mup:
         optimizer = torch.optim.AdamW(build_mup_param_groups(model, args.lr, width_mult), weight_decay=args.weight_decay)
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if is_distributed:
+        model = DDP(model, device_ids=[local_rank])
     model.train()
 
     step, losses = 0, []
     if args.resume_from:
         ckpt = torch.load(args.resume_from, map_location=device)
-        model.load_state_dict(ckpt["state_dict"])
+        # Checkpoints always store the UNWRAPPED module's state_dict (see
+        # save_checkpoint's call sites below) -- DDP's own .state_dict() would
+        # add a "module." prefix to every key, which a plain (non-DDP) load
+        # elsewhere couldn't consume. Load into .module explicitly under DDP
+        # so checkpoints stay interchangeable between single-GPU and DDP runs.
+        (model.module if is_distributed else model).load_state_dict(ckpt["state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         step = ckpt["step"]
         losses = ckpt["losses"]
-        print(f"Resumed from {args.resume_from} at step {step} (best_loss so far: {min(losses):.6f})")
+        if is_main:
+            print(f"Resumed from {args.resume_from} at step {step} (best_loss so far: {min(losses):.6f})")
 
     start = time.time()
     done = False
+    epoch = 0
     while not done:
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)  # reshuffles differently each epoch under DDP
+        epoch += 1
         for batch in train_loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16):
@@ -615,7 +672,7 @@ def main():
             optimizer.zero_grad()
             losses.append(loss.item())
             step += 1
-            if step % args.log_every == 0 or step == 1:
+            if is_main and (step % args.log_every == 0 or step == 1):
                 if args.teacher_targets:
                     print(f"step {step} loss {loss.item():.4f} (ce {ce.item():.4f} kd {kd.item():.4f})")
                     step_metrics = {"loss": loss.item(), "ce": ce.item(), "kd": kd.item()}
@@ -627,9 +684,10 @@ def main():
                     wandb.log(step_metrics, step=step)
                 if args.mlflow:
                     mlflow.log_metrics(step_metrics, step=step)
-            if args.save_dir and args.checkpoint_every and step % args.checkpoint_every == 0:
-                save_checkpoint(os.path.join(args.save_dir, "checkpoint.pt"), model, optimizer, step, losses, args, width_mult, depth_mult)
-            if val_loader is not None and (step % args.val_every == 0 or step == 1):
+            if is_main and args.save_dir and args.checkpoint_every and step % args.checkpoint_every == 0:
+                save_checkpoint(os.path.join(args.save_dir, "checkpoint.pt"),
+                                 model.module if is_distributed else model, optimizer, step, losses, args, width_mult, depth_mult)
+            if is_main and val_loader is not None and (step % args.val_every == 0 or step == 1):
                 val_ce, val_kd, val_loss = evaluate_val(model, val_loader, device, args, width_mult)
                 print(f"step {step} VAL loss {val_loss:.4f} (ce {val_ce:.4f} kd {val_kd:.4f})")
                 if args.wandb:
@@ -642,27 +700,31 @@ def main():
                 break
 
     elapsed = time.time() - start
-    print("---")
-    print(f"best_loss:        {min(losses):.6f}")
-    print(f"training_seconds: {elapsed:.1f}")
-    print(f"num_steps:        {step}")
-    print(f"num_params_M:     {num_params / 1e6:.2f}")
+    if is_main:
+        print("---")
+        print(f"best_loss:        {min(losses):.6f}")
+        print(f"training_seconds: {elapsed:.1f}")
+        print(f"num_steps:        {step}")
+        print(f"num_params_M:     {num_params / 1e6:.2f}")
 
-    final_metrics = {"best_loss": min(losses), "training_seconds": elapsed, "num_steps": step}
-    # Objectif de distillation : pertes uniquement, pas d'accuracy — donc pas
-    # de contrôles triviaux exigibles.
-    logger.finish(summary=final_metrics)
-    if args.wandb:
-        wandb.log(final_metrics)
-        wandb.finish()
-    if args.mlflow:
-        mlflow.log_metrics(final_metrics)
-        mlflow.end_run()
+        final_metrics = {"best_loss": min(losses), "training_seconds": elapsed, "num_steps": step}
+        # Objectif de distillation : pertes uniquement, pas d'accuracy — donc pas
+        # de contrôles triviaux exigibles.
+        logger.finish(summary=final_metrics)
+        if args.wandb:
+            wandb.log(final_metrics)
+            wandb.finish()
+        if args.mlflow:
+            mlflow.log_metrics(final_metrics)
+            mlflow.end_run()
 
-    if args.save_dir:
-        ckpt_path = os.path.join(args.save_dir, "checkpoint.pt")
-        save_checkpoint(ckpt_path, model, optimizer, step, losses, args, width_mult, depth_mult)
-        print(f"Saved checkpoint to {ckpt_path}")
+        if args.save_dir:
+            ckpt_path = os.path.join(args.save_dir, "checkpoint.pt")
+            save_checkpoint(ckpt_path, model.module if is_distributed else model, optimizer, step, losses, args, width_mult, depth_mult)
+            print(f"Saved checkpoint to {ckpt_path}")
+
+    if is_distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
