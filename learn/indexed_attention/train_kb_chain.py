@@ -138,6 +138,10 @@ def main():
     parser.add_argument("--extrapolate_n_steps", default=None,
                          help="comma-separated N_step_test values > training N_step to probe in-memory "
                               "after training finishes, no checkpoint needed (e.g. '8,16,24')")
+    parser.add_argument("--save_checkpoint_path", default=None,
+                         help="save model.state_dict() here after training -- this script never did "
+                              "before (2026-09-19 gap found while trying to reuse Etape 4's checkpoints "
+                              "for a post-hoc N_step-generalization eval, which turned out not to exist)")
     add_run_args(parser)
     args = parser.parse_args()
     logger = logger_from_args(args)
@@ -255,6 +259,10 @@ def main():
                   "margin": final_acc - baselines["conditional_chance"],
                   "leak_check": pred_in_kb_rate},
     )
+
+    if args.save_checkpoint_path:
+        torch.save(model.state_dict(), args.save_checkpoint_path)
+        print(f"checkpoint saved to {args.save_checkpoint_path}")
 
     if args.extrapolate_n_steps:
         # In-memory extrapolation probe (thinker-e9's suggestion): no
