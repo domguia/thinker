@@ -1278,3 +1278,13 @@ Executed on `paradoxe-5` (P1, no dedicated reservation): both étape-1 diagnosti
 **Linear probe (`diagnose_layer_linear_probe.py`, 16-way classification)**: `raw` test_acc=0.9918, `l2_normalized` test_acc=0.9589, both against `chance_floor=0.0625` (121453 train / 52051 test tokens, 10844/layer). **Confirms the 3-layer finding at full stratification**: layer identity is strongly, directionally decodable from `x_l` across all 16 layers, not just a coarse low/mid/high split -- some expected softening at 16-way vs 3-way (l2_normalized drops from 0.9995 to 0.9589, still enormous vs chance) is consistent with finer-grained classes being harder, not a qualitative change in the finding.
 
 Full JSON: `runs/olmo_ffn_geometry/layer_source_attribution_16layers.json`, `layer_linear_probe_16layers.json` (Rennes home).
+
+## 2026-09-19/20 (nuit) — B1 complete (100/100): resolves the 2026-09-16 "how often does stage 2 escape" question -- rare, not typical
+
+`b1_assoc_recall_wideseed` (`--n_facts_curriculum 1,2,3,4 --n_facts 4 --latent_reset_at_query`, `lr=1e-3`, same config the 2026-09-16 entry left open, 100 seeds), Rennes `paradoxe-2/5/27` CPU, all 100 cells done.
+
+**Distribution of `final_acc`**: mean=0.519, median=0.511, stdev=0.091. Histogram: `[0.2,0.4)`=9, `[0.4,0.6)`=**82**, `[0.6,0.8)`=6, `[0.8,1.0)`=3.
+
+**This is the wide-seed characterization the 2026-09-16 entry called for** ("what fraction of seeds/restarts escape stage 2 at this config"). **Answer: escape is rare, not typical** -- the overwhelming majority of seeds (82/100) land in the same tight stage-2-plateau band (0.4-0.6) already seen in the original 3-seed runs (`0.49-0.54`), confirming that band is the *modal* outcome, not an unlucky minority. Only 9/100 partially escape (0.6-0.8) and just 3/100 reach a clearly different regime (0.8+). **Confirms the "solution rare in the loss landscape" reading from 2026-09-16** with real statistical backing (100 seeds, not 3) rather than leaving it as a hypothesis. **Practical implication for the paper/curriculum-design decision**: relying on "just add more seeds/restarts" to reach the escaped regime is expensive (~1-in-11 to reach partial escape, ~1-in-33 for full escape) -- a curriculum-design change (relaxed `--curriculum_promote_acc`, more stages, longer dwell, as flagged 2026-09-16) is the more promising lever than brute-force seed search, now that the seed-search option's real cost is quantified.
+
+Full per-seed results in `runs/b1_assoc_recall_wideseed/state/*.json` (Rennes home).
