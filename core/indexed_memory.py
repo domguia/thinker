@@ -233,10 +233,16 @@ class HierarchicalMemory(nn.Module):
                                           decouple_kv=decouple_kv, pool_n_head=pool_n_head,
                                           k_dim=k_dim)
         self.level_norms = nn.ModuleList([RMSNorm(self.k_dim) for _ in range(depth + 1)])
+        # spec §8ter: levels added via add_static_level() don't correspond to
+        # any position in the depth+1 hierarchy above (there can be any
+        # number of them, one per ingested document) -- they share this one
+        # extra norm instead of indexing into level_norms.
+        self.static_level_norm = RMSNorm(self.k_dim)
 
         self._levels_k = None
         self._levels_v = None
         self._levels_mask = None
+        self._n_hierarchy_levels = 0
 
     def build(self, leaf_embeddings: torch.Tensor, source_ids: torch.Tensor,
               leaf_mask: torch.Tensor = None) -> None:
@@ -303,6 +309,7 @@ class HierarchicalMemory(nn.Module):
         self._levels_k = levels_k
         self._levels_v = levels_v
         self._levels_mask = levels_mask
+        self._n_hierarchy_levels = len(levels_k)
 
     def build_static(self, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor = None) -> None:
         """
@@ -339,6 +346,43 @@ class HierarchicalMemory(nn.Module):
         self._levels_k = [K]
         self._levels_v = [V]
         self._levels_mask = [mask if mask is not None else torch.ones(B, S, dtype=torch.bool, device=K.device)]
+        self._n_hierarchy_levels = 1
+
+    def clear(self) -> None:
+        """Empties all levels (spec §8ter) so add_static_level can build up a
+        fresh set of ingested-document entries without any build()/build_static()
+        call first."""
+        self._levels_k = []
+        self._levels_v = []
+        self._levels_mask = []
+        self._n_hierarchy_levels = 0
+
+    def add_static_level(self, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor = None) -> None:
+        """
+        Spec §8ter: appends one more static (K, V) level on top of whatever is
+        already present (from build(), build_static(), or a previous
+        add_static_level call), instead of replacing it like build_static does.
+        Each call is meant for one ingested document's (K, V) pair, produced
+        by Thinker.ingest() rather than k_proj/v_proj -- attend()'s unified
+        softmax over `self._levels_k/_v/_mask` treats every level the same way
+        regardless of how it was produced, so no change to attend() itself is
+        needed. Unlike build_static, this does NOT require depth == 0: the
+        ingested levels sit alongside whatever build() already produced from
+        `depth`'s own hierarchy.
+
+        K: (B, S, k_dim), V: (B, S, d_model) -- already in this memory's K/V
+            spaces (Thinker.ingest's sm_k/sm_v are, since sm_write_proj and
+            this memory's k_proj/v_proj share d_model but are otherwise
+            unrelated weights -- see spec §8ter's note that the injection
+            point is deliberately the same as build_static's).
+        mask: optional (B, S) bool, True = real entry.
+        """
+        if self._levels_k is None:
+            self.clear()
+        B, S, _ = K.shape
+        self._levels_k.append(K)
+        self._levels_v.append(V)
+        self._levels_mask.append(mask if mask is not None else torch.ones(B, S, dtype=torch.bool, device=K.device))
 
     def attend(self, query_input: torch.Tensor) -> torch.Tensor:
         """
@@ -348,8 +392,18 @@ class HierarchicalMemory(nn.Module):
         `build`'s `leaf_mask`) never receive attention weight.
         """
         assert self._levels_k is not None, "call build() before attend()"
+        if len(self._levels_k) == 0:
+            # spec §8ter: attend() can be called with no KB entries yet
+            # (ingesting the first document of a batch, before any
+            # add_static_level call) -- there is nothing to read, so this
+            # behaves like disable_kb for that single call.
+            B, T, d = query_input.shape
+            return torch.zeros(B, T, d, device=query_input.device, dtype=query_input.dtype)
 
-        normed_k = [self.level_norms[i](k) for i, k in enumerate(self._levels_k)]
+        normed_k = [
+            self.level_norms[i](k) if i < self._n_hierarchy_levels else self.static_level_norm(k)
+            for i, k in enumerate(self._levels_k)
+        ]
         k_all = torch.cat(normed_k, dim=1)
         v_all = torch.cat(self._levels_v, dim=1)
 

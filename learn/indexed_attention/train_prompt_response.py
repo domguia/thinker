@@ -85,6 +85,42 @@ def kd_losses(streams, batch, dataset_type: str):
     return kd_answer, kd_thinking
 
 
+def ingest_documents(model, batch, n_docs_max: int, block_size: int, n_step_ingest: int) -> None:
+    """
+    Spec §8ter, MVP (intra-batch only, no inter-batch cache -- 2026-09-20 user
+    decision to build the minimal version first): runs each document block of
+    `batch["kb_tokens"]` (retrieval only -- see RetrievalPromptDataset's
+    per-document block layout) through `model.ingest()` instead of letting
+    `HierarchicalMemory.build()` project it directly via k_proj/v_proj, then
+    injects the resulting (K, V) as one extra memory level per document via
+    `add_static_level`.
+
+    Ingested in document order with the memory left populated between calls
+    (user's 2026-09-20 choice: KB access stays ON during ingestion), so
+    document i's ingestion pass can attend to documents 0..i-1 already
+    ingested earlier in this same call -- not to documents after it, nor
+    (in this MVP) to any other example's documents.
+
+    A document slot that is fully padding for every example in the batch
+    (RetrievalPromptDataset masks out missing documents when an example has
+    fewer than n_docs_max real ones) is skipped entirely -- nothing to
+    ingest. A slot real for SOME but not all examples in the batch is still
+    ingested (padding rows produce garbage KV for the examples missing it),
+    but `add_static_level`'s mask marks those examples' entries as unreal so
+    `attend()`'s softmax never reads them.
+    """
+    model.memory.clear()
+    for i in range(n_docs_max):
+        start = i * block_size
+        doc_tokens = batch["kb_tokens"][:, start:start + block_size]
+        doc_present = batch["kb_leaf_mask"][:, start:start + block_size].any(dim=1)  # (B,)
+        if not doc_present.any():
+            continue
+        sm_k, sm_v = model.ingest(doc_tokens, n_step_ingest)
+        mask = doc_present.unsqueeze(1).expand(-1, sm_k.shape[1])
+        model.memory.add_static_level(sm_k, sm_v, mask=mask)
+
+
 def query_tokens_for(dataset_type: str, batch, block_size: int):
     """What seeds the register (spec: mean-pooled embedding added to
     register_init) -- real-text uses the last t_local context tokens
@@ -101,7 +137,8 @@ def query_tokens_for(dataset_type: str, batch, block_size: int):
 
 @torch.no_grad()
 def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: int, n_batches: int = 20,
-             teacher_enabled: bool = False):
+             teacher_enabled: bool = False, ingest_kb: bool = False, n_docs_max: int = 0,
+             ingest_n_step: int = 3):
     model.eval()
     keys = ["answer", "thinking"] if dataset_type == "reasoning" else ["answer"]
     losses = {k: [] for k in keys}
@@ -115,8 +152,13 @@ def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: 
         target_input = {"answer": batch["answer_target_input"]}
         if dataset_type == "reasoning":
             target_input["thinking"] = batch["thinking_target_input"]
-        _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, n_step,
-                            kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input)
+        if ingest_kb:
+            ingest_documents(model, batch, n_docs_max, block_size, ingest_n_step)
+            _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, n_step,
+                                target_input=target_input, kb_prebuilt=True)
+        else:
+            _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, n_step,
+                                kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input)
         ce_answer = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"], ignore_index=-100)
         losses["answer"].append(ce_answer.item())
         if dataset_type == "reasoning":
@@ -158,6 +200,14 @@ def main() -> None:
     p.add_argument("--pool_n_head", type=int, default=1)
     p.add_argument("--k_dim", type=int, default=None)
     p.add_argument("--disable_kb", action="store_true")
+    p.add_argument("--ingest_kb", action="store_true",
+                    help="spec §8ter, retrieval only: build the KB by running each document through "
+                         "model.ingest() (the model's own recurrent loop + sm_write_proj) instead of "
+                         "HierarchicalMemory.build()'s direct k_proj/v_proj projection. MVP: intra-batch "
+                         "only, no inter-batch cache -- every document is re-ingested every batch.")
+    p.add_argument("--ingest_n_step", type=int, default=3,
+                    help="--ingest_kb only: number of recurrent iterations used to ingest EACH document "
+                         "(independent of --n_step, which is the QA pass's iteration count).")
     p.add_argument("--use_ff", action="store_true")
     p.add_argument("--ff_hidden_mult", type=int, default=4)
     p.add_argument("--thinking_weight", type=float, default=1.0,
@@ -200,6 +250,9 @@ def main() -> None:
     args = p.parse_args()
     logger = logger_from_args(args)
 
+    if args.ingest_kb:
+        assert args.dataset_type == "retrieval", "--ingest_kb is only meaningful for --dataset_type retrieval"
+
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
@@ -239,7 +292,7 @@ def main() -> None:
         disable_kb=args.disable_kb, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
         use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims=stream_dims, stream_sequence=stream_sequence, max_target_len=max_target_len,
-        stream_n_layers=stream_n_layers,
+        stream_n_layers=stream_n_layers, use_ingest_token=args.ingest_kb,
     ).to(device)
     n_params = sum(t.numel() for t in model.parameters())
     print(f"dataset_type={args.dataset_type} d_model={args.d_model} n_step={args.n_step} "
@@ -272,8 +325,13 @@ def main() -> None:
             if args.dataset_type == "reasoning":
                 target_input["thinking"] = batch["thinking_target_input"]
 
-            _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
-                               kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input)
+            if args.ingest_kb:
+                ingest_documents(model, batch, args.n_docs_max, args.block_size, args.ingest_n_step)
+                _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
+                                   target_input=target_input, kb_prebuilt=True)
+            else:
+                _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
+                                   kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input)
 
             ce_answer = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"], ignore_index=-100)
             if args.dataset_type == "reasoning":
@@ -317,7 +375,9 @@ def main() -> None:
             if val_loader is not None and (step % args.val_every == 0 or step == 1):
                 val_losses = evaluate(model, val_loader, device, args.dataset_type, args.n_step,
                                        args.block_size, n_batches=args.val_batches,
-                                       teacher_enabled=val_ds.teacher is not None)
+                                       teacher_enabled=val_ds.teacher is not None,
+                                       ingest_kb=args.ingest_kb, n_docs_max=args.n_docs_max,
+                                       ingest_n_step=args.ingest_n_step)
                 print(f"step={step:6d} VAL {val_losses}", flush=True)
                 logger.progress(step, **{f"val_{k}": v for k, v in val_losses.items()})
 

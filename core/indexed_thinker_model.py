@@ -160,8 +160,19 @@ class Thinker(nn.Module):
                  decouple_kv: bool = True, pool_n_head: int = 1, k_dim: int = None,
                  disable_kb: bool = False, disable_sm: bool = False,
                  stream_sequence: dict = None, max_target_len: int = None,
-                 stream_vocab_sizes: dict = None):
+                 stream_vocab_sizes: dict = None, use_ingest_token: bool = False):
         super().__init__()
+        # spec §8ter: a dedicated ingestion-marker embedding, id reserved just
+        # past the tokenizer's own vocab_size (same pattern as the synthetic
+        # tasks' KEY_MARK/VAL_MARK, data/kb_retrieval.py) rather than a
+        # tokenizer.add_special_tokens() call -- no precedent for the latter
+        # in this repo, and it would require resizing/retraining the
+        # tokenizer's own embedding. Purely additive: vocab_size grows by 1
+        # only when use_ingest_token=True, every existing caller unaffected.
+        self.use_ingest_token = use_ingest_token
+        if use_ingest_token:
+            self.ingest_token_id = vocab_size
+            vocab_size = vocab_size + 1
         self.d_model = d_model
         self.n_register = n_register
         self.sm_cap = sm_cap
@@ -243,9 +254,99 @@ class Thinker(nn.Module):
             for name, dim in stream_dims.items()
         })
 
+    def _step(self, R: torch.Tensor, sm_k: torch.Tensor, sm_v: torch.Tensor):
+        """
+        One iteration of the core recurrent loop (spec §2), factored out of
+        forward() so ingest() (spec §8ter) can reuse the exact same weights
+        (memory.attend, sm_q_proj, fuse_*, sm_write_proj) instead of
+        duplicating the loop body. Reads self.memory (whatever levels are
+        currently built -- during ingestion these are the documents already
+        ingested earlier in the batch, per the user's 2026-09-20 KB-visible
+        choice for §8ter) exactly like a normal reasoning step would.
+        """
+        o_kb = torch.zeros_like(R) if self.disable_kb else self.memory.attend(R)
+
+        if not self.disable_sm and sm_k.shape[1] > 0:
+            q_sm = self.sm_q_proj(R)
+            o_sm = F.scaled_dot_product_attention(q_sm, sm_k, sm_v)
+        else:
+            o_sm = torch.zeros_like(R)
+
+        fused = torch.cat([o_kb, o_sm, R], dim=-1)
+        if self.use_ff:
+            delta = self.fuse_out(F.gelu(self.fuse_in(self.fuse_norm(fused))))
+        else:
+            delta = self.fuse_proj(self.fuse_norm(fused))
+        R = R + delta
+
+        if not self.disable_sm:
+            new_k, new_v = self.sm_write_proj(R).chunk(2, dim=-1)
+            if self.detach_sm_keys:
+                new_k = new_k.detach()
+            sm_k = torch.cat([sm_k, new_k], dim=1)
+            sm_v = torch.cat([sm_v, new_v], dim=1)
+            if self.sm_cap is not None and sm_k.shape[1] > self.sm_cap:
+                sm_k = sm_k[:, -self.sm_cap:]
+                sm_v = sm_v[:, -self.sm_cap:]
+
+        return R, sm_k, sm_v
+
+    def ingest(self, doc_tokens: torch.Tensor, n_step: int) -> tuple:
+        """
+        Spec §8ter: runs a document through the SAME recurrent loop used for
+        reasoning (self._step, shared weights, in particular sm_write_proj)
+        instead of the direct k_proj/v_proj projection of §8 -- the
+        (new_k, new_v) written to SM at each step become, instead, the
+        document's own entry in the KB (injected by the caller via
+        `self.memory.add_static_level(sm_k, sm_v, mask)`, not left in the
+        ephemeral per-episode SM).
+
+        Requires use_ingest_token=True (a dedicated marker embedding prepended
+        to doc_tokens, spec §8ter point 1) -- assert below since ingest()
+        without it would silently reuse a real vocabulary token's embedding
+        as the ingestion marker, indistinguishable from actual document
+        content to the model.
+
+        Per the user's 2026-09-20 decision, KB access stays ON during
+        ingestion (self.memory.attend(R) inside _step reads whatever levels
+        are already built -- i.e. documents ingested earlier in the same
+        batch/call sequence become visible to documents ingested after them).
+        The caller controls that ordering by calling ingest() once per
+        document and add_static_level() right after each call, before the
+        next ingest() call.
+
+        doc_tokens: (B, L) token ids of ONE document (no ingestion marker --
+            added here).
+        n_step: number of ingestion iterations (may differ from the QA
+            n_step; the spec notes this could later control how much KB
+            capacity a document ends up occupying, §8ter [OUVERT]).
+
+        Returns (sm_k, sm_v): (B, n_step, k_dim)/(B, n_step, d_model) -- the
+            full SM trajectory produced while ingesting this one document,
+            meant to be added as one KB level via
+            `self.memory.add_static_level(sm_k, sm_v)`.
+        """
+        assert self.use_ingest_token, (
+            "Thinker.ingest requires use_ingest_token=True (spec §8ter point 1: "
+            "a dedicated marker embedding, not a reused vocabulary token)"
+        )
+        B, L = doc_tokens.shape
+        device = doc_tokens.device
+        marker = torch.full((B, 1), self.ingest_token_id, dtype=doc_tokens.dtype, device=device)
+        tokens_with_marker = torch.cat([marker, doc_tokens], dim=1)
+        q_emb = self.embed(tokens_with_marker).mean(dim=1, keepdim=True)  # (B, 1, d)
+        R = self.register_init.unsqueeze(0).expand(B, -1, -1) + q_emb
+
+        sm_k = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
+        sm_v = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
+        for _ in range(n_step):
+            R, sm_k, sm_v = self._step(R, sm_k, sm_v)
+        return sm_k, sm_v
+
     def forward(self, kb_tokens: torch.Tensor, kb_source_ids: torch.Tensor,
                 query_tokens: torch.Tensor, n_step: int, kb_leaf_mask: torch.Tensor = None,
-                register_init_override: torch.Tensor = None, target_input: torch.Tensor = None):
+                register_init_override: torch.Tensor = None, target_input: torch.Tensor = None,
+                kb_prebuilt: bool = False):
         """
         kb_tokens: (B, N) leaf token ids for the unified input∪KB sequence
             (N must equal block_size ** depth when depth > 0).
@@ -286,6 +387,11 @@ class Thinker(nn.Module):
             reasoning trace, the `answer` stream's target is the final answer
             -- unrelated text, can't share one embedding). Every sequence_mode
             stream must have a matching key in the dict.
+        kb_prebuilt: spec §8ter -- when True, skips the internal
+            `self.memory.build(...)` call and uses whatever levels the caller
+            already populated via `self.memory.add_static_level(...)` (one
+            call per ingested document, using `self.ingest(...)`'s output),
+            instead of deriving K/V from `kb_tokens` via k_proj/v_proj.
 
         Returns: (R, stream_outputs) with R: (B, n_register, d_model) the final
                  core register state, and stream_outputs a dict {name: (B, 1, out_dim)}
@@ -295,7 +401,7 @@ class Thinker(nn.Module):
         B = kb_tokens.shape[0]
         device = kb_tokens.device
 
-        if not self.disable_kb:
+        if not self.disable_kb and not kb_prebuilt:
             leaf_emb = self.embed(kb_tokens)
             self.memory.build(leaf_emb, kb_source_ids, leaf_mask=kb_leaf_mask)
 
@@ -310,32 +416,7 @@ class Thinker(nn.Module):
         sm_v = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
 
         for _ in range(n_step):
-            o_kb = torch.zeros_like(R) if self.disable_kb else self.memory.attend(R)
-
-            if not self.disable_sm and sm_k.shape[1] > 0:
-                q_sm = self.sm_q_proj(R)
-                o_sm = F.scaled_dot_product_attention(q_sm, sm_k, sm_v)
-            else:
-                o_sm = torch.zeros_like(R)
-
-            fused = torch.cat([o_kb, o_sm, R], dim=-1)
-            if self.use_ff:
-                delta = self.fuse_out(F.gelu(self.fuse_in(self.fuse_norm(fused))))
-            else:
-                delta = self.fuse_proj(self.fuse_norm(fused))
-            R = R + delta
-
-            if not self.disable_sm:
-                new_k, new_v = self.sm_write_proj(R).chunk(2, dim=-1)
-                if self.detach_sm_keys:
-                    # spec §4.1 "reading A": stop-gradient on keys entering SM only
-                    # (plan Phase 1bis variant) — values stay fully differentiable.
-                    new_k = new_k.detach()
-                sm_k = torch.cat([sm_k, new_k], dim=1)
-                sm_v = torch.cat([sm_v, new_v], dim=1)
-                if self.sm_cap is not None and sm_k.shape[1] > self.sm_cap:
-                    sm_k = sm_k[:, -self.sm_cap:]
-                    sm_v = sm_v[:, -self.sm_cap:]
+            R, sm_k, sm_v = self._step(R, sm_k, sm_v)
 
         # spec §14.3: sequence_mode streams need teacher-forced target-token
         # embeddings as their per-position query input; embedded here (shared
