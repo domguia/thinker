@@ -935,6 +935,8 @@ Resumed job 4106501 (launched 2026-09-14, `abacus11`, 12 runs across 2 GPUs -- s
 
 **Not yet final**: `h4_ff1_nreg4_s1` needs a ~15-min GPU relaunch (same `run_id`-equivalent config, legitimate resume not a duplicate) to complete the 12/12 picture, but given how tightly every other cell already clusters, a single additional seed is very unlikely to change the "no effect" read. Per this session's explicit instruction, no GPU reservation made for this alone -- deferred, to be bundled with the next GPU reservation once that's decided.
 
+**[2026-09-19/20 nuit] 12/12 complete**: `h4_ff1_nreg4_s1` finished as predicted -- `final_acc=99.69%`, `margin_over_shortcut=+0.8719` -- squarely inside the same tight band as every other cell (95.9-100% acc, +0.77 to +0.85 margin). Confirms the "no detectable `use_ff`/`n_register` effect" read from the 11/12 partial result; the missing seed changed nothing. **I1 closed.**
+
 ## 2026-09-19 — I4 (deadline plan): soft attribution measure -- real signal above both controls, but on a different checkpoint than the historical 0,000 audit (important caveat)
 
 Goal (relayed): the hard top-1 argmax audit on `memory.attend` gave 0,000 at both hops despite task accuracy far above chance -- inconclusive by design (spec §5.3, softmax retrieval is soft/diffuse, no hard selection), never followed up with the soft correlation test the plan flagged since 09-13. CPU only, no training intended.
