@@ -1058,3 +1058,27 @@ Not yet concluding anything from this entry (charte d'autonomie: pas de conclusi
 | 3e-3 | 10.47 (diverging) | NaN (fully diverged) |
 
 **A's optimum is `lr=3e-4`** (worse on both sides: 1e-4 and 1e-3), **C's optimum is `lr=3e-5`** (worse on both sides: 1e-5 and 1e-4) -- confirmed 10x apart, both now solidly bracketed rather than open questions. At each architecture's own best LR: A=6.050, C=7.672, gap=1.622. **Per the methodological correction above, this gap is NOT reported as a "does the loop help" verdict** -- it's the necessary input to the extended-budget follow-up (next entry), which is the actual test.
+
+Extended-budget follow-up (item [2], each architecture at its own bracketed optimum: A `lr=3e-4`, C `lr=3e-5`, `d_model` in {128, 1024}, 8000 steps, 2 seeds, full curve logged every 20 steps) launched on `abacus18` once the sweep freed it. Results pending, see next entry.
+
+## 2026-09-19/20 (nuit) — I7: N_step generalization + read-step accuracy curve -- clean positive signal, but wrong scale (checkpoint caveat)
+
+Relayed overnight: does Thinker's loop generalize to `N_step` values it was never trained at, without retraining -- or did it learn a step-indexed stopping heuristic (spec Sec.7.2bis: `t` may be knowable via SM state/size, but must never be parameterized)? Two eval-only measurements on the same unrolled pass, `diagnose_nstep_generalization.py`.
+
+**Scope caveat, read first**: Étape 4's actual hardened-generator checkpoints (`n_hops` in `{2,3,4}`, `d_model=256`, GPU) were **never saved to disk** -- confirmed tonight, `train_kb_chain.py` never called `torch.save` until this session added `--save_checkpoint_path` (committed). This run instead reuses the small CPU checkpoint already available from I4/I6 (`n_hops=2`, `d_model=32`, trained `N_step=16`) -- **not** the real Étape 4 scale the night's brief asked about. A proper rerun at real scale is queued once GPU frees from item [2]; this is a partial, small-scale first signal, not the final answer.
+
+**I7a -- eval at `N_step_test` != trained `N_step=16`, zero retraining** (chance=25%):
+
+| N_step_test | 2 | 4 | 6 | 8 | 12 | **16 (trained)** | 20 | 24 |
+|---|---|---|---|---|---|---|---|---|
+| acc | 1.2% | 3.1% | 33.0% | 73.1% | 98.6% | **99.8%** | 99.8% | 98.4% |
+
+**I7b -- single long unroll to `N_step=24`, accuracy read out at every intermediate step `t`** (same eval batch):
+
+| t | 1 | 4 | 8 | 12 | **16 (trained)** | 20 | 24 |
+|---|---|---|---|---|---|---|---|
+| acc | 2.0% | 5.3% | 73.1% | 99.0% | **99.4%** | 99.0% | 98.2% |
+
+**Read**: clean and, on this small checkpoint, genuinely positive for the thesis. Below the trained `N_step`, accuracy is low -- expected and uninformative (the task structurally needs enough hops before it *can* be solved, this isn't the interesting direction). **Above the trained `N_step` (the real test) is where it matters: accuracy does not collapse or drift -- it plateaus at ~98-99% from `t=12` onward and holds flat through `t=24` (1.5x the trained budget), both in the zero-retrain generalization sweep (I7a) and in the single continuous unroll with per-step readout (I7b).** Per the decision table's first branch: this is the "over-iteration is safe" signature -- an implicit, content-based stabilization rather than a model that was simply read at the one externally-fixed step it happened to be tuned for. Matches the framing from tonight's spec discussion (Sec.7.2bis): the SM growing by append lets the model's *state* reflect progress without any step index ever being a parameter, and this result is consistent with the model actually using that state to stabilize rather than drifting once past its "trained" length.
+
+**Not yet a paper-ready claim**: this is `n_hops=2` at toy CPU scale (`d_model=32`), not the hardened `n_hops in {3,4}` config the thesis needs to generalize over. **Queued**: rerun this exact protocol on freshly-trained, checkpoint-saved Étape 4 configs (`--save_checkpoint_path`, now available) once GPU capacity opens up -- high priority, cheap (eval-only once the checkpoint exists), and this small-scale run is a good reason to expect a positive result there too, not a guarantee.
