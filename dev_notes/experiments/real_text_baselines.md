@@ -132,3 +132,9 @@ User's point: it's not surprising A beats C right now -- A is architecturally co
 All four verified end-to-end via smoke runs (tiny CPU models/corpora) before being reported here; 76/76 existing tests green throughout.
 
 **Next milestone once the C-exploration sweeps above produce a result**: pick the best C config, run a proper (not smoke-scale) training with `--val_data`/`--save_checkpoint_path`, then run `eval_checkpoint.py` + `eval_llm_baseline.py` on the resulting checkpoint -- this is the first candidate for "a working Thinker we can evaluate," the project's stated priority ahead of further architecture-variant exploration.
+
+## 2026-09-20 — Garde-fou méthodologique sur pistea_c_nstep_sweep: LR fixe à travers n_step, même piège que item[5]/item[8]
+
+**À appliquer avant toute lecture définitive de la tendance monotone observée sur `pistea_c_nstep_sweep`** (loss croissante avec `n_step` à `d_model=1024`, `n_step=2` optimal, `lr=3e-5` fixe partout) : `item[5]`/`item[8]` (`dev_notes/experiments/nstep_lr_law.md`) ont déjà montré sur le synthétique que le LR n'est pas une loi lisse en `1/n_step` mais un effet de seuil -- une fenêtre stable à petit `n_step` peut s'effondrer brutalement à `n_step` plus grand. Le sweep actuel tient `lr` fixe sur toute la plage `n_step`, exactement la configuration qui a produit une fausse lecture ailleurs dans ce projet avant correction.
+
+**La tendance monotone actuelle peut donc signifier soit (a) "lr=3e-5 est déjà au-delà du seuil de stabilité pour n_step>=4" (confond LR), soit (b) "la boucle profonde est intrinsèquement pire sur texte réel" (résultat réel) -- indistinguable sans un sweep LR par `n_step`.** Ne pas conclure sur (b) tant que `pistea_c_nstep_lr_joint` (sweep croisé `n_step` x `lr`, lancé juste après complétion de ce sweep-ci) n'a pas confirmé que même au meilleur LR par `n_step`, la perte continue de croître.
