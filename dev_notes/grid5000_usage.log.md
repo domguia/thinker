@@ -324,3 +324,8 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 ## 2026-09-20 — Nettoyage claims orphelins useff_sweep + lancement joint sweep sur GPU liberes post-preemption
 - `pistea_c_useff_sweep` : 8 claims orphelins trouves (jamais demarres avant la preemption -- aucun state.json), nettoyes, relance sur `abacus11-1`.
 - `pistea_c_nstep_lr_joint` (40 cellules) lance sur `abacus17-1` (2 GPU RTX 6000, totalement inactif) des la fin de `nstep_sweep` (24/24).
+
+## 2026-09-20 — Diff systematique complet: 8 fichiers desynchronises trouves et corriges, impact verifie nul sur resultats deja collectes
+- Diff `md5sum` local-vs-Rennes sur tous les `learn/indexed_attention/*.py`, `learn/distill/*.py`, `core/*.py`, `data/*.py`. Trouve desynchronises : `train_real_text.py` (manquait `--use_ff`/`--ff_hidden_mult` ET le cablage KD -- cause racine du crash systematique `pistea_c_useff_sweep`), `train_kb_chain_attn_supervised.py` (fix detach_sm_keys/sm_cap, dormant pour i3_etape3), `prepare_retrieval_data.py`, `real_text_windows.py`, `train_sft.py`, `eval_checkpoint.py`, `eval_llm_baseline.py`, 2 scripts `diagnose_*`. Tous synchronises.
+- Verification faite (`git diff` entre les commits concernes) : les changements sur `train_real_text.py` entre les versions sont purement additifs (nouveaux flags/imports derriere des drapeaux optionnels par defaut a False/None) -- **aucun impact sur les resultats deja collectes** (`pistea_c_nstep_sweep`, `pistea_c_lr_warmup_sweep`, `pistea_ext2`) qui tournaient sur l'ancienne version.
+- `useff_sweep` : 3 tentatives de relance necessaires (script perime -> claims orphelins x2 avant nettoyage complet + lancement decale pour eviter la contention mamba) -- confirme tournant a la 4e tentative.
