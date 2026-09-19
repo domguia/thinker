@@ -74,3 +74,7 @@ tools/exp/gridgen.py --out runs/i3_etape3/grid.jsonl \
 ```
 (`max_steps=20000` kept at the supervised script's own budget rather than `train_kb_chain.py`'s 200000 -- item[5]'s 99.9% was reached well within 20000 steps per its own log entry, so this isn't expected to reintroduce the gap; flag if étape 3's unsupervised arm still disagrees with item[5] after this fix, since that would point to a genuine code-path difference instead.)
 
+
+## 2026-09-20 — i3_etape3 launch bug found and fixed: n_distractors missing from --fixed
+
+First launch of `i3_etape3` (the n_head-isolation grid) crashed all 20 cells immediately (rc=1, ~2-3s each): `AssertionError: max_facts=6 (-> 24 leaves) is not a multiple of block_size=4 ** depth=2 = 16`. Cause: `n_distractors` was not in the gridgen `--fixed` list, so the script's own default kicked in, giving `max_facts=n_hops+n_distractors=4+2=6`, not divisible per the hierarchy's leaf-count constraint. item[5]/item6's own grids always set `n_distractors=4` explicitly for `n_hops=4` -- this was silently omitted here. Fixed by adding `n_distractors=4` to `--fixed`, regenerated the grid, relaunched -- confirmed running (not crashing) on the second attempt. No compute wasted (crashed in seconds, caught via log check before drawing any conclusion from it), but ~15 min of wall-clock lost to the failed-launch-not-yet-checked window -- reinforces the standing "verify a launch actually produced real progress before moving on" discipline.
