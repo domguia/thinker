@@ -268,3 +268,7 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 - Site/cluster: Rennes, `abacus21` (A100), `-t besteffort -t idempotent`, `gpu=1, walltime=6:00:00`, job **4122544** (Waiting, FIFO besteffort au moment du lancement).
 - Script: `precompute_teacher_targets.py --input_file data/distill_cluster_run/reasoning/val_sample1000.jsonl --model_dir .../thinker-distill/Qwen3.8-27B-FP8 --top_k 32 --max_length 1024 --out_file .../val_sample1000_topk32.npz`.
 - Notes / follow-up: une fois ce precompute termine, scaler `prepare_reasoning_data.py` + precompute a 20-38k exemples (jeu complet ~38057, jamais depasse 8000 jusqu'ici), puis reproduire le run KD 500M-core a cette echelle (`train_sft.py --mup --bf16`, toujours `--tokenizer` pointant explicitement le snapshot Qwen3.8-27B, pas l'alias `lfm2` devenu defaut).
+
+## 2026-09-19/20 (nuit) — n_slots sweep lance sur capacite deja tenue (paradoxe-5, ~45 coeurs restants)
+- `nslots_sweep` (9 cellules, `n_slots` in {1,2,4} x 3 seeds, `n_hops=3, n_distractors=5` explicite -- lecon retenue du bug i3_etape3), 4 workers CPU sur `paradoxe-5`, confirme tournant (pas de crash immediat).
+- Verification faite avant lancement : paradoxe-5 a load1=58/104, marge suffisante sans impacter les autres jobs (i3_etape3 relance, routeurs S3) deja sur ce noeud.
