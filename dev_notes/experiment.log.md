@@ -61,6 +61,9 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 - **2026-09-19/20 (nuit)** -- [S0.5: composition couche complete exacte (5/5 couches)](experiments/s3_ffn_attention_curriculum.md)
 - **2026-09-19/20 (nuit)** -- [S3 extension 16 couches: attribution a chance, probe confirme signal directionnel](experiments/s3_ffn_attention_curriculum.md)
 - **2026-09-19/20 (nuit)** -- [B1 (100/100): echappement du stage 2 rare (9-12%), pas typique](experiments/b1_associative_recall.md)
+- **2026-09-19/20 (nuit)** -- [Piste A extended-budget (8/8): A bat C aux deux echelles, ecart s'elargit](experiments/real_text_baselines.md)
+- **2026-09-19/20 (nuit)** -- [I2 (15/15): fenetre LR kdim128_decoupled propre et fiable, clos](experiments/indexed_attention_core_mechanism.md)
+- **2026-09-19/20 (nuit)** -- [item[6] etape 4 more-seeds (15/15): n_hops 2/3/4 confirmes a 8 seeds](experiments/nstep_lr_law.md)
 
 ## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
 
@@ -70,7 +73,9 @@ Réservations posées avant expiration :
 - GPU : job 4121144 (7 GPU, abacus11/17/18, jusqu'à ~20:54) -- relève posée job **4121241** (7 GPU, cluster élargi abacus3/10/11/17/18/19/20/21/22/25/29, besteffort, walltime 12h, soumis ~15:38, Waiting).
 - CPU : job 4121204 (paradoxe-27, jusqu'à ~21:21) -- relève posée job **4121245** (paradoxe, host=2, walltime 14h, queue normale, soumis ~15:39, Waiting).
 
-Fils lancés ce soir (voir entrées datées ci-dessous pour le détail) : I1 (11/12, 1 cellule manquante en file), I4 (fait), Piste A step-matched (fait, **partiellement rétracté** -- LR non revalidé à d_model=1024), A1/A2 (fait, v1 rétracté pour artefact de mesure, v2 corrigé), I3 (en cours), I2 (en cours), I5 (en file), B1 (en cours, 20 graines). Balayage LR Piste A à d_model=1024 (item [1] de la file de nuit) lancé ~15:38.
+Fils lancés ce soir (voir entrées datées ci-dessous pour le détail) : I1 (clos, 12/12), I4 (fait), Piste A step-matched (fait, **partiellement rétracté** -- LR non revalidé à d_model=1024) puis extended-budget (fait, A bat C, écart s'élargit), A1/A2 (fait, v1 rétracté pour artefact de mesure, v2 corrigé), I3 (étapes 1+2 collectées, écart avec item[5] à éclaircir), **I2 (clos, 15/15)**, I5 (clos), B1 (clos, 100/100). Balayage LR Piste A à d_model=1024 (item [1] de la file de nuit) lancé ~15:38.
+
+**[MISE À JOUR ~22h]** : correction -- I2 était marqué "en cours" ci-dessus par erreur, en réalité clos (15/15) depuis un moment, découvert non-journalisé lors d'une vérification live. Toujours vérifier `runs/<nom>/state/` directement plutôt que de se fier à ce statut résumé, qui peut être en retard sur l'état réel du cluster.
 
 **Points "à arbitrer" (à trancher par un humain, pas décidés seuls cette nuit)** -- liste vide pour l'instant, sera remplie au fil des résultats ambigus.
 

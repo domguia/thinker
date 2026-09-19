@@ -43,3 +43,15 @@
 
 Full grid + raw curves in `runs/item8_nhops56/state/*.json` (Nancy home).
 
+
+## 2026-09-19/20 (nuit) — item[6] étape 4 more-seeds complete (15/15): n_hops 2/3/4 all clean at 5 additional seeds
+
+`item6_etape4_moreseeds` (hardened generator, `n_hops` in {2,3,4}, seeds 3-7, `lr=3e-4`), Rennes, all 15 done.
+
+| n_hops | seeds 3-7 |
+|---|---|
+| 2 | 99.98-100% (margin 0.875 all) |
+| 3 | 99.98-100% (margin 0.875 all) |
+| 4 | 99.7-99.9% (margin 0.872-0.875) |
+
+**Read: extends the original 3-seed Étape 4 result to 8 total seeds per `n_hops`, no exceptions, no bimodality.** Confirms the hardened generator's multi-hop chaining result is not a small-n artifact -- real, robust across seeds at all three `n_hops` values. Full grid in `runs/item6_etape4_moreseeds/state/*.json` (Rennes home).

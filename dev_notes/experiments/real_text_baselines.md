@@ -105,3 +105,14 @@ Not yet concluding anything from this entry (charte d'autonomie: pas de conclusi
 
 Extended-budget follow-up (item [2], each architecture at its own bracketed optimum: A `lr=3e-4`, C `lr=3e-5`, `d_model` in {128, 1024}, 8000 steps, 2 seeds, full curve logged every 20 steps) launched on `abacus18` once the sweep freed it. Results pending, see next entry.
 
+
+## 2026-09-19/20 (nuit) — Piste A extended-budget complete (8/8): A beats C at both scales, gap widens
+
+`pistea_extended_budget` (`train_real_text.py`, `d_model` in {128,1024}, `n_step` in {1 (A), 6 (C, main)}, 2 seeds each), Rennes, all 8 done.
+
+| d_model | A (n_step=1) mean | C (n_step=6) mean |
+|---|---|---|
+| 128 | **4.522** (4.568, 4.477) | 6.423 (6.455, 6.391) |
+| 1024 | **3.205** (3.179, 3.231) | 5.699 (5.645, 5.754) |
+
+**Read: A (flat, no loop) beats C (main, looped) at both scales, and the gap widens at larger `d_model`** (128: 1.90 loss points; 1024: 2.49 points) -- same direction and pattern as the earlier step-matched result, now at extended budget rather than the earlier 1000-step matched grid. Consistent with the LR-sweep finding above (A and C do not share an optimal LR) -- this comparison still uses the shared `lr=3e-4`, so **the gap here should be read as "at a shared, not-necessarily-optimal-for-either-arm LR," not yet the fairest possible comparison** (the untested revalidated-LR-per-arm comparison remains the open item). Full grid in `runs/pistea_extended_budget/state/*.json` (Rennes home).

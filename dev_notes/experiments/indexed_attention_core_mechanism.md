@@ -294,3 +294,15 @@ Resumed job 4106501 (launched 2026-09-14, `abacus11`, 12 runs across 2 GPUs -- s
 
 **Read: unambiguous.** Both scales reach **100% task accuracy, all 6 seeds**, at the same 12000-step budget. This directly settles the question flagged back on 2026-09-13 (`experiment_plan.md`'s "why did CPU (`d_model=32`) show a recovery to 99.2% while GPU (`d_model=128`) didn't?"): **it was a training-budget confound, not a scale-transfer failure.** The historical GPU result that seemed not to replicate the CPU finding was under-trained relative to what CPU got (and, per the earlier-logged correction, also predated the `decouple_kv` fix -- two compounding reasons that result was never comparable in the first place). At matched budget, `attn_supervised` resolves `n_hops=2` cleanly at both scales -- no evidence of a real `d_model` scale effect on this specific question. Closes I5 with a clean positive, no further follow-up needed on this thread.
 
+
+## 2026-09-19/20 (nuit) — I2 complete (15/15): kdim128_decoupled LR window is narrow but clean, closes I2
+
+`i2_kdim128_lrsweep` (`kdim128_decoupled` variant, `lr` in {3e-4, 6e-4, 9e-4}, 5 seeds each), Rennes, all 15 done.
+
+| lr | success (5 seeds) |
+|---|---|
+| 3e-4 | **5/5, 100% all seeds** |
+| 6e-4 | **5/5**, 98.1-100% (minor scatter, still all comfortably above shortcut) |
+| 9e-4 | **0/5**, collapsed (~33%, margin ~0.08 -- near the no-supervision floor) |
+
+**Read: a clean, stable window at `lr in {3e-4, 6e-4}` (5/5 seeds each), sharp collapse at `9e-4` (0/5, all seeds).** Unlike the earlier 2-seed `kdim128_decoupled` result at `6e-4` (which showed a 100%/33% split, flagged ambiguous), 5 seeds at the same LR here are all solidly successful (98.1-100%) -- **the earlier 2-seed bimodal read does not replicate at n=5**, most likely ordinary seed noise at n=2 rather than a real bimodal regime. **I2 closed**: `kdim128_decoupled` has a genuine, reliable LR window, not the ambiguous/inconsistent picture the smaller-n result suggested. Full grid in `runs/i2_kdim128_lrsweep/state/*.json` (Rennes home).
