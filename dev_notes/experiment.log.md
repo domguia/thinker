@@ -1045,3 +1045,16 @@ Full numbers: `runs/olmo_ffn_geometry/result_v2.json`.
 Not yet concluding anything from this entry (charte d'autonomie: pas de conclusion sur résultat partiel) -- wave 2 still running.
 
 **À arbitrer**: none yet from this thread -- flagged here as a placeholder since the eventual extended-budget read (curves crossing late vs. staying apart) may itself land in "ambiguous, needs a human call" territory depending on what the curves actually do.
+
+**Wave 2 complete (`lr` in `{1e-3, 3e-3}` added) -- both optima now cleanly bracketed**:
+
+| lr | A (`n_step=1`) mean | C (`n_step=6`) mean |
+|---|---|---|
+| 1e-5 | 7.014 | 7.761 |
+| 3e-5 | 6.587 | **7.672 -- C's optimum, bracketed** |
+| 1e-4 | 6.181 | 7.881 |
+| 3e-4 | **6.050 -- A's optimum, bracketed** | 8.691 |
+| 1e-3 | 6.495 (worse than 3e-4) | 91.6 (exploding) |
+| 3e-3 | 10.47 (diverging) | NaN (fully diverged) |
+
+**A's optimum is `lr=3e-4`** (worse on both sides: 1e-4 and 1e-3), **C's optimum is `lr=3e-5`** (worse on both sides: 1e-5 and 1e-4) -- confirmed 10x apart, both now solidly bracketed rather than open questions. At each architecture's own best LR: A=6.050, C=7.672, gap=1.622. **Per the methodological correction above, this gap is NOT reported as a "does the loop help" verdict** -- it's the necessary input to the extended-budget follow-up (next entry), which is the actual test.
