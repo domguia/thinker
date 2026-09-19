@@ -12,7 +12,8 @@ def sync_experiments(output_filename: Optional[str] = None):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"compressor_results_{timestamp}.zip"
     
-    paths_to_sync = ["logs", "dev_notes/compressor_experiments.md", "dev_notes/experiment.log.md"]
+    paths_to_sync = ["logs", "dev_notes/compressor_experiments.md", "dev_notes/experiment.log.md",
+                      "dev_notes/experiments"]
     
     print(f"Creating archive: {output_filename}...")
     with zipfile.ZipFile(output_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
