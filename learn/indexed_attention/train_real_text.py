@@ -333,6 +333,13 @@ def main():
                    help="spec §9 Baseline B: loop still runs n_step times, but external-memory (KB) access is "
                         "disabled -- isolates whether any gain comes from the loop itself or the memory. "
                         "Also skips HierarchicalMemory.build() entirely (cheaper, not just architecturally different).")
+    p.add_argument("--answer_n_layers", type=int, default=1,
+                   help="OutputStream cross-attention depth for the 'answer' stream (1-3, "
+                        "core/indexed_thinker_model.py's stream_n_layers) -- spec §11bis/§-1's own "
+                        "prediction is that a stream should stay a lightweight reader of SM (most "
+                        "of the work already done by the recurrent loop/memory), so depth>1 is an "
+                        "ablation testing that prediction, not an expected win. 1 (default) "
+                        "reproduces prior behavior exactly.")
     p.add_argument("--use_ff", action="store_true",
                    help="Phase 1bis variant (spec §-1's own predicted interpretation): reintroduces a "
                         "2-layer GELU MLP in the register-update fusion only. Tested on the synthetic "
@@ -443,6 +450,7 @@ def main():
         use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims={"answer": vocab_size},
         stream_sequence={"answer": True}, max_target_len=args.t_tgt,
+        stream_n_layers={"answer": args.answer_n_layers},
     ).to(device)
     n_params = sum(t.numel() for t in model.parameters())
     print(f"depth={args.depth} block_size={args.block_size} n_ctx={args.n_ctx} t_local={args.t_local} "

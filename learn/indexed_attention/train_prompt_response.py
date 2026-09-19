@@ -162,6 +162,10 @@ def main() -> None:
     p.add_argument("--ff_hidden_mult", type=int, default=4)
     p.add_argument("--thinking_weight", type=float, default=1.0,
                    help="reasoning only: loss = ce_answer + thinking_weight * ce_thinking")
+    p.add_argument("--answer_n_layers", type=int, default=1,
+                   help="OutputStream cross-attention depth for 'answer' (1-3, spec §11bis ablation, "
+                        "see train_real_text.py's flag of the same name for the hypothesis).")
+    p.add_argument("--thinking_n_layers", type=int, default=1, help="reasoning only, same as --answer_n_layers")
     p.add_argument("--teacher_targets", default=None,
                     help="path to a precompute_teacher_targets.py .npz computed on the SAME --data file's "
                          "'text' field (same row order/tokenizer) -- enables logit-level KD on the answer "
@@ -221,10 +225,12 @@ def main() -> None:
     if args.dataset_type == "reasoning":
         stream_dims = {"thinking": vocab_size, "answer": vocab_size}
         stream_sequence = {"thinking": True, "answer": True}
+        stream_n_layers = {"thinking": args.thinking_n_layers, "answer": args.answer_n_layers}
         max_target_len = max(args.max_thinking_len, args.max_answer_len)
     else:
         stream_dims = {"answer": vocab_size}
         stream_sequence = {"answer": True}
+        stream_n_layers = {"answer": args.answer_n_layers}
         max_target_len = args.max_answer_len
 
     model = Thinker(
@@ -233,6 +239,7 @@ def main() -> None:
         disable_kb=args.disable_kb, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
         use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims=stream_dims, stream_sequence=stream_sequence, max_target_len=max_target_len,
+        stream_n_layers=stream_n_layers,
     ).to(device)
     n_params = sum(t.numel() for t in model.parameters())
     print(f"dataset_type={args.dataset_type} d_model={args.d_model} n_step={args.n_step} "
