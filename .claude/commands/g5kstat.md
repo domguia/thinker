@@ -21,6 +21,12 @@ utiles selon ce que l'utilisateur demande :
   les sites de `-s`, ou passe `-s <site>` si le site est deja connu).
 - `tools/g5kstat.sh -s "rennes nancy"` -- limite la recherche a certains sites
   (plus rapide que le balayage complet des 8 sites par defaut).
+- `tools/g5kstat.sh -g kwollect` -- delegue a `tools/g5k_monitor.py` : CPU via
+  l'API Kwollect (pas de ssh au noeud), GPU via dcgm-exporter, et surtout
+  detection automatique des claims orphelins sur `runs/*/claims` de chaque
+  site (le vrai gain par rapport a `-g deep`, valide sur l'incident reel
+  `i3_step2_bothArms`). Pas encore le mode par defaut -- a preferer quand on
+  veut aussi verifier les claims orphelins, pas seulement l'utilisation.
 
 Si le script signale un noeud `unreachable` ou une grille a 0% alors que le
 job est cense tourner, creuser avec `-g deep` sur ce job avant de conclure a

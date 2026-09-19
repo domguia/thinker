@@ -22,6 +22,14 @@
 #   -g deep    + top N processes per node (ps aux --sort=-%cpu), catches a
 #              job that's "Running"/low-aggregate-load because it's actually
 #              stuck, not just idle -- most useful when `nodes` looks wrong.
+#   -g kwollect  delegates to tools/g5k_monitor.py -- CPU load via the
+#              Kwollect API (one HTTP call per node via the site frontend,
+#              no oarsh needed) and GPU util/VRAM via dcgm-exporter (one
+#              oarsh per GPU node, lighter than parsing nvidia-smi), plus
+#              automatic orphan-claim detection against runs/*/claims on
+#              each site's home (dev_notes/ideas/g5k_monitoring_agent_spec.md).
+#              Not the default yet -- opt in with -g kwollect until its
+#              reliability across sites/scenarios is validated further.
 #   -j JOBID   restrict to one job (skips the site-wide listing step).
 #   -n N       processes to show per node in `deep` mode (default 8).
 
@@ -44,9 +52,16 @@ while getopts "u:s:g:j:n:" opt; do
 done
 
 case "$GRANULARITY" in
-  quick|nodes|deep) ;;
-  *) echo "unknown -g '$GRANULARITY' (expected quick|nodes|deep)" >&2; exit 2 ;;
+  quick|nodes|deep|kwollect) ;;
+  *) echo "unknown -g '$GRANULARITY' (expected quick|nodes|deep|kwollect)" >&2; exit 2 ;;
 esac
+
+if [ "$GRANULARITY" = "kwollect" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  args=(-u "$USER_G5K" -s "$SITES")
+  [ -n "$ONLY_JOB" ] && args+=(-j "$ONLY_JOB")
+  exec python3 "$SCRIPT_DIR/g5k_monitor.py" "${args[@]}"
+fi
 
 now_epoch=$(date +%s)
 rows=()
