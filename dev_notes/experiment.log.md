@@ -1135,3 +1135,14 @@ Confusion matrix (main probe) is banded near the diagonal, not scattered -- 38.8
 | success rate | **0/5** | 0/5 | **2/5 (40%)** | **2/5 (40%)** | 1/3 | 0/3 |
 
 **Correction to the "lower is safer" hypothesis this extension was launched to test**: it's falsified -- `2e-5` and `5e-5` (the newly-added, lower values) do *worse* than `1e-4`/`2e-4`, not better (0/5 success at both, versus 40% at the window's center). The success rate actually peaks at `1e-4`-`2e-4` and degrades on **both** sides -- a genuinely bracketed window this time, not an open-ended search, but its peak reliability is only 40%. **No `lr` reached the `>=4/5` bar** -- per the stopping rule above, halting the LR hunt here rather than probing further (e.g. `1.5e-4`) and reporting this as the finding: **hardened `n_hops=3` attention supervision resolves the task in at most 2/5 seeds at its best LR window (`1e-4`-`2e-4`), cleanly bimodal (resolved ~98-100% or collapsed ~18-31%, nothing between), with no LR tested giving reliable success.** This is the number to carry into étape 2, not a single "best" accuracy.
+
+## 2026-09-19/20 (nuit) — I5 complete: CPU/GPU gap was budget, not scale -- clean, decisive result
+
+`i5_cpu32_matched_steps` (`train_kb_chain_attn_supervised.py`, `n_hops=2, n_distractors=2, n_register=4, vocab_size=32, attn_supervised, supervise=node, lr=3e-4`, matched `max_steps=12000` for both `d_model` values, 3 seeds each), 6/6 done, `abacus17`.
+
+| d_model | seed0 | seed1 | seed2 |
+|---|---|---|---|
+| 32 | 100% | 100% | 100% |
+| 128 | 100% | 100% | 100% |
+
+**Read: unambiguous.** Both scales reach **100% task accuracy, all 6 seeds**, at the same 12000-step budget. This directly settles the question flagged back on 2026-09-13 (`experiment_plan.md`'s "why did CPU (`d_model=32`) show a recovery to 99.2% while GPU (`d_model=128`) didn't?"): **it was a training-budget confound, not a scale-transfer failure.** The historical GPU result that seemed not to replicate the CPU finding was under-trained relative to what CPU got (and, per the earlier-logged correction, also predated the `decouple_kv` fix -- two compounding reasons that result was never comparable in the first place). At matched budget, `attn_supervised` resolves `n_hops=2` cleanly at both scales -- no evidence of a real `d_model` scale effect on this specific question. Closes I5 with a clean positive, no further follow-up needed on this thread.
