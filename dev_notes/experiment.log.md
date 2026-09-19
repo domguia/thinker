@@ -1268,3 +1268,13 @@ Re-run per `model-design`'s extension (norm-artifact control, motivated by A1's 
 Executed on `paradoxe-5` on behalf of `model-design`: `check_layer_composition_exact.py --layers 0,4,8,11,15` -- verifies S0's exact FFN conversion, embedded in OLMo-2's real Post-Norm residual structure with the real (unconverted) self-attention, reconstructs the full decoder layer output bit-for-bit, not just the isolated FFN.
 
 **PASS, `max_abs_err=0.0` / `max_rel_err=0.0` on all 5 layers, no exceptions.** Full-layer composition introduces no silent bug -- confirms the checkpoint needed before Phase 12's étape 2 (composing a converted FFN-KB read with a sequence-side read inside one Thinker-style layer) can be trusted. Full JSON in `runs/olmo_ffn_geometry/s0_5_layer_composition_check.json` (Rennes home).
+
+## 2026-09-19/20 (nuit) — S3, 16-layer extension of attribution + linear probe: same pattern holds at full stratification
+
+Executed on `paradoxe-5` (P1, no dedicated reservation): both étape-1 diagnostics re-run across all 16 OLMo-2-1B layers (not just the 0/8/15 sample).
+
+**Attribution (raw dot product, `diagnose_layer_source_attribution.py`)**: `mass_on_own_region` stays within ~0.061-0.064 of the `uniform_floor=0.0625` at every layer, both query modes -- essentially at chance everywhere, matching the 3-layer result. Slight departures at layers 14-15 under `identity` mode (0.0637/0.0643 vs 0.0625 floor) are the only points worth a second look, still tiny relative to the probe's signal below.
+
+**Linear probe (`diagnose_layer_linear_probe.py`, 16-way classification)**: `raw` test_acc=0.9918, `l2_normalized` test_acc=0.9589, both against `chance_floor=0.0625` (121453 train / 52051 test tokens, 10844/layer). **Confirms the 3-layer finding at full stratification**: layer identity is strongly, directionally decodable from `x_l` across all 16 layers, not just a coarse low/mid/high split -- some expected softening at 16-way vs 3-way (l2_normalized drops from 0.9995 to 0.9589, still enormous vs chance) is consistent with finer-grained classes being harder, not a qualitative change in the finding.
+
+Full JSON: `runs/olmo_ffn_geometry/layer_source_attribution_16layers.json`, `layer_linear_probe_16layers.json` (Rennes home).
