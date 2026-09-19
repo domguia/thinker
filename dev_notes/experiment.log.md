@@ -1101,3 +1101,18 @@ Confusion matrix (main probe) is banded near the diagonal, not scattered -- 38.8
 **Read**: both trivial controls pass cleanly (a and b at/below chance, ruling out overfitting or a fixed-signature artifact), so the main result is real. But **control (c) alone (the register's norm, a single number) predicts `t` even better than the full 32-dimensional register state** -- per the decision table's third branch, this means **"phase" here is substantially, and possibly entirely, a scale-drift signature, not evidence of rich multidimensional phase structure**. Reporting this honestly as the weaker-but-real result the table calls for, not inflating it: the register's norm growing (or otherwise moving) systematically with `t` is enough on its own to nearly match the full-vector probe's performance, so the interesting direction/content structure the main probe might add beyond norm is small at this scale, if present at all. Consistent with the norm-growth pattern already seen elsewhere tonight (A1's `||k_attn||` also grew markedly with depth, a different mechanism but the same general "activations scale up over repeated/deep computation" motif worth keeping in mind project-wide).
 
 **Same scale caveat as I7**: small CPU checkpoint, not Étape 4's real config -- queued for rerun at real scale alongside I7 once a checkpoint exists there, so both mechanistic reads (N_step generalization + phase-vs-norm) land on the same, thesis-relevant model.
+
+## 2026-09-19/20 (nuit) — I3 étape 1 complete: attention supervision resolves hard-hops chaining, but bimodal -- success rate drops sharply with LR
+
+`i3_attnsup_lrsweep`, `train_kb_chain_attn_supervised.py --attn_supervised --supervise node`, `n_hops=3, n_distractors=5` (hardened generator), `depth=2, block_size=4, d_model=256, n_step=12`, `lr` in `{1e-4, 2e-4, 3e-4, 4e-4}` x 3 seeds, `abacus11` (2x A5000), ~15 min/cell, 12/12 done.
+
+| lr | seed0 | seed1 | seed2 | successes |
+|---|---|---|---|---|
+| 1e-4 | 99.84% | **17.99%** | 99.18% | 2/3 |
+| 2e-4 | **23.16%** | 99.22% | 98.32% | 2/3 |
+| 3e-4 | 29.30% | 30.86% | 98.77% | 1/3 |
+| 4e-4 | 26.74% | 24.43% | 28.22% | 0/3 |
+
+**Read**: every cell lands cleanly in one of two bands -- resolved (~98-100% acc) or collapsed (~18-31%, near the failed/no-supervision range) -- no intermediate outcomes, a textbook bimodal signature already seen elsewhere in this project (`pool_n_head`, `kdim128_decoupled`). **The success RATE, not just the absolute performance level, degrades monotonically with `lr`**: 2/3 at `1e-4` and `2e-4`, 1/3 at `3e-4`, 0/3 at `4e-4`. Qualitatively, this answers the open question I3 was launched for: **attention supervision does resolve hard-hops chaining (`n_hops=3`) when it lands in the right basin** -- it is not architecturally incapable at this scale -- but **no LR tested here is reliable** (best is 2/3 seeds, i.e. a 1/3 failure rate even at the safest point tested).
+
+**Per the standing rule (bimodality found -> needs >=5 seeds to trust a cell, not 3)**: this result on its own cannot yet support "supervision reliably beats no-supervision at `n_hops=3`" for étape 2's comparison -- 1/3 to 2/3 seeds succeeding is exactly the regime that rule exists to catch. **À arbitrer**: whether to (a) extend the LR sweep further down (`3e-5`, `5e-5` -- the failure rate trend suggests lower might be safer, matching this project's repeated "narrow, low, non-monotone LR window" pattern) before committing étape 2's LR, or (b) accept the current best (`1e-4`/`2e-4`, both 2/3) and run étape 2 with enough seeds (>=5, ideally more given the observed 1/3 failure rate) to average over the bimodality honestly. Proceeding with **(a) first** since it's cheap and GPU is available -- extended-low-LR cells queued on `abacus11`.
