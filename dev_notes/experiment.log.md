@@ -76,6 +76,8 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 
 - **2026-09-19/20 (nuit)** -- [pistea_ext2 (24/24): A bat C a budget eleve, gap ne se referme pas](experiments/real_text_baselines.md)
 
+- **2026-09-20** -- [pistea_c_nstep_sweep complet (24/24): degradation monotone confirmee a d_model=1024, sweep croise lance](experiments/real_text_baselines.md)
+
 ## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
 
 **En cours de rédaction, mis à jour au fil de la nuit -- lire la version la plus récente en tête de ce fichier au réveil.**

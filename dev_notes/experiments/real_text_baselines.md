@@ -172,3 +172,20 @@ Implémentation en cours.
 **Read: A bat C à budget encore plus élevé (12k-20k pas) qu'auparavant (8000 pas), le gap ne se referme pas, et s'élargit même à `d_model=1024`** (0.92 pt d'écart vs 0.13 pt à `d_model=128`) -- cohérent avec `pistea_extended_budget` (8000 pas) et l'escalade de budget déjà loguée. **Rappel du garde-fou déjà posé** (entrée précédente) : ce sweep tient `lr=3e-4` fixe, potentiellement pas optimal pour C -- le sweep croisé `n_step`x`lr` (lancé séparément) est ce qui distinguera "C a juste besoin d'un LR différent" de "la boucle est intrinsèquement pire à budget égal". Ne pas lire ce résultat isolément comme définitif sur la boucle.
 
 Full grid : `runs/pistea_ext2/state/*.json` (Nancy home).
+
+## 2026-09-20 — pistea_c_nstep_sweep complete (24/24): confirms monotone n_step degradation at lr=3e-5 fixed, joint sweep launched to test if it's a LR confound
+
+`lr=3e-5` fixe, `max_steps=8000`, 2 seeds/cellule.
+
+| n_step | d_model=128 mean | d_model=1024 mean |
+|---|---|---|
+| 2 | 6.352 | **4.709** |
+| 4 | 6.435 | 5.223 |
+| 6 | 6.424 | 5.631 |
+| 8 | 6.434 | 6.184 |
+| 10 | 6.468 | 6.624 |
+| 12 | 6.528 | **7.199** |
+
+**`d_model=128` reste quasi plat (6.35-6.53, dérive légère mais faible). `d_model=1024` montre une dégradation monotone franche, `n_step=2` (4.71) à `n_step=12` (7.20), +2.49 points de loss.** Confirme la tendance déjà vue sur les 18 premières cellules. **Garde-fou toujours actif** (entrée précédente) : `lr=3e-5` est fixe partout, donc cette dégradation peut être soit un vrai effet architectural, soit `lr=3e-5` au-delà du seuil de stabilité dès `n_step>=4` à cette échelle -- indistinguable sans le sweep croisé. `pistea_c_nstep_lr_joint` lancé immédiatement après (même jour) pour trancher.
+
+Full grid : `runs/pistea_c_nstep_sweep/state/*.json` (Rennes home).
