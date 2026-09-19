@@ -64,6 +64,7 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 - **2026-09-19/20 (nuit)** -- [Piste A extended-budget (8/8): A bat C aux deux echelles, ecart s'elargit](experiments/real_text_baselines.md)
 - **2026-09-19/20 (nuit)** -- [I2 (15/15): fenetre LR kdim128_decoupled propre et fiable, clos](experiments/indexed_attention_core_mechanism.md)
 - **2026-09-19/20 (nuit)** -- [item[6] etape 4 more-seeds (15/15): n_hops 2/3/4 confirmes a 8 seeds](experiments/nstep_lr_law.md)
+- **2026-09-20** -- [I3: diagnostic du confond 10%-vs-99.9% -- mismatch de defauts d'archi, pas la supervision (+ fix detach_sm_keys/sm_cap independant)](experiments/i3_attention_supervision.md)
 
 ## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
 

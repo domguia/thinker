@@ -47,3 +47,30 @@
 
 Full per-cell results in `runs/i3_step2_bothArms/state/*.json` (Rennes home).
 
+## 2026-09-20 — Diagnostic complete: default-hyperparameter mismatch (most likely cause) + an independent, unrelated fidelity bug fixed
+
+Full `diff` of `train_kb_chain.py` against `train_kb_chain_attn_supervised.py` (`model-design`, CPU, local, zero cluster cost -- per the plan's own "diagnostic bloquant, zéro compute" classification).
+
+**Most likely root cause of the 10%-vs-99.9% gap: the two scripts have materially different DEFAULTS for architecture/training hyperparameters that i3_step2_bothArms's grid never explicitly overrode.** The grid swept only `n_hops`, `lr`, `n_step` (per the entry above) -- everything else fell back to each script's own `argparse` default:
+
+| flag | `train_kb_chain.py` default | `train_kb_chain_attn_supervised.py` default |
+|---|---|---|
+| `--d_model` | 256 | **128** |
+| `--depth` | 3 | **2** |
+| `--n_head` | 4 | **1** |
+| `--batch_size` | 64 | 256 |
+| `--max_steps` | 200000 | 20000 |
+
+If these weren't matched explicitly in the grid config, the "unsupervised" arm of `train_kb_chain_attn_supervised.py` trained a **single-head, one-fewer-hierarchy-level, half-width** model relative to `item[5]`'s `train_kb_chain.py` baseline -- `n_head=1` alone is a severe capacity cut for a 4-hop composition task, plausibly enough on its own to explain a collapse from 99.9% to ~10%, with nothing to do with supervision at all. **Not yet confirmed against the actual `i3_step2_bothArms/grid.jsonl` config on the cluster** (this diagnosis was done from the scripts alone, not from re-reading the dispatched grid file) -- confirming that read is the one remaining step before treating this as settled, but the defaults themselves are unambiguous and the hypothesis is well-supported.
+
+**Independent finding, unrelated to the above, fixed regardless (commit `d789164`)**: `forward_with_optional_supervision()` (the manual unroll of `Thinker.forward()`'s loop, needed to insert the auxiliary loss mid-loop) claimed to implement "the same equations as `core/indexed_thinker_model.py`" but silently omitted two of `Thinker.forward()`'s branches -- the `detach_sm_keys` stop-gradient on new SM keys, and the `sm_cap` trim to the last N SM entries. Both flags default to off/None and weren't part of I3's swept axes, so this did **not** cause the specific 10%-vs-99.9% gap -- but it's a real, dormant correctness gap that would have silently made `--detach_sm_keys`/`--sm_cap` no-ops through this script. Fixed to match `Thinker.forward()` exactly; verified with a smoke run (`--detach_sm_keys --sm_cap 2`, CPU, 5 steps, runs end-to-end without error) and the full test suite (76/76 green, this file isn't imported by any existing test).
+
+**Corrected re-run for I3 étape 3, once the grid-config read confirms the mismatch** -- explicitly match every architecture/training flag to `item[5]`'s `train_kb_chain.py` config rather than relying on defaults:
+```
+tools/exp/gridgen.py --out runs/i3_etape3/grid.jsonl \
+  --script learn/indexed_attention/train_kb_chain_attn_supervised.py \
+  --fixed n_hops=4 depth=3 block_size=4 d_model=256 n_head=4 batch_size=64 n_step=12 max_steps=20000 max_time_minutes=30 \
+  --sweep attn_supervised=true,false lr=1e-4,2e-4 seed=0,1,2,3,4
+```
+(`max_steps=20000` kept at the supervised script's own budget rather than `train_kb_chain.py`'s 200000 -- item[5]'s 99.9% was reached well within 20000 steps per its own log entry, so this isn't expected to reintroduce the gap; flag if étape 3's unsupervised arm still disagrees with item[5] after this fix, since that would point to a genuine code-path difference instead.)
+
