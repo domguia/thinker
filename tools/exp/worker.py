@@ -155,20 +155,31 @@ def main() -> None:
     resumable = {"failed", "incomplete", None} if args.retry_failed else {None}
     done = skipped = 0
 
-    for cell in load_cells(grid):
-        rid = cell["run_id"]
-        status = cell_status(state_dir, rid)
-        if status == "done" or status not in resumable:
-            skipped += 1
-            continue
-        if args.retry_failed and status in ("failed", "incomplete"):
-            # La revendication d'un essai précédent doit être levée pour rejouer.
-            (claims_dir / f"{rid}.claim").unlink(missing_ok=True)
-        if not claim(claims_dir, rid, worker_tag):
-            skipped += 1
-            continue
-        run_cell(cell, state_dir, log_dir, env, timeout_s, args.dry_run)
-        done += 1
+    # Recharge le fichier de grille à chaque passe plutôt qu'une fois au
+    # démarrage : une grille étendue en cours de nuit (balayage LR élargi
+    # après un optimum en bord de plage, par ex.) est vue sans relancer les
+    # workers déjà en cours. Sûr par construction -- le claim atomique
+    # empêche tout doublon, une passe qui ne trouve rien de neuf arrête le
+    # worker exactement comme avant (grille épuisée = grille épuisée).
+    while True:
+        made_progress = False
+        for cell in load_cells(grid):
+            rid = cell["run_id"]
+            status = cell_status(state_dir, rid)
+            if status == "done" or status not in resumable:
+                skipped += 1
+                continue
+            if args.retry_failed and status in ("failed", "incomplete"):
+                # La revendication d'un essai précédent doit être levée pour rejouer.
+                (claims_dir / f"{rid}.claim").unlink(missing_ok=True)
+            if not claim(claims_dir, rid, worker_tag):
+                skipped += 1
+                continue
+            run_cell(cell, state_dir, log_dir, env, timeout_s, args.dry_run)
+            done += 1
+            made_progress = True
+        if not made_progress:
+            break
 
     print(f"worker {worker_tag} terminé : {done} cellules exécutées, {skipped} sautées",
           flush=True)
