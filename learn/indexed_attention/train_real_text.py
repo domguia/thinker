@@ -264,6 +264,15 @@ def main():
                    help="spec §9 Baseline B: loop still runs n_step times, but external-memory (KB) access is "
                         "disabled -- isolates whether any gain comes from the loop itself or the memory. "
                         "Also skips HierarchicalMemory.build() entirely (cheaper, not just architecturally different).")
+    p.add_argument("--use_ff", action="store_true",
+                   help="Phase 1bis variant (spec §-1's own predicted interpretation): reintroduces a "
+                        "2-layer GELU MLP in the register-update fusion only. Tested on the synthetic "
+                        "n_hops task (I1: no detectable effect there) but NEVER on real text -- directly "
+                        "relevant now that Piste A/C found C (looped) losing to A (flat) on real text: "
+                        "per the spec, a use_ff=True win here would mean 'missing composition/computation "
+                        "capacity on real text', not 'the loop premise is wrong' (see "
+                        "dev_notes/indexed_attention_spec.md's own guidance on how to read this variant).")
+    p.add_argument("--ff_hidden_mult", type=int, default=4)
     p.add_argument("--lr", type=float, default=3e-4, help="target/peak LR, reached at the end of warmup "
                    "(or from step 0 if --lr_warmup_steps=0)")
     p.add_argument("--lr_warmup_steps", type=int, default=0,
@@ -342,6 +351,7 @@ def main():
         vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
         disable_kb=args.disable_kb, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
+        use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims={"answer": vocab_size},
         stream_sequence={"answer": True}, max_target_len=args.t_tgt,
     ).to(device)
