@@ -174,6 +174,58 @@ def collate_lane_batch(batch_items, pad_id: int):
     return out
 
 
+@torch.no_grad()
+def evaluate_at_nstep(model, ds, pad_id: int, n_lanes: int, t_local: int, seed: int, device, n_step_test: int,
+                       n_eval_batches: int = 20) -> float:
+    """Mean per-window LM loss at a given n_step, over a freshly-seeded pass
+    over `ds` -- NOT a held-out split (this project has none for real text
+    yet, see --extrapolate_n_steps' docstring), so this measures extrapolation
+    behavior (does the trained model do better/worse with more/fewer loop
+    iterations than it was trained with), not generalization to unseen text.
+    Register carry-over/reset logic mirrors main()'s training loop exactly,
+    just without the backward pass."""
+    model.eval()
+    eval_batcher = LockstepLaneBatcher(ds, n_lanes=n_lanes, seed=seed + 999_999)
+    lane_R = [None] * n_lanes
+    losses = []
+    for i, (batch_items, lane_doc) in enumerate(eval_batcher):
+        if i >= n_eval_batches:
+            break
+        batch = collate_lane_batch(batch_items, pad_id)
+        kb_tokens = batch["kb_tokens"].to(device)
+        kb_source_ids = batch["kb_source_ids"].to(device)
+        kb_leaf_mask = batch["kb_leaf_mask"].to(device)
+        target_input = batch["target_input"].to(device)
+        labels = batch["labels"].to(device)
+        is_first = batch["is_first_window"]
+        lane_valid = batch["lane_valid"].to(device)
+        query_tokens = kb_tokens[:, -t_local:]  # [DEFAUT], same convention as main()'s training loop
+
+        register_override = None
+        if any(not f for f in is_first.tolist()):
+            base = model.register_init.unsqueeze(0).expand(kb_tokens.shape[0], -1, -1).clone()
+            for lane in range(n_lanes):
+                if not is_first[lane] and lane_R[lane] is not None:
+                    base[lane] = lane_R[lane]
+            register_override = base
+
+        R, streams = model(kb_tokens, kb_source_ids, query_tokens, n_step_test,
+                           kb_leaf_mask=kb_leaf_mask, register_init_override=register_override,
+                           target_input=target_input)
+        logits = streams["answer"]
+        per_pos_loss = F.cross_entropy(logits.transpose(1, 2), labels, reduction="none")
+        per_lane_loss = per_pos_loss.mean(dim=1)
+        valid_f = lane_valid.float()
+        loss = (per_lane_loss * valid_f).sum() / valid_f.sum().clamp(min=1.0)
+        losses.append(loss.item())
+
+        for lane in range(n_lanes):
+            lane_R[lane] = R[lane].detach() if lane_doc[lane].item() >= 0 else None
+
+    model.train()
+    return sum(losses) / len(losses) if losses else float("nan")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data", required=True, help="JSONL path, one {'text': ...} per line")
@@ -220,6 +272,18 @@ def main():
     p.add_argument("--log_every", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--save_checkpoint_path", default=None,
+                    help="save model.state_dict() here after training -- same convention as "
+                         "learn/indexed_attention/train_kb_chain.py's flag of the same name. A "
+                         "directory (grid-friendly) or a literal file path both work.")
+    p.add_argument("--extrapolate_n_steps", default=None,
+                    help="comma-separated N_step_test values to probe in-memory after training "
+                         "finishes, no checkpoint reload needed (e.g. '8,12,24') -- the direct test "
+                         "of whether 'thinking longer' (more loop iterations at inference than "
+                         "--n_step used at training) helps or hurts on real text, same convention "
+                         "as train_kb_chain.py's flag of the same name. Evaluated on a freshly-seeded "
+                         "pass over --data (NOT a held-out split -- this project has none for real "
+                         "text yet -- so this measures extrapolation behavior, not generalization).")
     add_run_args(p)
     args = p.parse_args()
     logger = logger_from_args(args)
@@ -358,6 +422,29 @@ def main():
     print(f"num_steps: {step}", flush=True)
     print(f"training_seconds: {time.time() - start_time:.1f}", flush=True)
 
+    if args.save_checkpoint_path:
+        # Same convention as learn/indexed_attention/train_kb_chain.py's flag
+        # of the same name -- a directory (grid-friendly, one fixed value per
+        # cell) or a literal file path both work.
+        import os
+        ckpt_path = args.save_checkpoint_path
+        if ckpt_path.endswith("/") or os.path.isdir(ckpt_path):
+            os.makedirs(ckpt_path, exist_ok=True)
+            ckpt_path = os.path.join(ckpt_path, f"{args.run_id or 'adhoc'}.pt")
+        torch.save(model.state_dict(), ckpt_path)
+        print(f"checkpoint saved to {ckpt_path}", flush=True)
+
+    extrapolation_results = {}
+    if args.extrapolate_n_steps:
+        print("--- extrapolation probe (n_step_test vs training n_step) ---", flush=True)
+        for n_step_test in [int(x) for x in args.extrapolate_n_steps.split(",")]:
+            probe_loss = evaluate_at_nstep(model, ds, pad_id, args.n_lanes, args.t_local, args.seed,
+                                            device, n_step_test, n_eval_batches=20)
+            probe_ppl = torch.exp(torch.tensor(probe_loss)).item()
+            extrapolation_results[n_step_test] = probe_loss
+            print(f"n_step_test={n_step_test:3d} loss={probe_loss:.4f} ppl={probe_ppl:.2f} "
+                  f"(training n_step={args.n_step})", flush=True)
+
     # Pas de métrique d'accuracy ici : ce script optimise une perplexité de
     # langage, donc aucun contrôle trivial n'est exigible (finish() ne les
     # réclame que pour les métriques de type accuracy).
@@ -365,6 +452,7 @@ def main():
         "final_loss": sum(loss_hist[-50:]) / max(len(loss_hist[-50:]), 1),
         "num_steps": step,
         "training_seconds": time.time() - start_time,
+        "extrapolation": extrapolation_results or None,
     })
 
 
