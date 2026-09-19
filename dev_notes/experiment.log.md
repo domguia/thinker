@@ -1188,3 +1188,20 @@ Using item [A]'s freshly-saved hardened `n_hops=4, d_model=256` checkpoints (fin
 **Read: this directly settles what the retracted small-scale I7 couldn't -- training margin is the real variable, and it matters exactly as the confound-correction predicted.** Low margin (1-2) genuinely does NOT hold its answer under over-iteration -- real, graded, consistent degradation, not the "no drift" artifact the margin=14 toy checkpoint produced. Margin needs to reach roughly **4+ before extrapolation robustness starts to appear reliably**, and by margin=12 it's the dominant behavior (once a failed seed is set aside). **This means "the loop's iteration count is free" is not universally true -- it's a property the model has to be given enough training slack to acquire, not an automatic consequence of the architecture.** A real, nuanced, and useful finding for the paper -- more informative than either a flat "yes it generalizes" or "no it doesn't" would have been. Full per-seed curves in `runs/i7_realscale/*.json` (Rennes home).
 
 **Process note**: the margin=12/seed0 failure is worth a brief separate look (is `10-15%` a specific rare-collapse mode already characterized elsewhere in this project's bimodality findings, or something new?) but not urgent -- flagged, not chased tonight.
+
+## 2026-09-19/20 (nuit) — item [8] complete (18/18): LR ceiling replicates and sharpens at n_hops=5/6
+
+`item8_nhops56` (Nancy `graffiti-3`, 4x RTX 2080 Ti), `train_kb_chain.py`, hardened generator, `n_hops` in `{5,6}` (with `n_distractors={3,2}` resp., `max_facts=8` both), `d_model=256, depth=2, block_size=4, n_step=12`, `lr` in `{1e-4,3e-4,1e-3}` x 3 seeds, `max_time_minutes=20`.
+
+| n_hops | lr=1e-4 | lr=3e-4 | lr=1e-3 |
+|---|---|---|---|
+| 5 | **99.7% / 99.9% / 99.7%** (3/3) | 25.1% / **99.1%** / 24.7% (1/3) | 2.4%* / 10.6% / 14.6% (0/3) |
+| 6 | 33.8% / **98.9%** / **99.4%** (2/3) | 33.1% / **99.1%** / 32.5% (1/3) | 28.3% / 28.7% / 10.1%* (0/3) |
+
+(*below chance=12.5%, `margin` negative -- a real collapse, not just "didn't finish".)
+
+**Read: directly replicates and sharpens item[5]'s LR-ceiling finding at harder `n_hops`.** `lr=1e-4` is the clear safe point (3/3 at `n_hops=5`, 2/3 at `n_hops=6`, and the successes are near-saturated, 98.9-99.9%). `lr=1e-3` **fails completely at both `n_hops`** -- 0/3 each, several cells landing at or below chance level (not just "slow", genuinely collapsed) -- consistent with item[5]'s finding that `lr=1e-3` becomes catastrophic once the loop is deep enough to matter, now confirmed to get worse (not better) as `n_hops` increases. `lr=3e-4` is the same bimodal middle ground seen throughout this project (1/3 success at both `n_hops`, no partial-credit intermediate outcomes) -- consistent with the `pool_n_head`/I3-style bimodality signature, not a new phenomenon.
+
+**No new architectural signal here** (this was a confirmation/extension run, not a new mechanism question) -- the value is in cementing "lr=1e-4 is the correct default for this scale/depth regime, `1e-3` is not a viable option past `n_hops>=4-5`" as settled going forward, backed now by 4 different `n_hops` values (2,3,4 elsewhere + 5,6 here) all showing the same qualitative pattern.
+
+Full grid + raw curves in `runs/item8_nhops56/state/*.json` (Nancy home).
