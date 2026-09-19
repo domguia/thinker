@@ -595,6 +595,12 @@ Premier niveau de lecture, cohérent et rassurant pour l'architecture : **princi
 
 **Implication pour Phase 4** : la distillation vise maintenant explicitement à rapprocher la principale de C à cette échelle (pas seulement accélérer l'entraînement) — bon signal supplémentaire pour prioriser Phase 4 dès maintenant, avec ce chiffre comme référence de progrès (`0,4137` = plafond réaliste à ce `n_ctx`, pas un objectif garanti atteignable vu la compression).
 
+**[LANCÉ 2026-09-16] Ablation de famille de tokenizer (LFM2/OLMo/Qwen) + dimensionnement §13 ("attention pure")** — motivation initiale : `dev_notes/model_selection_small_vocab_reasoning.md` recommandait LFM2 (petit vocab + petite taille) puis OLMo (ladder de vocab stable 1B→32B) comme familles à essayer avant Qwen (vocab trop large, le problème d'origine ayant motivé cette recherche de modèle). Nouveau registre `core/model_families.py` : alias `--tokenizer lfm2`/`olmo`/`qwen` résolus vers `LiquidAI/LFM2-350M`, `allenai/OLMo-2-0425-1B`, `Qwen/Qwen3-0.6B` respectivement (plus petites variantes de chaque famille ; tokenizers vérifiés directement sur Hugging Face). Branché dans `train_real_text.py`, `train_sft.py` et les trois scripts `distill/prepare_*_data.py`, défaut passé de `gpt2`/`Qwen/Qwen3-0.6B` à `lfm2`. **Portée actuelle : uniquement le tokenizer** — `Thinker` reste entraîné from scratch, aucun poids pré-entraîné LFM2/OLMo/Qwen n'est chargé ; la connaissance générale propre à ces familles n'est donc pas encore héritée (risque identifié : WikiText-103, contrairement à TinyStories, demande une connaissance factuelle large que le corpus d'entraînement actuel — 2700 documents — ne peut de toute façon pas fournir à aucun tokenizer).
+
+Ajout : une deuxième dimension croisée avec les tokenizers, à `d_model=1024` (le dimensionnement §13, "identique à Qwen3.5-0.8B", cœur récurrent sans FF — d'où "attention pure") au lieu du `d_model=128` utilisé jusqu'ici pour les baselines. Seul le dimensionnement du cœur est actionnable pour l'instant (la KB persistante de 172k slots, Phase 10, n'est pas codée).
+
+Grille demandée à `experiment-manager` (dispatché par message, pas encore de résultat) : Baselines A (`--n_step 1`) / B (`--disable_kb`) / principale (`depth=1`, sert de Baseline C "honnête" par la décision du 2026-09-13) reconduites sur {`lfm2`, `olmo`} × {`d_model=128` défaut, `d_model=1024` §13}, plus `qwen`/`d_model=1024` seulement si pas déjà lancé par ailleurs (vérification déléguée à `experiment-manager`, aucune trace trouvée dans ce journal). Consignes d'ordonnancement : les cellules `d_model=128` (moins coûteuses) passent avant celles à `d_model=1024`, et le nombre de tâches en parallèle doit être maximisé (occupation réelle vérifiée, pas supposée) sur les ressources Grid'5000 disponibles — cohérent avec la consigne de rythme de ce plan (§"Parallélisation — comment aller plus vite").
+
 ## Phase 4 — Introduction d'un vrai Teacher (distillation, Option A d'abord)
 
 **Hypothèse** : la distillation Top-K KD (Option A, black-box) sur le stream `answer` converge au moins aussi bien qu'un entraînement CE pur, avec moins de données.
@@ -607,6 +613,16 @@ Premier niveau de lecture, cohérent et rassurant pour l'architecture : **princi
 | Convergence OK mais diagnostic causal dégradé (le stream "triche" en imitant le Teacher sans vraiment lire la KB) | Ajouter une supervision partielle sur l'attention elle-même (Option B légère) avant de continuer |
 
 Réutiliser `learn/distill/precompute_teacher_targets.py` et `topk_kd_loss()` (déjà validés EXP-003 à EXP-006). Vérifier le piège FP8 déjà rencontré sur ce projet (`dev_notes/experiment.log.md`) avant de faire confiance aux cibles précalculées.
+
+**[DÉCISION 2026-09-16] Quel modèle pour régénérer les cibles Top-K : le plus gros de la famille, pas le petit modèle qu'on distille.** Question posée par l'utilisateur : régénérer avec les plus gros modèles de la famille (LFM2/OLMo) ou avec le petit modèle, puisque c'est lui qu'on va distiller ? Réponse : le plus gros, pour deux raisons indépendantes :
+1. **Le Teacher doit savoir plus que l'étudiant** — générer les cibles avec un modèle de taille comparable ou plus petite que l'étudiant n'apporte rien par KD que l'étudiant n'obtiendrait déjà seul sur les données brutes.
+2. **Contrainte d'alignement d'index, plus stricte que le point 1** : `topk_kd_loss()` compare les logits de l'étudiant aux indices de vocabulaire choisis par le Teacher — ça n'a de sens QUE si l'étudiant utilise exactement le même tokenizer/vocab que le Teacher (déjà rencontré une fois, cf. `dev_notes/experiment.log.md`, correction du 2026-09-04 sur le tokenizer Qwen3.8-27B vs `Qwen/Qwen3-0.6B`). Donc "le plus gros modèle" doit être pris **dans la même famille de vocab que le tokenizer choisi pour l'étudiant**, pas n'importe quel gros modèle.
+
+Application concrète avec les alias de `core/model_families.py` (§ Phase 3 ci-dessus) :
+- Étudiant sur tokenizer `lfm2` (vocab 65 536/64 400, constant sur LFM2 v1 350M→2,6B) → Teacher **LFM2-2,6B** — PAS LFM2.5-2,6B/8B-A1B (ceux-là passent à un vocab de 128 000, désaligné).
+- Étudiant sur tokenizer `olmo` (vocab 100 352/100 278, confirmé identique 1B→32B y compris Olmo-3-Think) → Teacher **OLMo-2-32B** ou **Olmo-3-Think** (le plus gros disponible), vocab inchangé.
+
+**Question restée ouverte, non tranchée par l'utilisateur pour l'instant** : le Teacher actuellement configuré pour la distillation dans ce projet est `Qwen/Qwen3.8-27B` (vocab 248 077, §13.1, sans rapport avec les alias `lfm2`/`olmo`/`qwen` ajoutés pour l'ablation de tokenizer de Phase 3). Remplacer ce Teacher par un gros modèle LFM2/OLMo (cohérent avec l'étudiant testé), ou garder Qwen3.8-27B et traiter la question comme un chantier séparé, reste à décider.
 
 ## Phase 5 — Stratégie de construction de la KB : espace unifié vs Sub-KB par batch
 
@@ -697,3 +713,320 @@ Réutiliser `learn/distill/precompute_teacher_targets.py` et `topk_kd_loss()` (d
 No-Op/largeur adaptative, curriculum de largeur "large→étroit" — reportées après la Phase 7. Les introduire plus tôt ajouterait des variables libres avant d'avoir une base fiable pour juger si elles aident.
 
 **[RÉTRACTÉ le 2026-09-13]** : l'unification ci-dessus (Sentinel = No-Op + largeur variable + step compute-only) était une erreur — le Sentinel ne couvre que le cas binaire No-Op, pas un contrôle gradué de largeur/précision ni un mécanisme de step "compute-only". **[OUVERT]** : la largeur de récupération variable (rendre le modèle plus précis selon la tâche courante) et les steps "compute-only" (itérations sans appel mémoire, pertinent pour le débat $N_{\text{step}} \gtrsim 2\text{-}4\times L$ de la Phase 1quater) restent deux besoins identifiés par l'utilisateur, qui soupçonne qu'une approche unifiée existe entre ces deux-là — pas encore trouvée, cf. spec §7.1 pour le détail et ne pas réintroduire le lien avec le Sentinel sans nouvelle justification.
+
+---
+
+# ⏱️ RE-SÉQUENCEMENT DEADLINE ICLR 2027 — 2026-09-26 (décision utilisateur, 2026-09-19)
+
+**7 jours calendaires.** Ce bloc prime sur l'ordre d'exécution de toutes les phases ci-dessus pour la durée restante. Il ne les annule pas : il dit lesquelles sont servies, lesquelles sont gelées, et pourquoi.
+
+## Constat de cadrage
+
+La contrainte limitante n'est pas la compute (Grid5000 est largement sous-utilisé, cf. `grid5000_usage.log.md`) — c'est **la rédaction** : `thesis/paper/` est un squelette de 216 lignes.
+
+**Calendrier arrêté (décision utilisateur)** : **expériences jusqu'au 2026-09-25 inclus (la veille), rédaction démarrée le 2026-09-22 (J-4)**, donc **4 jours de recouvrement** expériences/rédaction. Conséquence à assumer explicitement : `results.typ` et `discussion.typ` s'écrivent **au fil de l'eau**, chiffre par chiffre, pas en une passe finale — toute autre section (architecture, méthodologie, revue de littérature, introduction) doit être **terminée avant le 2026-09-25**, parce que le dernier jour sera absorbé par l'intégration des derniers résultats.
+
+Toute expérience lancée après le **2026-09-24** doit pouvoir livrer son chiffre en moins de 24 h, sinon elle ne sert pas cette soumission — pas de grille longue démarrée en fin de course.
+
+## Ce qui est déjà acquis et va dans le papier (ne pas relancer)
+
+- Étape 4 : chaînage réel confirmé à `n_hops ∈ {2,3,4}`, marge +0,78 à +0,87 sur toutes les graines, générateur durci.
+- Phase 0bis : `depth=1` égale la profondeur native à `n_facts ∈ {16,64,256}` avec curriculum (12/12 cellules à 100%).
+- Balayage LR fin `pool_n_head=4` : fenêtre stable caractérisée à `4e-4`, 5/5 graines.
+- La signature « fenêtre LR étroite et basse » du mécanisme, reproduite sur plusieurs axes.
+
+## Priorité d'allocation de la compute — rien n'est gelé
+
+**[CORRECTIF 2026-09-19, sur remarque de l'utilisateur]** Une première version de ce bloc « gelait » plusieurs phases. C'était un mauvais critère : il supposait que la ressource rare était le temps de l'utilisateur. Elle ne l'est pas — l'exécution est déléguée à `experiment-manager`, la coordination/réflexion/rédaction reste à l'utilisateur. **Les ressources réellement rares sont (a) les nœuds Grid5000 en cas de contention et (b) la place dans le papier.** Or (b) ne justifie jamais d'arrêter une expérience, seulement de ne pas lui donner de section.
+
+Le gel du fil toy-memory était en outre **contraire à la règle permanente de ce projet** (« traiter le plan comme une pile de tâches parallélisables, vérifier l'occupation réelle, lancer proactivement ») : la question ouverte là-bas est un balayage de graines, donc massivement parallèle et bon marché — exactement le profil qui doit *remplir* les nœuds inoccupés, pas s'arrêter.
+
+**Trois niveaux de priorité, appliqués uniquement en cas de contention sur les nœuds :**
+
+| Niveau | Contenu | Règle |
+|---|---|---|
+| **P0 — sert directement le papier** | Piste A (rerun apparié en pas), Phase 12 S0→S2 | Servies en premier, toujours. Préemptent les autres en cas de contention. |
+| **P1 — opportuniste, remplit la capacité libre** | Toy-memory : caractérisation large-graines du stage 2 (`n_facts_curriculum`) ; Phase 0bis avec curriculum aux grandes `n_facts` ; balayage LR dédié `k_dim` | À lancer dès qu'un nœud est libre. Bon marché, parallèle, sans dépendance. Si un résultat tombe à temps et est propre, il peut entrer au papier ; sinon il alimente le suivant. |
+| **P2 — ne tiendra pas dans ce calendrier** | Phases 7, 8, 9, 10, 11 | Non priorisées, mais **pas interdites** : si `experiment-manager` a de la capacité et une entrée claire, rien ne s'y oppose. La Phase 11 est largement contournée par la Phase 12, qui atteint le texte réel par un chemin plus court. |
+
+**Consigne opérationnelle pour `experiment-manager`** : ne jamais laisser un nœud réservé inoccupé au motif qu'une phase est « hors périmètre papier ». L'ordre est P0 d'abord, puis P1 pour saturer, puis P2 si la capacité le permet encore.
+
+## Le vrai facteur limitant : le temps de calcul, pas le temps humain **[remarque utilisateur, 2026-09-19]**
+
+Le correctif ci-dessus a déplacé le critère de tri du « temps de l'utilisateur » vers « la compute ». Il faut aller au bout de cette logique : **à 6 jours, la latence d'accès aux nœuds est une ressource de premier ordre, et elle ne se compense par aucun ajout d'agents.** Preuve dans le journal : une réservation GPU besteffort à Rennes a été mise en file **pour le lendemain** (job 4111506, annulé), derrière du besteffort concurrent. Un jour de file = 17 % du calendrier restant.
+
+### Conséquence 1 — réserver immédiatement, coder ensuite
+
+**Une réservation en file ne coûte rien tant qu'elle attend.** La file est la latence ; le run ne l'est pas. Donc : placer **dès maintenant** les réservations GPU nécessaires à S1/S2, *avant* que le code de S0 soit écrit, quitte à ce que le nœud attende le code plutôt que l'inverse. L'ordre habituel (coder → tester → réserver) est exactement le mauvais sous cette contrainte.
+
+Corollaire : préférer des réservations **plus longues et moins nombreuses** (une seule prise de file) à une série de courtes qui repassent en file à chaque fois — à l'inverse de la pratique documentée plus haut, où des jobs de relief courts étaient la bonne réponse à un problème différent (walltime sous-estimé sur un job déjà obtenu).
+
+### Conséquence 2 — P1 ne partage plus la file avec P0
+
+La priorité P0/P1/P2 ci-dessus tient, mais avec une restriction que la contrainte de file rend nécessaire : **P1 ne doit jamais consommer une réservation distincte qui entrerait en file devant ou à côté de P0.** P1 remplit uniquement la capacité **déjà détenue et inoccupée** à l'intérieur d'une réservation P0 (cœurs libres, GPU voisin du même job, fin de grille). Dès qu'il faut un `oarsub` de plus pour faire du P1, la réponse est non tant que P0 n'est pas entièrement servi.
+
+C'est la version correcte de l'intuition qui avait produit le « gel » : le fil toy-memory n'est pas à arrêter, il est à faire tourner **dans les trous**, jamais dans la file.
+
+### Conséquence 3 — dimensionner S1 pour le tier CPU, qui lui est disponible tout de suite
+
+Rennes CPU (`paradoxe`, 104 cœurs, queue `default`, sans préemption) a été obtenu immédiatement à chaque tentative dans ce journal ; c'est le GPU besteffort qui fait la file. Il faut donc concevoir la Phase 12 pour que le gros du travail tombe côté CPU :
+
+- **L'extraction des activations `(x_l, FFN_l(x_l))` est la seule partie réellement coûteuse en GPU** — c'est une passe avant sur le corpus, faite **une fois**, puis mise en cache sur disque.
+- **Une fois ces activations cachées, chaque régression de couche est minuscule et indépendante** : pas de rétropropagation bout-en-bout, pas de modèle complet en mémoire. Ça tourne sur CPU, et les ~16 couches se répartissent sur les 104 cœurs de `paradoxe` en parallèle.
+
+Autrement dit : **un seul créneau GPU court pour le cache d'activations, puis toute la distillation S1 sur le tier CPU immédiatement disponible.** C'est ce découpage qui rend S1 compatible avec 6 jours, pas la puissance brute.
+
+### Conséquence 4 — vérifier les autres sites avant de subir la file de Rennes
+
+Le journal ne documente que Rennes. Avant d'accepter une file d'un jour, vérifier la disponibilité GPU sur les autres sites Grid'5000 (`oarstat`/Gantt par site) — une file vide ailleurs vaut mieux qu'un nœud plus rapide demain. À faire **en premier** par `experiment-manager`, avant toute réservation.
+
+### Révision de périmètre si la compute ne suit pas
+
+Si, après vérification multi-sites, le GPU n'est pas accessible sous 24 h : **S2 passe à un modèle plus petit** (LFM2-350M plutôt qu'un modèle plus gros) plutôt que d'être abandonnée. L'argument de S2 porte sur `d_ff` (~10³–10⁴ slots, déjà un ordre de grandeur au-dessus de `n_facts=256`), pas sur la taille du modèle hôte — un petit modèle suffit à trancher l'hypothèse. **Réduire l'échelle du modèle avant de réduire le nombre de graines ou de sauter le bloc chance-level.**
+
+## Plan de repli si les nœuds sont insuffisants ou saturés **[remarque utilisateur, 2026-09-19]**
+
+Hypothèse à traiter maintenant, pas le 24 : **les nœuds disponibles ne sont pas assez performants, ou trop occupés, pour livrer les expériences avant la deadline.** Le journal contient déjà les deux symptômes — file besteffort d'un jour à Rennes, et `abacus1`/`abacus2` (P100, Pascal) écartés comme incompatibles avec l'environnement torch du projet, c'est-à-dire de la capacité présente mais inutilisable.
+
+Repli en quatre crans, **dans cet ordre** — chacun préserve une affirmation défendable, on ne descend au suivant que si le précédent est hors d'atteinte.
+
+### Cran 1 — découpler la revendication de l'échelle du système (à préparer dès maintenant, quoi qu'il arrive)
+
+**L'affirmation de S2 est « un index hiérarchique retrouve, à coût réduit, ce qu'une attention dense retrouve sur une mémoire KV de grande taille ». Elle ne nécessite pas de faire tourner un LLM complet.**
+
+Une seule couche FFN d'un modèle préentraîné **est déjà** une mémoire KV de `d_ff` slots (~8k–10k), soit un ordre de grandeur au-dessus du `n_facts=256` qui plafonne les résultats actuels. Donc :
+
+- extraire `W_in`/`W_out` d'**une** couche d'**un** petit modèle → c'est la KB, sans entraînement, sans passe avant coûteuse ;
+- cacher les activations `x_l` sur un échantillon modeste de tokens ;
+- comparer **index hiérarchique vs attention dense vs top-k plat** sur la fidélité de reconstruction et le coût.
+
+Coût : **CPU, échelle portable.** C'est l'expérience minimale qui tranche l'hypothèse centrale du projet, et elle est insensible à la saturation du cluster. **À écrire en premier, même si tout le GPU est disponible** — elle dérisque le papier entier pour un coût quasi nul, et S1/S2 pleine échelle deviennent une montée en généralité plutôt qu'un pari.
+
+### Cran 2 — réduire le modèle hôte, jamais la rigueur
+
+LFM2-350M plutôt qu'un modèle plus gros ; moins de couches distillées (les plus informatives selon la stratification de Geva, pas les premières venues) ; corpus d'activations plus petit. Ordre de sacrifice imposé : **taille du modèle → nombre de couches → taille du corpus → puis seulement le nombre de cellules de grille.** Le nombre de graines et le bloc chance-level ne sont jamais dans cette liste.
+
+### Cran 3 — compute hors Grid5000
+
+À considérer sans attendre la saturation avérée, puisque la mise en place a elle-même une latence : Kaggle (GPU gratuit, quota hebdomadaire réel), Colab, ou crédits cloud. À l'échelle du Cran 1 et d'une bonne partie du Cran 2, c'est largement suffisant — on parle de régressions par couche sur activations cachées, pas d'un préentraînement. **Vérifier la faisabilité tôt** (transfert du cache d'activations, environnement torch), pas le 24.
+
+Le cas P100 (`abacus1`/`abacus2`) relève du même arbitrage : de la capacité existe mais demanderait de reconstruire un environnement torch plus ancien — **non rentable à 6 jours**, à ne rouvrir qu'après la soumission.
+
+### Cran 4 — recadrer le papier sur ce qui est déjà acquis
+
+Si rien de la Phase 12 n'aboutit, **le papier existe quand même** et ce n'est pas un repli honteux : chaînage réel confirmé à `n_hops ∈ {2,3,4}` avec marge +0,78 à +0,87 sur toutes les graines et générateur durci ; `depth=1` vs profondeur native tranché à `n_facts ∈ {16,64,256}` ; fenêtre LR de `pool_n_head=4` caractérisée sur 5 graines ; et la série de réfutations documentées (pooling K/V partagé, raccourcis du générateur, confond temps-mural/pas) qui constitue une contribution méthodologique réelle sur l'évaluation des tâches synthétiques de récupération.
+
+Dans ce cas, la Phase 12 devient une section « travaux en cours / directions » avec, au minimum, le résultat du Cran 1 — qui reste atteignable même sans aucun nœud.
+
+**Règle de décision** : l'état du Cran 1 est vérifié **le 2026-09-22 au soir**. S'il n'est pas livré à cette date, passer au Cran 3 immédiatement plutôt que de continuer à attendre un créneau Grid5000.
+
+## Trois pistes en parallèle, à partir de maintenant
+
+### Piste A — DÉBLOQUER le confond de la table baselines A/B/C (priorité la plus haute, bloquante)
+
+La table réelle-texte actuelle (15/15 cellules) **ne peut soutenir aucune affirmation architecturale** : la Baseline A (`n_step=1`) gagne partout, mais atteint 1,2 à 2× plus de pas de gradient que C dans le même temps mural, parce que `n_step` multiplie directement le coût par pas. C'est un confond « même temps mural, moins de pas », pas une ablation.
+
+**Hypothèse** : à nombre de pas de gradient apparié, la boucle (`n_step=6`) bat la récupération plate (`n_step=1`) sur le même découpage de documents.
+
+**Protocole** : reprise de la grille existante via `tools/exp/`, mais **appariée en pas** (`--max_steps` fixé identique pour toutes les cellules, `--max_time_minutes` non-contraignant et généreux) plutôt qu'en temps mural. Tokenizers lfm2 + olmo (Qwen en comparaison, cf. ordre établi), `d_model ∈ {128, 1024}`, ≥2 graines. Rapporter **les deux** lectures (à pas apparié et à FLOPs appariés) : elles ne disent pas la même chose et le papier a besoin des deux.
+
+| Observation | Action |
+|---|---|
+| C bat A à pas apparié | Le résultat central du papier côté texte réel. Rapporter les deux axes (pas / FLOPs) honnêtement. |
+| C égale A à pas apparié | La boucle n'achète rien à ce budget — le rapporter tel quel, et appuyer le papier sur les résultats synthétiques (Étape 4) plutôt que sur celui-ci. |
+| A bat toujours C à pas apparié | Résultat négatif réel, à rapporter. Diagnostiquer sur une seule cellule (`n_step` intermédiaire 2/3/4) si le budget le permet, sinon le laisser en question ouverte. |
+
+**Sans cette piste, le papier n'a pas de jambe « texte réel » défendable.** Elle passe avant la Piste B.
+
+### Piste B — Phase 12 : conversion FFN → mémoire KV attentionnelle sur modèle préentraîné (nouvelle direction)
+
+**Origine** : `raw/Équivalence-FFN-et-Attention-Statique.md` + note vocale utilisateur du 2026-09-19.
+
+**Cadrage — ce n'est PAS un changement de direction.** La spec §-1 pose déjà que l'idée fondatrice de Thinker est de sortir la connaissance des poids FF pour la mettre dans des paires KV explicites et indexées. Les FFN d'un transformer préentraîné *sont déjà* cette mémoire KV (Geva et al. 2021). Cette phase fait donc la même chose que le reste du projet, **en partant d'une initialisation gratuite au lieu d'un entraînement de zéro** — ce qui est aussi le seul moyen d'obtenir une KB réaliste et de grande taille dans le temps imparti.
+
+**Acquis de la littérature à ne pas re-démontrer** : Sukhbaatar et al. 2019 (*Augmenting Self-attention with Persistent Memory*) a déjà montré qu'une mémoire persistante suffisamment large permet de supprimer entièrement la FFN à performance comparable. La contribution ne peut donc pas être l'unification elle-même — elle doit être **l'indexation hiérarchique de cette mémoire** (S2 ci-dessous).
+
+#### S0 — conversion exacte, aucun entraînement (09-19 → 09-20)
+
+`FFN(x) = σ(x W_in) W_out` ≡ `φ(Q Kᵀ) V` avec `Q = x`, `K = W_inᵀ`, `V = W_out`, `φ = σ`. Équivalence au bit près, coût nul.
+
+**Attention SwiGLU** : LFM2/Qwen/OLMo utilisent des portes — `(Swish(x W_gate) ⊙ x W_up) W_down`. La conversion exacte demande une forme *gated linear attention*, pas la forme naïve à deux matrices. C'est le piège d'implémentation principal de S0, à traiter en premier.
+
+| Observation | Action |
+|---|---|
+| Perplexité identique au modèle d'origine (à l'epsilon numérique) | Le harnais est correct, passer à S1 |
+| Écart non nul | Bug de conversion (très probablement le gating), **ne pas passer à S1** — S1 hériterait d'une base fausse |
+
+#### S1 — unification séquence + mémoire, distillation locale par couche (09-20 → 09-22)
+
+Un seul bloc d'attention par couche sur `K_total = [K_seq ; K_mem]`, `V_total = [V_seq ; V_mem]`.
+
+**Écueil identifié d'avance** : le softmax unifié normalise à 1 et met la mémoire en compétition avec les tokens de séquence, alors qu'une FFN à GELU laisse N neurones co-activer avec des amplitudes libres. Deux branches, à trancher **avant** de coder :
+- **(i) deux lectures séparées** — mémoire avec noyau `relu`/`sigmoid`, séquence avec softmax : la conversion S0 reste exacte, coût nul, pas de distillation nécessaire ;
+- **(ii) softmax unifié** — plus élégant et plus proche de Sukhbaatar, mais **la distillation devient obligatoire** (ce n'est plus une conversion).
+
+Défaut retenu : **(i) d'abord** (c'est gratuit et ça garantit un point de départ fonctionnel), **(ii) ensuite** si le temps le permet.
+
+Distillation locale : geler le reste du réseau, minimiser `L_l = ||Attn_mem(x_l) − FFN_l(x_l)||²` **couche par couche, indépendamment**. Aucune rétropropagation bout-en-bout ⇒ **parfaitement parallélisable, une couche par tâche** — exactement le profil qui maximise l'occupation des nœuds Grid5000.
+
+| Observation | Action |
+|---|---|
+| Écart de perplexité faible après distillation | Passer à S2 immédiatement |
+| Écart important sur quelques couches seulement | Regarder lesquelles (basses vs hautes, cf. stratification de Geva) — c'est un résultat en soi, à rapporter |
+| Échec général | Revenir à la branche (i) si on était en (ii) ; sinon rapporter l'écart et s'arrêter là pour cette soumission |
+
+#### S2 — indexation hiérarchique de `K_mem` (09-22 → 09-24, marge jusqu'au 09-25) — **le cœur de la contribution**
+
+Appliquer l'index hiérarchique / top-k du projet sur `K_mem` (taille `d_ff`, soit ~10³–10⁴ slots par couche).
+
+**Pourquoi c'est le résultat le plus important** : le plan a établi que `depth=1` égale `depth≥2` jusqu'à `n_facts=256`, avec la lecture « l'indexation paie au passage à l'échelle, pas en accuracy ». **Cette lecture n'a jamais été testée, faute de KB assez grande.** Les FFN d'un modèle préentraîné en fournissent une, gratuite, réaliste, et d'un ordre de grandeur au-dessus de tout ce qui a été testé. S2 est donc le test décisif d'une hypothèse déjà posée par le projet, pas une nouveauté opportuniste.
+
+| Observation | Action |
+|---|---|
+| L'index atteint la perplexité de l'attention dense sur mémoire à coût réduit | **Résultat central du papier.** L'indexation paie à l'échelle, comme prédit. |
+| L'index dégrade la perplexité | Mesurer la courbe coût/qualité en fonction de `top-k` — même dégradée, la courbe est le résultat |
+| Pas de gain de coût mesurable | Vérifier que la mesure est bien faite (mémoire vs compute) avant de conclure ; rapporter l'échelle à laquelle le croisement se produirait |
+
+#### S3 — couche universelle récurrente (hors périmètre de cette soumission, à discuter)
+
+Union des mémoires de toutes les couches (`Σ_l d_ff`, éventuellement compressée par SVD) + **projection de requête par couche** → couche partagée unique → looped transformer à démarrage chaud.
+
+**Précision structurelle importante** : ce ne peut pas être une *moyenne* des couches. Geva montre que les mémoires FF sont stratifiées (couches basses = motifs de surface, hautes = sémantique). Dimensionner en **union**, jamais en moyenne ; c'est la projection par couche qui sélectionne quelle région chaque couche adresse.
+
+Précédent qui couvre le chemin : *Relaxed Recursive Transformers* (Google, 2024) fait « couche partagée + adaptateur bas-rang par couche, initialisé depuis un préentraîné ». La nouveauté de Thinker n'est donc pas le partage de couche mais **la forme KV-mémoire-indexée** de la couche partagée.
+
+**Statut : non planifiable comme résultat validé dans ce calendrier.** Créneau réaliste s'il s'en dégage un : le **09-25**, et seulement si S2 est bouclé le 09-24. À traiter en section Discussion / travaux futurs, avec au mieux un point préliminaire si S2 se termine en avance. C'est le pont naturel entre la Phase 12 et l'architecture Thinker (couche récurrente), donc la suite évidente après soumission.
+
+### Piste C — rédaction, démarrage ferme le 2026-09-22 (J-4)
+
+**Répartition des rôles actée (2026-09-19)** : `experiment-manager` conduit l'exécution des Pistes A et B de bout en bout (réservation, lancement, surveillance, collecte, relance) ; l'utilisateur coordonne, arbitre les idées et rédige ; `model-design` est saisi sur les décisions d'architecture. La rédaction n'est donc **pas** en compétition avec l'expérimentation pour la même ressource — les deux avancent réellement en parallèle, ce qui est précisément ce qui rend le recouvrement de 4 jours tenable.
+
+`thesis/paper/` est un squelette de 216 lignes. Découpage :
+
+| Section | Dépend d'une expérience ? | À écrire |
+|---|---|---|
+| `introduction.typ`, `literature_review.typ`, `architecture.typ`, `methodology.typ` | non — spec §-1 à §14 + acquis déjà validés | **09-22 → 09-24, terminé le 09-24** |
+| `results.typ` | oui (Pistes A et B) | **au fil de l'eau** : chaque cellule qui tombe est intégrée le jour même, pas accumulée |
+| `discussion.typ`, `conclusion.typ`, `abstract.typ` | partiellement | 09-25, avec S3 en travaux futurs |
+
+Les résultats déjà acquis (Étape 4, Phase 0bis, balayage `pool_n_head`) **ne dépendent d'aucune expérience en cours** : leurs paragraphes de `results.typ` peuvent être écrits dès le 09-22, indépendamment des Pistes A et B.
+
+Le recouvrement de 4 jours n'est pas un confort : il existe pour que le 09-25 soit consacré à l'intégration des derniers chiffres et à la relecture, pas à la découverte qu'une section entière reste à écrire.
+
+## Règles maintenues, sans exception, malgré la deadline
+
+Le raccourcissement du calendrier **ne suspend aucune** des règles méthodologiques de ce document : bloc chance-level obligatoire, `margin_over_shortcut > 0`, revalidation du LR après tout changement d'axe (la fenêtre étroite documentée partout ici rend cette règle plus critique, pas moins, sous pression de temps), ≥3 graines pour toute cellule dont on tire une conclusion, co-spécification `--max_steps`/`--max_time_minutes`. Une deadline est une raison de réduire le *périmètre*, jamais la rigueur — un résultat non vérifié dans un papier coûte plus cher que le résultat manquant.
+
+## Inventaire chiffré — TOUT le périmètre, pas seulement la Phase 12 **[2026-09-19]**
+
+**[CORRECTIF]** Une première estimation ne chiffrait que la Phase 12 + la Piste A. L'utilisateur veut **mener à bout les fils indexed-attention déjà engagés**. Recensement complet des fils réellement ouverts, avec leur coût.
+
+### Fils indexed-attention à terminer (I)
+
+| # | Fil | Statut | Cellules | Coût |
+|---|---|---|---|---|
+| **I1** | Phase 1bis `use_ff`×`n_register` à `n_hops∈{3,4}` | **collecté le 09-19** (logs bruts du job 4106501, `tools/exp/collect.py` ne s'applique pas — grille antérieure à cette pipeline) : 11/12 exploitables, aucun effet détectable de `use_ff`/`n_register` (bande +0,77 à +0,85, indiscernable du baseline). Verdict acquis. 1 cellule (`h4_ff1_nreg4_s1`) coupée par le walltime, à relancer (~15 min GPU) — voir `experiment.log.md` 2026-09-19 | 12 | **0 h·GPU** (11/12 déjà payées) + 15 min pour la dernière |
+| **I2** | Balayage LR dédié `k_dim=128` | jamais fait (explicitement noté) ; `4,5e-4` propre sur 2/2, fenêtre non cartographiée | ~20 (4 LR × 5 graines) | **5 h·GPU** |
+| **I3** | Supervision d'attention redondante ou nécessaire à `n_hops≥3` ? | **la question ouverte la plus substantielle du plan** ; générateur durci désormais disponible. Règle LR ⇒ revalidation obligatoire, ne pas réutiliser `3e-4` | 12 à 48 | **3 à 12 h·GPU** |
+| **I4** | Mesure douce d'attribution (corrélation `o_kb` ↔ embedding de la vraie valeur) | **faite le 09-19** — signal réel et net au-dessus des deux contrôles triviaux (random_kb, non_key) aux deux sauts (top-1 93,4%/63,3%, hasard 25%). **Réserve importante** : le checkpoint historique du 0,000 était périmé (architecture changée) et a dû être régénéré sous le code actuel — qui inclut déjà le fix `decouple_kv`, donc le checkpoint régénéré résout la tâche à ~100% au lieu du plateau ~23-32% d'origine. Ce résultat répond à "y a-t-il corrélation sur un modèle qui résout la tâche" (oui, net), pas directement à "sur le checkpoint qui a donné 0,000" (ce checkpoint précis n'existe plus). Voir `experiment.log.md` 2026-09-19 pour le détail et la table complète | — | **fait, 0 h·GPU** (~12 min CPU pour régénérer le checkpoint + le run) |
+| **I5** | Reproduire la config CPU `d_model=32` sur GPU à budget de pas apparié (Phase 2, écart CPU 99,2% / GPU non résolu) | prochaine étape déclarée « avant toute nouvelle piste architecturale » | ~6 | **1,5 h·GPU** |
+
+**Total fils indexed-attention : ~12 à 22 h·GPU** — soit le même ordre que toute la Phase 12. Ce n'est pas un appoint marginal, ça double le besoin GPU.
+
+**I4 est le meilleur rapport valeur/coût de tout le plan** : aucun entraînement, checkpoints déjà là, et il attaque directement la seule question d'attribution causale encore sans réponse. À faire en premier, sur CPU, indépendamment de tout.
+
+**I1 avant tout lancement** : 12 runs ont tourné le 09-14 et leurs résultats n'apparaissent nulle part dans `experiment.log.md`. Collecter avant de dépenser un seul nœud — possible qu'une partie du travail soit déjà payée.
+
+### Révision du budget stockage — **>1 To NFS disponible** (information utilisateur)
+
+La contrainte de stockage identifiée plus haut **tombe**, pour deux raisons cumulées.
+
+**[CORRECTIF 2026-09-19, sur question de l'utilisateur « pourquoi 4 × d ? »]** Le chiffre initial (`4 × d × n_layers` = 2 tenseurs `x_l` et `FFN_l(x_l)` × 2 octets fp16) **stockait la moitié pour rien** : `FFN_l(x_l)` est entièrement déterminé par `x_l` et les poids gelés, donc il se **recalcule au vol** pendant la régression (un GEMM sur un petit lot, coût dérisoire) au lieu d'être caché. Seule `x_l` doit être stockée — elle, elle dépend de toute la pile en amont, attention comprise, et n'est pas reconstructible à partir de `x_{l-1}` sans refaire une passe.
+
+Coût réel : **`2 × d × n_layers` octets/token** (fp16).
+
+| Hôte | Par token | 1M tokens | 5M tokens | 10M tokens |
+|---|---|---|---|---|
+| LFM2-350M (`d=1024`, 16 couches) | 32 Ko | 32 Go | 160 Go | 320 Go |
+| OLMo-2-1B (`d=2048`, 16 couches) | 64 Ko | 64 Go | 320 Go | 640 Go |
+
+**Cible retenue : 1 à 2M tokens** (32–128 Go selon l'hôte). Largement au-delà du nécessaire pour ajuster une régression par couche, et ça laisse les trois quarts du To libres. **Ne pas viser 10M tokens sous prétexte que la place existe** : le coût redevient alors l'extraction GPU et la bande passante NFS, pas le disque — et le gain statistique est nul à ce point.
+
+### Budget consolidé
+
+| | Bas | Haut |
+|---|---|---|
+| Piste A (texte réel apparié en pas) | 35 h·cœur | 135 h·cœur |
+| Fils indexed-attention I1–I5 | 12 h·GPU + 1 h·cœur | 22 h·GPU + 1 h·cœur |
+| Phase 12 (S0 + S1 + S2) | 6 h·GPU + 15 h·cœur | 30 h·GPU + 70 h·cœur |
+| P1 opportuniste | 15 h·cœur | 40 h·cœur |
+| **Total** | **~18 h·GPU + 66 h·cœur** | **~52 h·GPU + 246 h·cœur** |
+
+**Lecture** : le CPU reste surdimensionné (`paradoxe`, 104 cœurs ⇒ moins de 3 h de temps mural même en borne haute). Le GPU passe de « minuscule » à « deux à trois nuits besteffort », ce qui reste atteignable **mais ne tolère plus une journée de file perdue**. Conclusion inchangée et renforcée : **réserver le GPU immédiatement, avant d'écrire le code.**
+
+## Correspondance Thinker ↔ transformer converti — version corrigée **[utilisateur, 2026-09-19]**
+
+Une première formulation de cette correspondance (session ff2attn) écrasait deux flux distincts en un, en posant « `K_seq`/`V_seq` du cache KV ↔ SM ». **C'est faux.** Thinker a **trois** mémoires, pas deux :
+
+| Thinker | Rôle | Équivalent dans un transformer converti |
+|---|---|---|
+| `K_in`, `V_in` | la **séquence d'entrée** elle-même | les K/V calculés depuis les tokens d'entrée |
+| `K_sm`, `V_sm` | **mémoire court terme**, écrite par `APPEND` à chaque itération de la boucle | le **cache KV classique** — la chose qui s'accumule au fil de la génération |
+| `K_lm` (KB) | **mémoire long terme**, connaissance accumulée sur la distribution d'entraînement | la **mémoire FFN** convertie (Geva et al.), cf. Phase 12 |
+
+### Ce que la conversion donne, et ce qu'elle ne donne pas
+
+La conversion FFN→attention produit naturellement une séparation **à deux voies** : mémoire FFN (statique, `K_lm`) contre séquence (dynamique). Thinker en demande **trois**. Dans un transformer standard, `K_in` et le cache KV sont **la même chose** — le cache *est* la séquence vue jusqu'ici. Thinker les sépare délibérément.
+
+**Deuxième écart, sur l'axe d'accumulation** : le cache KV d'un transformer s'étend le long de l'**axe des tokens** (un `APPEND` par token généré), alors que la SM de Thinker s'étend le long de l'**axe des itérations** de la boucle (un `APPEND` par pas de raisonnement, à séquence constante). Ce ne sont pas les mêmes `APPEND`. Une conversion ne fournit donc pas la SM de Thinker gratuitement — elle fournit `K_lm` gratuitement, et `K_in` gratuitement.
+
+**À retenir pour S3** : le démarrage à chaud offre la boucle et la mémoire long terme. Il n'offre ni le goulot du registre (`T × d → n × d`), ni la SM sur l'axe itérations. Ce sont les deux composants à construire, et ils doivent être présentés comme tels plutôt que comme des sous-produits de la conversion.
+
+### Hôte retenu pour la Phase 12 : OLMo-2-1B **[décision utilisateur]**
+
+`allenai/OLMo-2-0425-1B` (`d=2048`, `d_ff=8192`, 16 couches, MHA) devient l'hôte de S1/S2/S3, malgré l'ordre général « LFM2 d'abord ». Trois raisons :
+
+1. **Couches uniformes.** LFM2-350M n'a que 6 couches d'attention pleine sur 16 (`full_attn_idxs = [2,5,8,10,12,14]`), le reste étant convolutif : l'unification séquence+mémoire n'y est pas définie sur 10 couches sur 16, et la couche universelle de S3 devrait fusionner deux familles d'opérateurs hétérogènes. Rédhibitoire pour S3.
+2. **Post-Norm.** OLMo 2 place les RMSNorm *après* l'attention et la FFN (à l'intérieur du résiduel). La sortie FFN est donc normalisée de toute façon — ce qui **absorbe en grande partie l'objection d'amplitude** contre la branche (ii) (softmax unifié) : le softmax détruit l'amplitude, mais la norme la détruisait déjà. La branche (ii), la plus proche de Sukhbaatar, devient nettement plus praticable sur cet hôte que sur un modèle Pre-Norm.
+3. **MHA plutôt que GQA** sur cette taille : K/V pleins par tête, correspondance plus simple.
+
+Prix : `d=2048` double le cache d'activations (64 Ko/token contre 32). Sans objet avec >1 To de NFS.
+
+**Ce n'est pas une contradiction avec l'ordre LFM2-d'abord, c'est une dissociation par usage** : LFM2 reste l'hôte des baselines et des jambes tokenizer/texte réel (où le petit vocabulaire est l'argument), OLMo devient l'hôte de la conversion FFN→attention. À vérifier au moment de coder : QK-Norm (OLMo l'applique aux requêtes et clés dans l'attention) doit être reproduit à l'identique dans la lecture mémoire, sous peine de casser l'équivalence.
+
+## Espace K/V unifié entre `_in`, `_sm` et `_lm` **[DÉCISION UTILISATEUR 2026-09-19, à porter dans la spec]**
+
+**Énoncé** : `K_lm` et `K_sm` (et, par souci de simplicité, `K_in`) vivent dans **un seul et même espace** ; idem pour `V_lm`/`V_sm`/`V_in`. Motivation première de l'utilisateur : permettre qu'un élément de la mémoire court terme **passe plus tard dans la mémoire long terme** — une promotion, donc une recopie, sans traduction.
+
+### Ce que ça achète
+
+1. **La promotion SM → LM devient une recopie**, pas un apprentissage de correspondance. C'est le mécanisme qui rend la Phase 10 (KB persistante apprise) et une extension type Titans implémentables sans module supplémentaire.
+2. **Le softmax unifié sur `[K_in ; K_sm ; K_lm]` devient bien défini** — c'est exactement la forme all-attention de Sukhbaatar et l'option 1 de la spec §3.
+3. **Moins de degrés de liberté** : un jeu de projections au lieu de trois, ce qui va dans le sens de l'argument de simplification représentationnelle de la spec §-1.
+4. **Les diagnostics deviennent uniformes** : la mesure douce validée en I4 (cos_sim entre `o_kb` et le `v_proj` de la vraie valeur) s'applique telle quelle aux trois mémoires, sans métrique par espace.
+
+### Le risque technique réel : masse contre pic
+
+Dans un softmax unifié, `K_lm` peut compter 10⁴–10⁵ entrées quand `K_sm` en compte une poignée. Même si chaque entrée LM reçoit un poids individuel faible, **leur masse cumulée peut noyer les quelques entrées SM** — un problème de masse contre pic, pas de pertinence. C'est le principal danger de l'unification, et il croît avec la taille de la KB, donc il ne se verra pas aux petites échelles déjà testées.
+
+**Le primitif nécessaire existe déjà dans le code** : `v_proj(embed(x) + source_bias(KB))` (vu dans `diagnose_no_ff_soft_retrieval.py`) — un biais appris marquant la provenance, ajouté avant projection. Même espace, provenance signalée. À généraliser aux trois sources, et à compléter si besoin par une **température par source**. À surveiller explicitement dès que `n_facts` monte : mesurer la masse d'attention totale par source, pas seulement le top-1.
+
+### La conséquence sur la Phase 12 — et c'est la plus importante
+
+Dans un transformer préentraîné, `K_lm` provient de `W_in^T` (clés de la FFN) et `K_in` de `W_K x` (clés d'attention). **Ces deux espaces sont différents par construction** : géométries apprises distinctes, échelles distinctes. Imposer un espace unique signifie donc que **la conversion exacte S0 ne peut plus être exacte**.
+
+Autrement dit, cette décision **arbitre entre les deux branches de S1** : elle exclut la branche (i) (deux lectures séparées, conversion exacte, coût nul) comme point d'arrivée, et impose la branche (ii) (softmax unifié, distillation obligatoire).
+
+**Résolution proposée — ne pas choisir, recuire** : garder S0 exact (espaces séparés) comme **point de départ vérifiable**, puis **recuire progressivement vers l'espace unifié** par distillation, en mesurant la dégradation à chaque cran. Même patron que le recuit des projections par couche proposé pour S3 : l'échafaudage exact sert à garantir qu'on part d'un modèle qui marche, et la courbe de dégradation *est* le résultat. Ça évite de payer d'emblée le coût d'une distillation en aveugle.
+
+### Mesure préalable, gratuite, à faire avant toute distillation
+
+**Les deux espaces sont-ils déjà proches dans un modèle préentraîné ?** Mesurer le recouvrement de sous-espaces entre `W_in^T` (clés FFN) et `W_K` (clés d'attention), couche par couche, sur OLMo-2-1B : angles principaux, similarité cosinus des bases, énergie projetée.
+
+Pure algèbre linéaire sur les poids — aucune donnée, aucun entraînement, quelques minutes de CPU. Si le recouvrement est déjà substantiel, l'unification est presque gratuite et le recuit sera court. S'ils sont quasi orthogonaux, l'unification coûte une vraie distillation et il faut le budgéter. **À grouper avec la mesure de redondance inter-couches proposée pour S3** : même nature, même coût, même fichier.
+
+### Ce que l'unification ne résout pas
+
+L'espace commun rend la promotion SM → LM **possible**, il ne dit pas **quoi** promouvoir ni **quand**. Sans critère, on promeut tout (la LM explose) ou rien. C'est la question de conception que cette décision ouvre — la « surprise » de Titans en est une réponse connue, la fréquence de réutilisation une autre. À traiter en Phase 10, pas avant.
+
+Deuxième réserve : même dans un espace commun, les entrées LM (accumulées sur la distribution d'entraînement) et SM (écrites à l'instant, spécifiques à l'épisode) ont des statistiques de norme différentes, ce qui biaise les produits scalaires. Un contrôle de norme sur les entrées mémoire est probablement nécessaire — noter que le QK-Norm d'OLMo joue déjà ce rôle côté requêtes/clés d'attention.
