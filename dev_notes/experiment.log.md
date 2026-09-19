@@ -68,6 +68,8 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 - **2026-09-20** -- [i3_etape3: bug de lancement (n_distractors manquant) trouve et corrige](experiments/i3_attention_supervision.md)
 - **2026-09-20** -- [Nouveau toolkit d'evaluation real-text: val split, checkpoint+extrapolation, ablation memoire, baseline LLM (LFM2-350M)](experiments/real_text_baselines.md)
 
+- **2026-09-20** -- [Garde-fou methodologique sur pistea_c_nstep_sweep: LR fixe = meme piege que item5/item8](experiments/real_text_baselines.md)
+
 ## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
 
 **En cours de rédaction, mis à jour au fil de la nuit -- lire la version la plus récente en tête de ce fichier au réveil.**
