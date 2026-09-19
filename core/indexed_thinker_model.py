@@ -40,6 +40,15 @@ already decoupled (`HierarchicalMemory.q_proj` vs `sm_q_proj` below are
 separate weights). `level_dropout_p` (stochastic level dropping) lives in
 HierarchicalMemory, threaded through here; `use_ff` and `detach_sm_keys` are
 the two Phase 1bis variant flags for this module specifically.
+
+`stream_vocab_sizes` (spec §11ter, 2026-09-20): an output stream can target a
+DIFFERENT tokenizer than the core's own `vocab_size` -- its teacher-forced
+target tokens are embedded via a dedicated `self.stream_embed[name]` table
+instead of the shared `self.embed`. Lets several streams each decode into
+(and receive KD from) a different Teacher family's native vocabulary at
+once, without the KD tokenizer-matching constraint this project has had to
+work around so far (core/model_families.py). Streams absent from this dict
+are unaffected.
 """
 
 import torch
@@ -150,7 +159,8 @@ class Thinker(nn.Module):
                  detach_sm_keys: bool = False, use_ff: bool = False, ff_hidden_mult: int = 4,
                  decouple_kv: bool = True, pool_n_head: int = 1, k_dim: int = None,
                  disable_kb: bool = False, disable_sm: bool = False,
-                 stream_sequence: dict = None, max_target_len: int = None):
+                 stream_sequence: dict = None, max_target_len: int = None,
+                 stream_vocab_sizes: dict = None):
         super().__init__()
         self.d_model = d_model
         self.n_register = n_register
@@ -206,6 +216,17 @@ class Thinker(nn.Module):
 
         stream_dims = stream_dims if stream_dims is not None else {'answer': vocab_size}
         stream_n_layers = stream_n_layers or {}
+        # spec §11ter: a stream targeting a DIFFERENT tokenizer (cross-model
+        # KD without a shared-tokenizer constraint) needs its teacher-forced
+        # target tokens embedded in that tokenizer's own id space, not
+        # self.embed (sized to this Thinker's own vocab_size, §14.3's core
+        # KB/input embedding table). Streams absent from this dict keep using
+        # self.embed exactly as before -- purely additive, no behavior change
+        # when unset.
+        stream_vocab_sizes = stream_vocab_sizes or {}
+        self.stream_embed = nn.ModuleDict({
+            name: nn.Embedding(size, d_model) for name, size in stream_vocab_sizes.items()
+        })
         # spec §14.3 (plan Phase 11): per-stream opt-in to the multi-position
         # generalization of OutputStream, for a per-token LM objective on real
         # text -- e.g. stream_sequence={'answer': True} while a 'thinking'
@@ -327,9 +348,19 @@ class Thinker(nn.Module):
             "target_input is required when at least one stream has sequence_mode=True (spec §14.3)"
         )
         if isinstance(target_input, dict):
-            target_embed_by_stream = {name: self.embed(t) for name, t in target_input.items()}
+            target_embed_by_stream = {
+                name: (self.stream_embed[name](t) if name in self.stream_embed else self.embed(t))
+                for name, t in target_input.items()
+            }
             shared_target_embed = None
         else:
+            assert not self.stream_embed or not any(
+                self.streams[name].sequence_mode for name in self.stream_embed
+            ), (
+                "a stream with its own stream_vocab_sizes entry needs its own target_input "
+                "tensor (dict target_input) -- a single shared tensor can't be valid ids in "
+                "two different tokenizers' id spaces at once"
+            )
             shared_target_embed = self.embed(target_input) if needs_target_embed else None
             target_embed_by_stream = None
 

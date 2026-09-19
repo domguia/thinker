@@ -920,5 +920,73 @@ class TestDecoupledKVPooling(unittest.TestCase):
         self.assertGreater(mem.compressor.query_v.grad.abs().sum().item(), 0.0)
 
 
+class TestCrossTokenizerStream(unittest.TestCase):
+    """spec §11ter: a stream can target a tokenizer different from the
+    core's own vocab_size, via stream_vocab_sizes -- its target_input is
+    embedded through a dedicated self.stream_embed[name] table instead of
+    the shared self.embed."""
+
+    def _make_model(self, core_vocab=20, other_vocab=50, d_model=16):
+        return Thinker(
+            vocab_size=core_vocab, d_model=d_model, n_register=2,
+            block_size=4, depth=1,
+            stream_dims={'answer': core_vocab, 'other_tok': other_vocab},
+            stream_sequence={'answer': True, 'other_tok': True},
+            stream_vocab_sizes={'other_tok': other_vocab},
+            max_target_len=8,
+        )
+
+    def test_unset_streams_unaffected(self):
+        model = self._make_model()
+        self.assertIn('other_tok', model.stream_embed)
+        self.assertNotIn('answer', model.stream_embed)
+
+    def test_forward_accepts_ids_beyond_core_vocab_size(self):
+        # other_vocab (50) > core_vocab (20) -- an id like 30 would be out of
+        # range for self.embed, must only ever reach stream_embed['other_tok'].
+        model = self._make_model(core_vocab=20, other_vocab=50)
+        B, N, T = 2, 4, 3
+        kb_tokens = torch.randint(0, 20, (B, N))
+        query_tokens = torch.randint(0, 20, (B, 2))
+        target_input = {
+            'answer': torch.randint(0, 20, (B, T)),
+            'other_tok': torch.randint(0, 50, (B, T)),
+        }
+        _, streams = model(kb_tokens, torch.zeros(B, N, dtype=torch.long), query_tokens,
+                            n_step=1, target_input=target_input)
+        self.assertEqual(streams['answer'].shape, (B, T, 20))
+        self.assertEqual(streams['other_tok'].shape, (B, T, 50))
+
+    def test_gradient_isolated_to_its_own_embedding_table(self):
+        torch.manual_seed(0)
+        model = self._make_model()
+        B, N, T = 2, 4, 3
+        kb_tokens = torch.randint(0, 20, (B, N))
+        query_tokens = torch.randint(0, 20, (B, 2))
+        target_input = {
+            'answer': torch.randint(0, 20, (B, T)),
+            'other_tok': torch.randint(0, 50, (B, T)),
+        }
+        _, streams = model(kb_tokens, torch.zeros(B, N, dtype=torch.long), query_tokens,
+                            n_step=1, target_input=target_input)
+        streams['other_tok'].sum().backward()
+
+        self.assertIsNotNone(model.stream_embed['other_tok'].weight.grad)
+        self.assertTrue(torch.any(model.stream_embed['other_tok'].weight.grad != 0))
+        # self.embed still receives gradient via kb_tokens/query_tokens (shared
+        # input path), but the 'answer' stream's OWN head/query weights must
+        # get no gradient from a backward that only touched 'other_tok'.
+        self.assertIsNone(model.streams['answer'].head.weight.grad)
+
+    def test_shared_tensor_target_input_rejected_when_a_stream_has_its_own_vocab(self):
+        model = self._make_model()
+        B, N, T = 2, 4, 3
+        kb_tokens = torch.randint(0, 20, (B, N))
+        query_tokens = torch.randint(0, 20, (B, 2))
+        with self.assertRaises(AssertionError):
+            model(kb_tokens, torch.zeros(B, N, dtype=torch.long), query_tokens,
+                  n_step=1, target_input=torch.randint(0, 20, (B, T)))
+
+
 if __name__ == '__main__':
     unittest.main()

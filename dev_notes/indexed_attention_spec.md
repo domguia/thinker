@@ -409,6 +409,39 @@ Idée notée (lignes 574-587) : les streams latents (embedding) sont utiles tôt
 
 **Aller-retour sur le FF de `OutputStreamLayer`** : chaque couche avait initialement, en plus de la cross-attention, un FF résiduel (motif transformer standard). **Retiré ensuite** (voir §-1) : un stream ne doit faire que lire/décoder ce qui est déjà dans la SM, pas mémoriser ses propres associations factuelles indépendamment de ce qui y est réellement présent. `OutputStreamLayer` ne fait plus que cross-attention + résiduel, sans FF.
 
+## 11ter. Output Streams multi-tokenizer / multi-Teacher **[IDÉE UTILISATEUR 2026-09-20, mécanisme core ajouté, expériences à planifier]**
+
+### Motivation — prolongement direct de §11bis/§-1
+
+Reformulation de l'utilisateur de la contrainte déjà actée ("un stream ne doit faire que lire, pas calculer") : la **grande majorité de l'information vient de la mémoire/boucle récurrente**, donc le calcul au niveau de l'output stream doit être minimisé pour se limiter à son vrai rôle — choisir le bon token suivant, conditionné par le précédent, étant donné ce que la mémoire a déjà résolu. Deux conséquences, testées ensemble :
+
+**(a) Test empirique direct** : mesurer si un stream plus profond (1 → 2 → 3 couches, déjà supporté par `OutputStream`, voir §11bis "État d'implémentation") apporte un gain réel. Hypothèse : un gain net avec plus de couches indiquerait que le stream fait un travail de calcul non trivial au-delà de la simple lecture — contre-hypothèse à documenter si observée, pas à écarter a priori. Lancé le 2026-09-20 sur le pipeline `train_real_text.py` (Piste A) — voir `dev_notes/experiments/real_text_baselines.md` pour le résultat.
+
+**(b) Conséquence architecturale** : si le rôle d'un stream se limite à "lire la mémoire partagée et choisir le prochain token", alors **le tokenizer/vocabulaire dans lequel ce choix s'exprime devient un simple détail d'interface, découplé du cœur du modèle** (registre récurrent + mémoire hiérarchique + SM, tous dans un espace `d_model` commun, tokenizer-agnostique). Rien n'empêche donc plusieurs output streams simultanés, chacun sur son propre tokenizer, tous lisant la même trajectoire SM partagée — exactement le même principe que plusieurs streams `answer`/`thinking` déjà indépendants (§11bis), étendu à l'axe "tokenizer" plutôt qu'à l'axe "tâche".
+
+### Implication directe : lever la contrainte de tokenizer-matching pour le KD
+
+Tout le pipeline KD construit jusqu'ici (`learn/distill/precompute_teacher_targets.py`, `TeacherTargets`/`PromptResponseTeacherTargets`) impose que le Teacher partage EXACTEMENT le tokenizer de l'étudiant — contrainte vérifiée à plusieurs reprises cette session pour éviter un désalignement silencieux des indices Top-K (`core/model_families.py`, alias `lfm2`/`olmo`/`qwen`). Avec un output stream dédié par tokenizer, cette contrainte disparaît **au niveau architecture** : un stream `answer_lfm2` (out_dim = vocab LFM2), un stream `answer_olmo` (out_dim = vocab OLMo), un stream `answer_qwen` (out_dim = vocab Qwen) peuvent chacun recevoir du KD directement de LEUR Teacher natif respectif, sans jamais reprojeter des indices d'un tokenizer vers un autre. D'où l'intérêt (demande explicite de l'utilisateur) de générer des cibles KD Top-K avec LFM2 **et** OLMo **et** Qwen (les plus grosses variantes disponibles de chaque famille), plutôt qu'une seule famille à la fois comme fait jusqu'ici.
+
+### Généralisation : streams sur des embeddings d'autres modèles
+
+Le stream `thinking` en mode embedding (déjà spécifié §11bis : `out_dim = teacher_hidden_dim`, perte MSE/cosinus contre une couche intermédiaire du Teacher) se généralise de la même façon : plusieurs streams-embedding peuvent coexister, chacun aligné sur une couche d'un Teacher **différent** (LFM2, OLMo, Qwen en parallèle) — chacun n'est qu'une autre valeur d'`out_dim` avec une perte de régression au lieu d'une CE, mécanisme déjà générique (`stream_dims` accepte n'importe quel `out_dim`, aucun changement requis de ce côté).
+
+### Implémentation ajoutée (2026-09-20)
+
+`core/indexed_thinker_model.py::Thinker` accepte désormais `stream_vocab_sizes: dict` (nom de stream → taille de vocabulaire). Pour chaque stream listé, une table d'embedding dédiée `self.stream_embed[name]` est créée et utilisée pour encoder son `target_input` (teacher forcing), à la place de la table partagée `self.embed` (dimensionnée sur le vocabulaire PROPRE de ce Thinker, également utilisée pour les leaves KB/input). Les streams absents de ce dict gardent le comportement actuel (`self.embed` partagé) — changement strictement additif, zéro impact sur l'existant. Nécessite obligatoirement le mode dict de `target_input` (un stream à vocabulaire propre ne peut pas partager un tenseur unique avec un autre stream d'un espace d'ids différent) — vérifié par une assertion explicite plutôt que laissé comme erreur silencieuse.
+
+Testé (`tests/test_indexed_memory.py::TestCrossTokenizerStream`, 4 tests) : un id hors du vocabulaire du cœur (au-delà de `vocab_size-1`) passe sans erreur tant qu'il reste dans le vocabulaire du stream concerné ; le gradient d'un backward sur un stream à vocabulaire propre reste isolé à sa propre table d'embedding et n'atteint pas les poids (tête/query) d'un autre stream ; le mode tenseur-partagé est bien rejeté par une assertion dès qu'un stream a son propre vocabulaire. Suite complète : 80/80 tests passants.
+
+### Pas encore fait **[OUVERT]** — chantier à planifier, l'utilisateur prévoit d'y travailler avec un sous-agent dédié
+
+- Coût mémoire/calcul réel de $N$ tables d'embedding supplémentaires (une par tokenizer additionnel) à chiffrer avant de lancer une expérience à 3 Teachers simultanés.
+- Initialisation des tables `stream_embed` : apprises de zéro (défaut actuel) vs transférées depuis l'embedding réel du Teacher correspondant (cf. §13.1, idée similaire déjà notée pour l'embedding/tête du cœur) — probablement plus efficace mais pas implémenté.
+- Génération des cibles KD Top-K avec les plus grosses variantes disponibles d'OLMo et Qwen (LFM2-1.2B déjà fait, voir `dev_notes/experiments/distillation.md`) — à dispatcher une fois ce chantier priorisé.
+- Un stream-embedding (perte MSE/cosinus) par Teacher simultanément n'a pas encore de script d'entraînement dédié — seul le mécanisme core (`stream_vocab_sizes`, `stream_dims` arbitraire) est prêt.
+- Batching de plusieurs tokenizers dans un même exemple (schémas de troncature/padding différents par tokenizer) : pas un problème nouveau en soi (chaque stream a déjà sa propre séquence de longueur propre via `max_seq_len`/`target_input` dict), mais jamais exercé avec plusieurs tokenizers réellement différents dans un même `DataLoader`/batch.
+- Est-ce que l'ablation de profondeur (a) et le multi-tokenizer (b) interagissent ? Ex. un stream multi-tokenizer a-t-il besoin de plus de couches qu'un stream mono-tokenizer pour la même tâche ? Pas encore une question posée empiriquement.
+
 ## 11. Implémentation MVP (première version, testée localement sur CPU)
 
 **Nom de la classe — [RENOMMÉ 2026-09-13]** : `IndexedThinker` → `Thinker`. Précision de l'utilisateur : c'est bien **le** Thinker du projet (celui que décrit la thèse §-1), pas une variante à côté — `core/toy_model.py::ToyThinker` était la version simplifiée utilisée pour déboguer les tâches jouets initiales (mémoire plate concaténée, couche transformer basique, aucune indexation), pas une version antérieure de ce modèle, et n'est pas renommée. `core/thinker_model.py::Th1nker` reste un fichier ancien distinct, inactif/non référencé — à ne pas confondre.
