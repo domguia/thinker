@@ -246,16 +246,25 @@ class Thinker(nn.Module):
             only for non-first windows of a document (the first window of
             each document still uses the learned `self.register_init`, see
             `RealTextWindowDataset`'s `is_first_window` flag).
-        target_input: optional (B, T_tgt) — spec §14.3 (plan Phase 11):
-            teacher-forced target-token ids (`target_input[t]` is the token
-            that should be embedded and fed as the query predicting
-            `labels[t]`, see data/real_text_windows.py). Required exactly
-            when at least one registered stream has `sequence_mode=True`;
-            embedded here (via `self.embed`, the same table as the KB/input
-            leaves) and passed to those streams as their per-position query
-            input, since only `Thinker` owns `self.embed` (OutputStream
-            itself only knows how to add position information on top, see
-            OutputStream's docstring).
+        target_input: optional (B, T_tgt) tensor, OR a dict {stream_name: (B, T_name)}
+            — spec §14.3 (plan Phase 11): teacher-forced target-token ids
+            (`target_input[t]` is the token that should be embedded and fed as
+            the query predicting `labels[t]`, see data/real_text_windows.py).
+            Required exactly when at least one registered stream has
+            `sequence_mode=True`; embedded here (via `self.embed`, the same
+            table as the KB/input leaves) and passed to those streams as
+            their per-position query input, since only `Thinker` owns
+            `self.embed` (OutputStream itself only knows how to add position
+            information on top, see OutputStream's docstring).
+
+            A single tensor is embedded ONCE and shared by every sequence_mode
+            stream -- the original real-text use case (one continuous target
+            span, spec §14.1-14.3), unchanged. A dict lets DIFFERENT streams
+            read DIFFERENT target sequences of DIFFERENT lengths (2026-09-20,
+            prompt/response/thinking data: the `thinking` stream's target is a
+            reasoning trace, the `answer` stream's target is the final answer
+            -- unrelated text, can't share one embedding). Every sequence_mode
+            stream must have a matching key in the dict.
 
         Returns: (R, stream_outputs) with R: (B, n_register, d_model) the final
                  core register state, and stream_outputs a dict {name: (B, 1, out_dim)}
@@ -308,17 +317,32 @@ class Thinker(nn.Module):
                     sm_v = sm_v[:, -self.sm_cap:]
 
         # spec §14.3: sequence_mode streams need teacher-forced target-token
-        # embeddings as their per-position query input; embedded once here
-        # (shared self.embed) and reused by every such stream, rather than
-        # each stream re-embedding target_input independently.
+        # embeddings as their per-position query input; embedded here (shared
+        # self.embed). A plain tensor is embedded once and shared by every
+        # sequence_mode stream (original behavior); a dict lets each stream
+        # embed its OWN target sequence (2026-09-20, prompt/thinking/answer
+        # data -- see this method's docstring).
         needs_target_embed = any(stream.sequence_mode for stream in self.streams.values())
         assert not needs_target_embed or target_input is not None, (
             "target_input is required when at least one stream has sequence_mode=True (spec §14.3)"
         )
-        target_embed = self.embed(target_input) if needs_target_embed else None
+        if isinstance(target_input, dict):
+            target_embed_by_stream = {name: self.embed(t) for name, t in target_input.items()}
+            shared_target_embed = None
+        else:
+            shared_target_embed = self.embed(target_input) if needs_target_embed else None
+            target_embed_by_stream = None
+
+        def stream_query_input(name):
+            if target_embed_by_stream is not None:
+                assert name in target_embed_by_stream, (
+                    f"target_input dict is missing an entry for sequence_mode stream '{name}'"
+                )
+                return target_embed_by_stream[name]
+            return shared_target_embed
 
         stream_outputs = {
-            name: (stream(sm_k, sm_v, query_input=target_embed) if stream.sequence_mode else stream(sm_k, sm_v))
+            name: (stream(sm_k, sm_v, query_input=stream_query_input(name)) if stream.sequence_mode else stream(sm_k, sm_v))
             for name, stream in self.streams.items()
         }
         return R, stream_outputs
