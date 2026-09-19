@@ -189,3 +189,28 @@ Full grid : `runs/pistea_ext2/state/*.json` (Nancy home).
 **`d_model=128` reste quasi plat (6.35-6.53, dérive légère mais faible). `d_model=1024` montre une dégradation monotone franche, `n_step=2` (4.71) à `n_step=12` (7.20), +2.49 points de loss.** Confirme la tendance déjà vue sur les 18 premières cellules. **Garde-fou toujours actif** (entrée précédente) : `lr=3e-5` est fixe partout, donc cette dégradation peut être soit un vrai effet architectural, soit `lr=3e-5` au-delà du seuil de stabilité dès `n_step>=4` à cette échelle -- indistinguable sans le sweep croisé. `pistea_c_nstep_lr_joint` lancé immédiatement après (même jour) pour trancher.
 
 Full grid : `runs/pistea_c_nstep_sweep/state/*.json` (Rennes home).
+
+## 2026-09-20 — pistea_c_lr_warmup_sweep complete (30/30): LR optimal pour C plus haut que testé, warmup n'aide pas
+
+`d_model=1024, n_step=6 (C), max_steps=8000`, `lr` in {1e-5,2e-5,3e-5,5e-5,7e-5} x `lr_warmup_steps` in {0,200,500}, 2 seeds.
+
+**Moyenne par lr (warmup=0)** : 1e-5→6.40, 2e-5→5.92, 3e-5→5.79, 5e-5→5.41, **7e-5→4.82**.
+
+**Read : tendance monotone croissante jusqu'au bout de la plage testée (7e-5, la valeur la plus haute) -- aucun signe de plafond ou de cliff dans cette fenêtre.** Ça contredit l'hypothèse de travail qui motivait ce sweep (chercher un LR *plus bas* pour C) -- au contraire, le LR optimal pour C semble être *au-delà* de 7e-5, pas en-deçà. **Implication directe pour `pistea_c_nstep_sweep`/`pistea_c_nstep_lr_joint`** : ces sweeps testent `lr` jusqu'à 1e-4 (`nstep_lr_joint`) -- la lecture de ces deux sweeps doit maintenant se faire à la lumière de "peut-être encore trop bas", pas seulement "peut-être trop haut" comme le garde-fou initial le supposait implicitement.
+
+**Warmup : n'aide pas, tend à nuire légèrement.** À `lr=7e-5` (le point le plus net) : `warmup=0` → 4.82, `warmup=200` → 4.94, `warmup=500` → 5.05 -- dégradation monotone avec plus de warmup. Même tendance plus faible aux LR plus bas. **Conclusion : pas de bénéfice du warmup dans cette plage de LR/pas pour ce réglage de C** -- contrairement à l'intuition "pratique standard pour les architectures récurrentes/bouclées" qui motivait ce test.
+
+Full grid : `runs/pistea_c_lr_warmup_sweep/state/*.json` (Rennes home).
+
+## 2026-09-20 — pistea_c_useff_sweep complete (8/8): use_ff=True bat clairement use_ff=False sur texte réel
+
+`d_model=1024, n_step=6, lr=3e-5, ff_hidden_mult=4, max_steps=8000`, 4 seeds.
+
+| | moyenne final_loss |
+|---|---|
+| `use_ff=True` | **4.71** (4.61-4.78) |
+| `use_ff=False` | 5.64 (5.38-5.80) |
+
+**Read : signal net et cohérent sur les 4 seeds (aucun chevauchement des plages) -- `use_ff=True` bat `use_ff=False` de ~1 point de loss.** Selon la lecture déjà posée par `model-design` avant le lancement de ce sweep : **un gain net de `use_ff=True` indique une capacité de composition/calcul manquante dans le stream (qui devrait rester un lecteur léger selon spec §11bis/§-1), pas que la boucle Thinker elle-même est une mauvaise idée.** Ce résultat va dans le sens de la contre-hypothèse -- le stream fait un travail de calcul non trivial au-delà de la simple lecture, à documenter et discuter plutôt qu'à écarter. Pertinent aussi pour la lecture du résultat "A bat C" de Piste A : une partie de l'écart pourrait venir d'une capacité insuffisante côté `fuse`/stream plutôt que d'une limite intrinsèque de la boucle.
+
+Full grid : `runs/pistea_c_useff_sweep/state/*.json` (Rennes home).
