@@ -1223,3 +1223,20 @@ Swept `experiment.log.md` for numeric-result entries, checked real seed count be
 **Not re-flagged (already correctly marked in-line, listed for completeness only, category (b)):** I3 étape 1 bimodality (led directly to étape 2's repowering, itself now running), the `cumsum` `seq_len=32` mixed result (toy-model memory thread, explicitly left open), I7's original small-scale margin confound (fully retracted).
 
 No other new <5-seed or unrevalidated-LR fragility found beyond the two items above -- the project's discipline of self-flagging (retracted/à arbitrer markers) is catching the large majority of cases already; this audit's marginal value was items 1-2 above, both about ablations reporting a *null* result at seed counts calibrated for detecting *positive* bimodality, not absence of effect.
+
+## 2026-09-19/20 (nuit) — I3 étape 2 complete (70/70): supervision looks harmful, but a real script discrepancy against item[5]'s baseline needs checking before trusting this
+
+`i3_step2_bothArms` (Rennes -- `abacus11-1/18-1/25-2/29-1` relief job, plus `paradoxe-27` CPU for the 3 orphaned/reclaimed cells), `train_kb_chain_attn_supervised.py`, `attn_supervised` on/off, `n_hops` in `{3,4}`, `lr` in `{1e-4,2e-4}` (the étape 1 window), `n_step=12`, 14-20 seeds/cell depending on `n_hops`/`lr` combination (grid grew across several repowering passes tonight, seed counts not perfectly even but all comfortably >=14).
+
+**Success rate (`final_acc > 0.5`, well clear of the resolved/collapsed bimodal bands seen throughout this thread) by `n_hops` x `attn_supervised`**:
+
+| n_hops | unsupervised (`False`) | supervised (`True`) |
+|---|---|---|
+| 3 | **13/14 (93%)** | 3/16 (19%) |
+| 4 | 2/20 (10%) | 0/20 (0%) |
+
+**Read, with a major caveat attached**: taken at face value, this is a stark reversal of étape 1's framing -- supervision looks actively *harmful* here, not just unreliable, at both `n_hops`. **But the `n_hops=4` unsupervised number (2/20, 10%) directly contradicts `item[5]`'s result from earlier tonight at the exact same hyperparameters** (`n_hops=4, n_step=12, lr=1e-4`, `train_kb_chain.py`, no supervision path at all): item[5] got **99.9% on all 3 seeds** at that identical config. Same `n_hops`, same `n_step`, same `lr`, same hardened generator -- 99.9%/3-for-3 in one script, 10%/2-of-20 in the other. **This gap is too large to be seed variance** -- it points to a real difference between `train_kb_chain.py`'s training path and `train_kb_chain_attn_supervised.py`'s `attn_supervised=False` path (default hyperparameters not actually identical, a different code path even when the flag is off, or a bug in this script's baseline arm), not a genuine architectural effect of "having the supervision machinery present but disabled."
+
+**Not reporting "supervision hurts" as a finding until this is resolved.** **À arbitrer / next step**: diff `train_kb_chain_attn_supervised.py`'s `attn_supervised=False` path against `train_kb_chain.py` for any silent default mismatch (e.g. optimizer, init, an extra loss term still active at weight 0 vs literally absent, a different default for an unlisted flag) before trusting either the `n_hops=3` (93% vs 19%) or `n_hops=4` (10% vs 0%) comparison as answering I3's original "is supervision redundant or necessary" question. The `n_hops=3` split (93% vs 19%) is at least directionally consistent with étape 1's own finding that supervision at `n_hops=3` is unreliable (peaked at 40% success in étape 1's own sweep) -- so the supervised-arm numbers here are plausible on their own. It's specifically the **unsupervised arm's implausibly low `n_hops=4` number** that doesn't match the already-trusted `item[5]` baseline and should block any headline claim until explained.
+
+Full per-cell results in `runs/i3_step2_bothArms/state/*.json` (Rennes home).
