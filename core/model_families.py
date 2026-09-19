@@ -13,8 +13,16 @@ model_selection_small_vocab_reasoning.md section 1).
 """
 
 MODEL_FAMILIES = {
-    "lfm2": "LiquidAI/LFM2-350M",  # plus petite variante -- tokenizer identique (vocab 64,400) à tout le reste de la famille v1/v2.5-1.2B
-    "olmo": "allenai/OLMo-2-0425-1B",  # plus petite variante de la famille OLMo-2
+    "lfm2": "LiquidAI/LFM2-350M",  # plus petite variante -- tokenizer identique (vocab 64,400) UNIQUEMENT à
+        # la famille v1 (LFM2-350M/700M/1.2B), verifie directement le 2026-09-20 (dictionnaires identiques,
+        # meme tokenisation). NE PAS confondre avec "LFM2.5-1.2B-Thinking" (serie 2.5) : tokenizer DIFFERENT
+        # (64402, dictionnaire different, meme sur un texte simple) malgre le nom proche -- utiliser ce
+        # Teacher-la pour du KD contre un modele tokenise "lfm2" desalignerait silencieusement les indices
+        # Top-K. Pour un Teacher plus gros que la reference garanti-aligne : LFM2-1.2B (v1), pas la variante
+        # "Thinking".
+    "olmo": "allenai/OLMo-2-0425-1B",  # plus petite variante de la famille OLMo-2 -- tokenizer (100,278)
+        # verifie directement identique a OLMo-2-1124-7B et OLMo-2-1124-13B le 2026-09-20 (dictionnaires
+        # identiques) -- ces tailles restent des Teachers surs pour du KD aligne sur ce tokenizer.
     "qwen": "Qwen/Qwen3-0.6B",
 }
 
