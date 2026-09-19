@@ -333,3 +333,7 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 ## 2026-09-20 — OLMo-2-7B OOM sur Nancy (RTX 2080 Ti 11Go x4), reserve A100 a Rennes a la place
 - Tentative initiale sur `graffiti-3` (4x RTX 2080 Ti, 11.3 Go chacune) -- OOM sur les deux GPU utilisees (`device_map=auto` n'a pas suffi a repartir un 7B correctement sur des cartes aussi petites individuellement).
 - Reservation besteffort A100-40Go (`abacus21`, job **4122675**, `kd-olmo-precompute`) a la place -- un 7B en bf16 classique (~14Go) tient large sur un A100-40Go, pas de contrainte FP8 ici (contrairement au 27B).
+
+## 2026-09-20 — pistea_c_nstep_lr_joint reparti sur Rennes + Nancy (deux home NFS separes)
+- `graffiti-3` libere par l'OOM OLMo -- 30 cellules restantes du sweep croise (sur 40) extraites (exclusion des run_id deja `done`/`running` cote Rennes) et copiees vers le home Nancy, 4 workers lances sur les 4 GPU.
+- **Point d'attention pour la collecte** : les deux sites ont des `runs/pistea_c_nstep_lr_joint/` INDEPENDANTS (home NFS non partage inter-site) -- la collecte finale du sweep devra agreger les `state/*.json` des DEUX sites (Rennes ET Nancy), pas un seul.
