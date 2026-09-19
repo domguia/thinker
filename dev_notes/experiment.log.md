@@ -48,6 +48,7 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 - **2026-09-19** -- [Piste A LR sweep d_model=1024: A et C n'ont pas le meme LR optimal](experiments/real_text_baselines.md)
 - **2026-09-19/20 (nuit)** -- [I7: [RETRACTE] confond de marge d'entrainement identifie](experiments/i4_i6_i7_diagnostics.md)
 - **2026-09-19/20 (nuit)** -- [I6: probe de phase lineaire -- fonctionne, explique surtout par derive d'echelle](experiments/i4_i6_i7_diagnostics.md)
+- **2026-09-20** -- [KD cablee dans train_prompt_response.py -- alignement char/token verifie, fallback CE-only sur mismatch tokenizer](experiments/distillation.md)
 - **2026-09-19/20 (nuit)** -- [I3 etape 1: supervision resout le chainage dur mais bimodal, plafond 40%](experiments/i3_attention_supervision.md)
 - **2026-09-19/20 (nuit)** -- [I5: ecart CPU/GPU n_hops=2 = budget d'entrainement, pas d'echelle](experiments/indexed_attention_core_mechanism.md)
 - **2026-09-19/20 (nuit)** -- [item[5] (45/45): plateau N_step confirme, LR = seuil pas loi 1/N_step](experiments/nstep_lr_law.md)

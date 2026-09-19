@@ -210,3 +210,31 @@ Session-13's earlier `experiment.log.md` entry ("Teacher-target precompute shard
 
 **Corrected rule**: the deciding factor for this Teacher checkpoint's precompute speed is **available GPU VRAM relative to the ~56GB bf16-dequantized footprint**, not "Ampere vs. Hopper/Ada" as a category. A100-80GB (and presumably any other >=64GB-class Ampere card) is a fine precompute target; A40 (46GB) and any other <56GB card outside the native-FP8 Ada/Hopper set are not. Told model-design about this correction since the earlier (too-broad) version had already been passed along.
 
+### 2026-09-20 -- KD wired into train_prompt_response.py (prompt/thinking/answer streams), char-to-token alignment problem solved and verified
+
+`learn/indexed_attention/train_prompt_response.py` was CE-only until now (see its own docstring's earlier note). Landed `--teacher_targets`/`--val_teacher_targets`/`--kd_alpha`/`--teacher_max_length`, reusing `topk_kd_loss()` (`learn/distill/train_sft.py`) exactly like `train_real_text.py` -- but the alignment problem flagged back on 2026-09-20 (train_real_text.py's fixed-window-position convention doesn't apply here) needed real design work, done in `data/prompt_response_dataset.py`:
+
+**The problem**: `precompute_teacher_targets.py` tokenizes the jsonl's whole `text` field (the CHATML string). `ReasoningPromptDataset`/`RetrievalPromptDataset` instead tokenize each response span (`thinking`, `answer`) **standalone**, via `_tokenize_padded` on the extracted substring -- not as a slice of `text`'s own tokenization. Two distinct failure modes had to be handled, not assumed away:
+
+1. **String-level**: `ReasoningPromptDataset`'s `answer` field is the dataset's canonical verified answer, NOT a re-parse of the generated text after `</think>` (a paraphrase, see that class's own docstring) -- it may simply not appear verbatim in `text` at all.
+2. **Token-level (found only by testing on real tokenizer output, not by design review)**: even when the span string DOES appear verbatim in `text` (guaranteed for `RetrievalPromptDataset`'s `answer`, template-substituted), standalone tokenization of the substring can produce **different token ids** than the same characters tokenized in their surrounding context, because BPE merges a leading space differently depending on what precedes it. Reproduced directly with gpt2 on a synthetic example: `"4"` tokenized alone -> id 19, but the same `"4"` inside `"...is 4."` -> id 604 (`" 4"` merged as one token). A positional-only alignment (assume span token i == text token tok_start+i) would silently feed the wrong Teacher row here.
+
+**Fix**: `PromptResponseTeacherTargets.slice_span()` (`data/prompt_response_dataset.py`) re-tokenizes the whole `text` with `return_offsets_mapping=True` (same tokenizer/truncation/max_length as the precompute run -- deterministic, so no change needed to `precompute_teacher_targets.py` itself), locates the span's token range via character offsets, and **verifies exact token-id equality** between that slice and the span's own standalone tokenization before using it. Any mismatch -> that example's KD mask is all-False (pure CE for it, not a crash, not a silently wrong target). `doc_id` alignment also required a real fix: both dataset classes previously indexed `self.examples` by post-filter position, but `precompute_teacher_targets.py` iterates the UNFILTERED jsonl (some rows are skipped by e.g. `if not answer: continue`) -- `doc_id` is now the original pre-filter row index, stored per example.
+
+**Verified with a synthetic smoke test** (`kd_smoke_test.py`, 4-example reasoning jsonl + a random-logit synthetic Teacher .npz built with the same tokenizer/text, gpt2 for offline reproducibility): `thinking` span aligned 4/4 examples (long span starting right after `"<think>\n"`, robust to the boundary effect); `answer` span in this reasoning case fell back cleanly 0/4 (the exact "4"/" 4" case above) -- confirms the fallback triggers correctly rather than silently misaligning. A follow-up direct check on a synthetic `RetrievalPromptDataset` example (verbatim-substituted answer, no paraphrase) DID align cleanly on every available token position, confirming the fallback is specifically about the tokenizer-boundary effect, not a general failure of the mechanism. Ran the actual CLI end-to-end (`kd_alpha=0` vs `kd_alpha=0.7`, same seed/data): both complete without error, KD run's total loss differs from CE-only as expected from the weighted combination, `kd_answer`/`kd_thinking` only appear in logs when `--teacher_targets` is set. Full `tests/` suite: 76/76 passed after this change (no regression).
+
+**Not yet measured on real data**: what fraction of real OpenR1-Math-220k `answer` spans hit the fallback in practice (this smoke test used a deliberately adversarial short-numeric-answer case) -- worth checking once a real precompute exists, since a high fallback rate would mean the `answer` stream's KD signal on reasoning data is mostly absent even though the mechanism is correct. `thinking` and retrieval's `answer` are expected to be far more robust based on the mechanism above (long spans / verbatim substitution), but this is a prediction, not yet a measurement.
+
+**Next step to unblock a real KD run on this pipeline**: precompute Teacher Top-K targets for `openr1_math`/`hotpotqa` with a tokenizer-matched Teacher, e.g.:
+```
+python3 learn/distill/precompute_teacher_targets.py \
+  --input_file data/distill/openr1_math/train.jsonl \
+  --model_dir LiquidAI/LFM2-1.2B --top_k 32 --max_length 4096 \
+  --out_file data/distill/openr1_math/train_topk32.npz
+python3 learn/indexed_attention/train_prompt_response.py \
+  --dataset_type reasoning --data data/distill/openr1_math/train.jsonl \
+  --tokenizer lfm2 --teacher_targets data/distill/openr1_math/train_topk32.npz \
+  --teacher_max_length 4096 --kd_alpha 0.5 [...]
+```
+(LFM2-1.2B v1, not the "Thinking"/2.5 variant -- see `core/model_families.py`'s `lfm2` comment for why the tokenizer must match exactly.)
+

@@ -30,13 +30,25 @@ convention as RealTextWindowDataset: prompts are truncated/padded to
 config consumes this). Response spans are truncated/padded to their own
 per-stream max length (`max_thinking_len`/`max_answer_len`) -- these are
 NOT required to equal n_ctx, unlike the KB leaves.
+
+Optional KD (2026-09-20, `teacher_targets=...`): both dataset classes can
+attach per-span Top-K Teacher targets (a precompute_teacher_targets.py .npz
+computed on the SAME jsonl's "text" field) via `PromptResponseTeacherTargets`
+-- see that class's docstring for the alignment scheme (response spans are
+tokenized standalone, not sliced out of `text`'s own tokenization, so
+alignment is verified per example and falls back to CE-only, not assumed).
 """
 import json
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
+ASSISTANT_MARKER = "<|im_start|>assistant\n"  # both prepare_reasoning_data.py's and
+# prepare_retrieval_data.py's CHATML_TEMPLATE use this marker right before the response --
+# used below as a search-start anchor so a KD span lookup can't accidentally match earlier
+# text (e.g. a distractor document containing the literal answer string).
 
 
 def _tokenize_padded(tokenizer, text: str, max_len: int, pad_id: int):
@@ -66,17 +78,105 @@ def _teacher_forced_target(ids: torch.Tensor, mask: torch.Tensor, pad_id: int):
     return target_input, labels
 
 
+def _locate_token_span(tokenizer, text: str, span_text: str, search_start: int, max_length: int):
+    """Finds `span_text` verbatim in `text` at/after `search_start`, then
+    tokenizes the WHOLE `text` (same truncation/max_length as
+    precompute_teacher_targets.py, so this re-tokenization lands on the exact
+    same rows the Teacher's .npz was built from) to get the token range the
+    span occupies in that tokenization -- returns (tok_start, ids_slice) or
+    None if span_text isn't found (e.g. a canonical `answer` field that's a
+    paraphrase of the generated text, not a verbatim substring, see
+    ReasoningPromptDataset's docstring)."""
+    char_start = text.find(span_text, search_start)
+    if char_start == -1:
+        return None
+    char_end = char_start + len(span_text)
+    enc = tokenizer(text, truncation=True, max_length=max_length, return_offsets_mapping=True)
+    offsets = enc["offset_mapping"]
+    tok_start = next((i for i, (s, e) in enumerate(offsets) if e > char_start), None)
+    tok_end = next((i for i, (s, e) in enumerate(offsets) if s >= char_end), len(offsets))
+    if tok_start is None or tok_end <= tok_start:
+        return None
+    return tok_start, enc["input_ids"][tok_start:tok_end]
+
+
+class PromptResponseTeacherTargets:
+    """precompute_teacher_targets.py .npz computed on the SAME jsonl's "text"
+    field (row order = doc_id, unfiltered -- callers must pass the ORIGINAL
+    row index, not a post-filtering position, see ReasoningPromptDataset's
+    doc_id bookkeeping).
+
+    Unlike train_real_text.py's TeacherTargets (fixed window position,
+    alignment is free), a response span here is tokenized STANDALONE by
+    _tokenize_padded, not sliced out of a `text` tokenization -- BPE boundary
+    effects (e.g. leading-space merges) mean the standalone tokenization is
+    not guaranteed to match the full-text tokenization token-for-token even
+    when the underlying string is identical. slice_span verifies this
+    explicitly (exact id match, not just length) and falls back to an
+    all-False mask (pure CE for that example) rather than risk a silently
+    misaligned KD target.
+    """
+
+    def __init__(self, npz_path: str):
+        npz = np.load(npz_path)
+        self.indices = npz["indices"]
+        self.values = npz["values"]
+        self.residual = npz["residual"]
+        self.offsets = npz["offsets"]
+        self.k = int(npz["k"])
+
+    def slice_span(self, doc_id: int, tok_start: int, ids_slice, span_ids: torch.Tensor, t_max: int):
+        idx = torch.zeros(t_max, self.k, dtype=torch.long)
+        val = torch.zeros(t_max, self.k, dtype=torch.float32)
+        res = torch.zeros(t_max, dtype=torch.float32)
+        mask = torch.zeros(t_max, dtype=torch.bool)
+        n = min(len(ids_slice), int(span_ids.shape[0]), t_max)
+        if n == 0 or list(ids_slice[:n]) != span_ids[:n].tolist():
+            return idx, val, res, mask
+        doc_start, doc_end = int(self.offsets[doc_id]), int(self.offsets[doc_id + 1])
+        n_doc = doc_end - doc_start
+        for t in range(n):
+            q = tok_start + t - 1  # Teacher row q predicts token q+1 -- same convention as train_real_text.py's TeacherTargets
+            if 0 <= q < n_doc:
+                idx[t] = torch.from_numpy(self.indices[doc_start + q].astype(np.int64))
+                val[t] = torch.from_numpy(self.values[doc_start + q].astype(np.float32))
+                res[t] = float(self.residual[doc_start + q])
+                mask[t] = True
+        return idx, val, res, mask
+
+
+def _kd_targets_for_span(teacher, tokenizer, text, span_text, search_start, max_length, doc_id, span_ids, t_max):
+    idx = torch.zeros(t_max, teacher.k, dtype=torch.long)
+    val = torch.zeros(t_max, teacher.k, dtype=torch.float32)
+    res = torch.zeros(t_max, dtype=torch.float32)
+    mask = torch.zeros(t_max, dtype=torch.bool)
+    if not text or not span_text:
+        return idx, val, res, mask
+    located = _locate_token_span(tokenizer, text, span_text, search_start, max_length)
+    if located is None:
+        return idx, val, res, mask
+    tok_start, ids_slice = located
+    return teacher.slice_span(doc_id, tok_start, ids_slice, span_ids, t_max)
+
+
 class ReasoningPromptDataset(Dataset):
-    def __init__(self, path, tokenizer, n_ctx: int, max_thinking_len: int, max_answer_len: int, pad_id: int = None):
+    def __init__(self, path, tokenizer, n_ctx: int, max_thinking_len: int, max_answer_len: int, pad_id: int = None,
+                 teacher_targets: str = None, teacher_max_length: int = 4096):
         self.tokenizer = tokenizer
         self.n_ctx = n_ctx
         self.max_thinking_len = max_thinking_len
         self.max_answer_len = max_answer_len
         self.pad_id = pad_id if pad_id is not None else (tokenizer.pad_token_id or 0)
+        self.teacher = PromptResponseTeacherTargets(teacher_targets) if teacher_targets else None
+        if self.teacher is not None:
+            assert tokenizer.is_fast, "--teacher_targets needs a fast tokenizer (return_offsets_mapping support)"
+        self.teacher_max_length = teacher_max_length
         self.examples = []
         n_no_think_tag = 0
+        n_total = 0
         with open(path) as f:
-            for line in f:
+            for doc_id, line in enumerate(f):
+                n_total += 1
                 row = json.loads(line)
                 trace = row.get("trace") or ""
                 answer = row.get("answer")
@@ -89,9 +189,15 @@ class ReasoningPromptDataset(Dataset):
                     thinking_text = trace[start + len(THINK_OPEN):end].strip()
                 if not answer:
                     continue  # answer stream needs a real target; skip examples missing the canonical answer
-                self.examples.append({"problem": row["problem"], "thinking": thinking_text, "answer": str(answer)})
+                # doc_id = ORIGINAL row index (before this filtering), matching the row order
+                # precompute_teacher_targets.py walked over the unfiltered jsonl -- required for
+                # --teacher_targets alignment, see PromptResponseTeacherTargets.
+                self.examples.append({
+                    "problem": row["problem"], "thinking": thinking_text, "answer": str(answer),
+                    "doc_id": doc_id, "text": row.get("text"),
+                })
         if n_no_think_tag:
-            print(f"WARNING: {n_no_think_tag}/{len(self.examples) + n_no_think_tag} examples in {path} "
+            print(f"WARNING: {n_no_think_tag}/{n_total} examples in {path} "
                   f"had no <think>/</think> tags -- used the whole trace as 'thinking' with no answer split "
                   f"(check prepare_reasoning_data.py's source data if this is a large fraction).")
 
@@ -108,11 +214,32 @@ class ReasoningPromptDataset(Dataset):
         think_input, think_labels = _teacher_forced_target(think_ids, think_mask, self.pad_id)
         ans_input, ans_labels = _teacher_forced_target(ans_ids, ans_mask, self.pad_id)
 
-        return {
+        out = {
             "kb_tokens": kb_tokens, "kb_source_ids": kb_source_ids, "kb_leaf_mask": kb_leaf_mask,
             "thinking_target_input": think_input, "thinking_labels": think_labels,
             "answer_target_input": ans_input, "answer_labels": ans_labels,
         }
+        if self.teacher is not None:
+            assistant_pos = (ex["text"] or "").find(ASSISTANT_MARKER)
+            search_start = assistant_pos + len(ASSISTANT_MARKER) if assistant_pos != -1 else 0
+            think_idx, think_val, think_res, think_kmask = _kd_targets_for_span(
+                self.teacher, self.tokenizer, ex["text"], ex["thinking"], search_start,
+                self.teacher_max_length, ex["doc_id"], think_ids, self.max_thinking_len)
+            # answer's search window starts after the thinking span if one was found (plain string
+            # search, cheap -- avoids the short canonical answer string spuriously matching inside
+            # the (much longer) trace); falls back to the assistant-marker start otherwise.
+            think_char_start = (ex["text"] or "").find(ex["thinking"], search_start)
+            ans_search_start = think_char_start + len(ex["thinking"]) if think_char_start != -1 else search_start
+            ans_idx, ans_val, ans_res, ans_kmask = _kd_targets_for_span(
+                self.teacher, self.tokenizer, ex["text"], ex["answer"], ans_search_start,
+                self.teacher_max_length, ex["doc_id"], ans_ids, self.max_answer_len)
+            out.update({
+                "thinking_kd_indices": think_idx, "thinking_kd_values": think_val,
+                "thinking_kd_residual": think_res, "thinking_kd_mask": think_kmask,
+                "answer_kd_indices": ans_idx, "answer_kd_values": ans_val,
+                "answer_kd_residual": ans_res, "answer_kd_mask": ans_kmask,
+            })
+        return out
 
 
 class RetrievalPromptDataset(Dataset):
@@ -149,15 +276,20 @@ class RetrievalPromptDataset(Dataset):
     from the data while keeping the mechanism intact.
     """
 
-    def __init__(self, path, tokenizer, block_size: int, n_docs_max: int, max_answer_len: int, pad_id: int = None):
+    def __init__(self, path, tokenizer, block_size: int, n_docs_max: int, max_answer_len: int, pad_id: int = None,
+                 teacher_targets: str = None, teacher_max_length: int = 4096):
         self.tokenizer = tokenizer
         self.block_size = block_size
         self.n_docs_max = n_docs_max
         self.max_answer_len = max_answer_len
         self.pad_id = pad_id if pad_id is not None else (tokenizer.pad_token_id or 0)
+        self.teacher = PromptResponseTeacherTargets(teacher_targets) if teacher_targets else None
+        if self.teacher is not None:
+            assert tokenizer.is_fast, "--teacher_targets needs a fast tokenizer (return_offsets_mapping support)"
+        self.teacher_max_length = teacher_max_length
         self.examples = []
         n_truncated_docs = 0
-        for line in open(path):
+        for doc_id, line in enumerate(open(path)):
             row = json.loads(line)
             if not row.get("answer"):
                 continue
@@ -171,7 +303,12 @@ class RetrievalPromptDataset(Dataset):
             if len(docs) > n_docs_max:
                 n_truncated_docs += 1
                 docs = docs[:n_docs_max]
-            self.examples.append({"question": row["question"], "docs": docs, "answer": str(row["answer"])})
+            # doc_id = ORIGINAL row index (before this filtering) -- see
+            # ReasoningPromptDataset's identical convention for why this matters.
+            self.examples.append({
+                "question": row["question"], "docs": docs, "answer": str(row["answer"]),
+                "doc_id": doc_id, "text": row.get("text"),
+            })
         if n_truncated_docs:
             print(f"WARNING: {n_truncated_docs}/{len(self.examples)} examples in {path} had more than "
                   f"n_docs_max={n_docs_max} context documents -- extra documents dropped (increase "
@@ -208,7 +345,21 @@ class RetrievalPromptDataset(Dataset):
         ans_ids, ans_mask = _tokenize_padded(self.tokenizer, ex["answer"], self.max_answer_len, self.pad_id)
         ans_input, ans_labels = _teacher_forced_target(ans_ids, ans_mask, self.pad_id)
 
-        return {
+        out = {
             "kb_tokens": kb_tokens, "kb_source_ids": kb_source_ids, "kb_leaf_mask": kb_leaf_mask,
             "answer_target_input": ans_input, "answer_labels": ans_labels,
         }
+        if self.teacher is not None:
+            # RetrievalPromptDataset's answer, unlike ReasoningPromptDataset's, is substituted
+            # verbatim into `text` by CHATML_TEMPLATE (prepare_retrieval_data.py) -- so this span
+            # is expected to align cleanly far more often (no paraphrase-vs-canonical mismatch).
+            assistant_pos = (ex["text"] or "").find(ASSISTANT_MARKER)
+            search_start = assistant_pos + len(ASSISTANT_MARKER) if assistant_pos != -1 else 0
+            ans_idx, ans_val, ans_res, ans_kmask = _kd_targets_for_span(
+                self.teacher, self.tokenizer, ex["text"], ex["answer"], search_start,
+                self.teacher_max_length, ex["doc_id"], ans_ids, self.max_answer_len)
+            out.update({
+                "answer_kd_indices": ans_idx, "answer_kd_values": ans_val,
+                "answer_kd_residual": ans_res, "answer_kd_mask": ans_kmask,
+            })
+        return out

@@ -25,13 +25,15 @@ continuity, unlike real-text's LockstepLaneBatcher/register carry-over) --
 a plain shuffled DataLoader, register always starts fresh from
 register_init. This is deliberately simpler than train_real_text.py.
 
-KD (logit-level, on both streams) is NOT wired here yet -- landing the
-CE-only pipeline first per the user's own request to test each dataset
-individually before layering KD and joint training on top. See
-dev_notes/experiments/real_text_baselines.md, 2026-09-20 entries, for the
-staged plan and why KD alignment is more involved for this data shape
-(char-to-token offset mapping against precompute_teacher_targets.py's
-per-position arrays) than train_real_text.py's fixed-window-position case.
+KD (logit-level, --teacher_targets, 2026-09-20): reuses topk_kd_loss()
+(learn/distill/train_sft.py) exactly like train_real_text.py, but alignment
+is handled entirely by data/prompt_response_dataset.py's
+PromptResponseTeacherTargets (char-to-token offset mapping against the
+Teacher's precomputed per-document arrays, since response spans here are
+independently-tokenized episodes, not fixed window positions) -- this
+script only consumes the already-sliced `*_kd_indices/values/residual/mask`
+tensors the dataset attaches per example. See that module's docstring for
+the alignment scheme and its CE-only fallback for unaligned spans.
 """
 from __future__ import annotations
 
@@ -46,13 +48,15 @@ from core.indexed_thinker_model import Thinker
 from core.model_families import resolve_model_name
 from core.run_logging import add_run_args, logger_from_args
 from data.prompt_response_dataset import ReasoningPromptDataset, RetrievalPromptDataset
+from learn.distill.train_sft import topk_kd_loss
 
 
-def build_dataset(dataset_type: str, path: str, tokenizer, args):
+def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets: str = None):
     if dataset_type == "reasoning":
         return ReasoningPromptDataset(path, tokenizer, n_ctx=args.n_ctx,
                                        max_thinking_len=args.max_thinking_len,
-                                       max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id)
+                                       max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id,
+                                       teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length)
     if dataset_type == "retrieval":
         # block_size/n_docs_max, NOT n_ctx/t_local (2026-09-20 redesign, user
         # decision: treat HotpotQA's multiple documents as distinct indexable
@@ -62,9 +66,23 @@ def build_dataset(dataset_type: str, path: str, tokenizer, args):
         # match for HierarchicalMemory's depth=1 to compress one node per
         # document correctly).
         return RetrievalPromptDataset(path, tokenizer, block_size=args.block_size, n_docs_max=args.n_docs_max,
-                                       max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id)
+                                       max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id,
+                                       teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length)
     raise ValueError(f"unknown --dataset_type {dataset_type!r} (expected 'reasoning' or 'retrieval' -- "
                       f"'general' stays on train_real_text.py's sliding-window pipeline, not this script)")
+
+
+def kd_losses(streams, batch, dataset_type: str):
+    """topk_kd_loss() per stream, using the *_kd_indices/values/residual/mask
+    tensors data/prompt_response_dataset.py's teacher_targets path attaches
+    to every example (all-False mask = CE-only fallback, contributes 0)."""
+    kd_answer = topk_kd_loss(streams["answer"], batch["answer_kd_indices"], batch["answer_kd_values"],
+                              batch["answer_kd_residual"], batch["answer_kd_mask"])
+    kd_thinking = None
+    if dataset_type == "reasoning":
+        kd_thinking = topk_kd_loss(streams["thinking"], batch["thinking_kd_indices"], batch["thinking_kd_values"],
+                                    batch["thinking_kd_residual"], batch["thinking_kd_mask"])
+    return kd_answer, kd_thinking
 
 
 def query_tokens_for(dataset_type: str, batch, block_size: int):
@@ -82,9 +100,13 @@ def query_tokens_for(dataset_type: str, batch, block_size: int):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: int, n_batches: int = 20):
+def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: int, n_batches: int = 20,
+             teacher_enabled: bool = False):
     model.eval()
-    losses = {"answer": [], "thinking": []} if dataset_type == "reasoning" else {"answer": []}
+    keys = ["answer", "thinking"] if dataset_type == "reasoning" else ["answer"]
+    losses = {k: [] for k in keys}
+    if teacher_enabled:
+        losses.update({f"kd_{k}": [] for k in keys})
     for i, batch in enumerate(loader):
         if i >= n_batches:
             break
@@ -100,6 +122,11 @@ def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: 
         if dataset_type == "reasoning":
             ce_thinking = F.cross_entropy(streams["thinking"].transpose(1, 2), batch["thinking_labels"], ignore_index=-100)
             losses["thinking"].append(ce_thinking.item())
+        if teacher_enabled:
+            kd_answer, kd_thinking = kd_losses(streams, batch, dataset_type)
+            losses["kd_answer"].append(kd_answer.item())
+            if kd_thinking is not None:
+                losses["kd_thinking"].append(kd_thinking.item())
     model.train()
     return {k: (sum(v) / len(v) if v else float("nan")) for k, v in losses.items()}
 
@@ -135,6 +162,20 @@ def main() -> None:
     p.add_argument("--ff_hidden_mult", type=int, default=4)
     p.add_argument("--thinking_weight", type=float, default=1.0,
                    help="reasoning only: loss = ce_answer + thinking_weight * ce_thinking")
+    p.add_argument("--teacher_targets", default=None,
+                    help="path to a precompute_teacher_targets.py .npz computed on the SAME --data file's "
+                         "'text' field (same row order/tokenizer) -- enables logit-level KD on the answer "
+                         "stream (and thinking, for --dataset_type reasoning) via topk_kd_loss(). See "
+                         "data/prompt_response_dataset.py's PromptResponseTeacherTargets for the alignment "
+                         "scheme and its per-example CE-only fallback. Requires --kd_alpha > 0 to have any effect.")
+    p.add_argument("--val_teacher_targets", default=None,
+                    help="same as --teacher_targets, computed on --val_data instead, for held-out KD reporting.")
+    p.add_argument("--teacher_max_length", type=int, default=4096,
+                    help="MUST match the --max_length used for the precompute_teacher_targets.py run "
+                         "(alignment re-tokenizes 'text' with the same truncation to land on the same rows).")
+    p.add_argument("--kd_alpha", type=float, default=0.5,
+                    help="loss = (1-kd_alpha)*ce + kd_alpha*kd, same convention as train_sft.py/"
+                         "train_real_text.py. Ignored when --teacher_targets is not given (pure CE).")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--lr_warmup_steps", type=int, default=0)
     p.add_argument("--lr_warmup_init", type=float, default=None)
@@ -164,13 +205,16 @@ def main() -> None:
         tok.pad_token = tok.eos_token
     vocab_size = len(tok)
 
-    train_ds = build_dataset(args.dataset_type, args.data, tok, args)
+    train_ds = build_dataset(args.dataset_type, args.data, tok, args, teacher_targets=args.teacher_targets)
     print(f"loaded {len(train_ds)} {args.dataset_type} examples from {args.data}", flush=True)
+    if train_ds.teacher is not None:
+        print(f"loaded Teacher targets from {args.teacher_targets}: K={train_ds.teacher.k} -- "
+              f"KD enabled, kd_alpha={args.kd_alpha}", flush=True)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
 
     val_loader = None
     if args.val_data:
-        val_ds = build_dataset(args.dataset_type, args.val_data, tok, args)
+        val_ds = build_dataset(args.dataset_type, args.val_data, tok, args, teacher_targets=args.val_teacher_targets)
         print(f"loaded held-out val: {len(val_ds)} examples from {args.val_data}", flush=True)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
@@ -227,10 +271,18 @@ def main() -> None:
             ce_answer = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"], ignore_index=-100)
             if args.dataset_type == "reasoning":
                 ce_thinking = F.cross_entropy(streams["thinking"].transpose(1, 2), batch["thinking_labels"], ignore_index=-100)
-                loss = ce_answer + args.thinking_weight * ce_thinking
+                ce_loss = ce_answer + args.thinking_weight * ce_thinking
             else:
                 ce_thinking = None
-                loss = ce_answer
+                ce_loss = ce_answer
+
+            if train_ds.teacher is not None:
+                kd_answer, kd_thinking = kd_losses(streams, batch, args.dataset_type)
+                kd_loss = kd_answer + args.thinking_weight * kd_thinking if kd_thinking is not None else kd_answer
+                loss = (1 - args.kd_alpha) * ce_loss + args.kd_alpha * kd_loss
+            else:
+                kd_answer = kd_thinking = None
+                loss = ce_loss
 
             for group in optimizer.param_groups:
                 group["lr"] = lr_at(step)
@@ -244,12 +296,21 @@ def main() -> None:
             if step % args.log_every == 0 or step == 1:
                 mean_loss = sum(loss_hist[-args.log_every:]) / len(loss_hist[-args.log_every:])
                 extra = f" ce_thinking={ce_thinking.item():.4f}" if ce_thinking is not None else ""
+                kd_extra = ""
+                if kd_answer is not None:
+                    kd_extra = f" kd_answer={kd_answer.item():.4f}"
+                    if kd_thinking is not None:
+                        kd_extra += f" kd_thinking={kd_thinking.item():.4f}"
                 print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={mean_loss:.4f} "
-                      f"ce_answer={ce_answer.item():.4f}{extra} lr={lr_at(step):.2e}", flush=True)
-                logger.progress(step, loss=mean_loss, ce_answer=ce_answer.item(), lr=lr_at(step))
+                      f"ce_answer={ce_answer.item():.4f}{extra}{kd_extra} lr={lr_at(step):.2e}", flush=True)
+                log_kwargs = {"kd_answer": kd_answer.item()} if kd_answer is not None else {}
+                if kd_thinking is not None:
+                    log_kwargs["kd_thinking"] = kd_thinking.item()
+                logger.progress(step, loss=mean_loss, ce_answer=ce_answer.item(), lr=lr_at(step), **log_kwargs)
             if val_loader is not None and (step % args.val_every == 0 or step == 1):
                 val_losses = evaluate(model, val_loader, device, args.dataset_type, args.n_step,
-                                       args.block_size, n_batches=args.val_batches)
+                                       args.block_size, n_batches=args.val_batches,
+                                       teacher_enabled=val_ds.teacher is not None)
                 print(f"step={step:6d} VAL {val_losses}", flush=True)
                 logger.progress(step, **{f"val_{k}": v for k, v in val_losses.items()})
 
@@ -272,7 +333,8 @@ def main() -> None:
     if args.extrapolate_n_steps and val_loader is not None:
         print("--- extrapolation probe (n_step_test vs training n_step), held-out ---", flush=True)
         for n_step_test in [int(x) for x in args.extrapolate_n_steps.split(",")]:
-            r = evaluate(model, val_loader, device, args.dataset_type, n_step_test, args.block_size, n_batches=args.val_batches)
+            r = evaluate(model, val_loader, device, args.dataset_type, n_step_test, args.block_size,
+                         n_batches=args.val_batches, teacher_enabled=val_ds.teacher is not None)
             extrapolation_results[n_step_test] = r
             marker = " <- training n_step" if n_step_test == args.n_step else ""
             print(f"  n_step_test={n_step_test:3d} {r}{marker}", flush=True)
