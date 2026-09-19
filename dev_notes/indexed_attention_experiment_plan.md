@@ -1030,3 +1030,113 @@ Pure algèbre linéaire sur les poids — aucune donnée, aucun entraînement, q
 L'espace commun rend la promotion SM → LM **possible**, il ne dit pas **quoi** promouvoir ni **quand**. Sans critère, on promeut tout (la LM explose) ou rien. C'est la question de conception que cette décision ouvre — la « surprise » de Titans en est une réponse connue, la fréquence de réutilisation une autre. À traiter en Phase 10, pas avant.
 
 Deuxième réserve : même dans un espace commun, les entrées LM (accumulées sur la distribution d'entraînement) et SM (écrites à l'instant, spécifiques à l'épisode) ont des statistiques de norme différentes, ce qui biaise les produits scalaires. Un contrôle de norme sur les entrées mémoire est probablement nécessaire — noter que le QK-Norm d'OLMo joue déjà ce rôle côté requêtes/clés d'attention.
+
+## S3 — couche récurrente : conception révisée **[discussion utilisateur 2026-09-19]**
+
+Remplace la formulation initiale « couche universelle = union des mémoires + projection par couche », trop binaire et qui confondait deux axes.
+
+### Le 2×2 qui remplace « couche universelle ou rien »
+
+Partager une couche, c'est partager **deux choses indépendantes** : les **poids** (projections `q/k/v/o`, l'opérateur de calcul) et la **mémoire** (les slots `K_lm`/`V_lm` issus des FFN). Rien n'impose de les partager ensemble.
+
+| | mémoire par couche | mémoire partagée |
+|---|---|---|
+| **poids par couche** | modèle d'origine (baseline) | teste la redondance mémoire seule |
+| **poids partagés** | **cas prédit par la thèse** | S3 complet |
+
+**Prédiction issue de la spec §-1, transposée de l'axe « faits » à l'axe « profondeur »** : l'information spécifique à une couche réside dans sa **région de mémoire**, pas dans ses poids d'attention. Donc partager les poids en gardant des régions de mémoire distinctes devrait peu coûter, alors que l'inverse devrait coûter cher. Si ça se vérifie sur un modèle préentraîné réel, c'est une **validation indépendante de la thèse centrale** — pas un simple résultat d'efficacité paramétrique.
+
+### Le goulot `T × d → n × d` : reformulé (correction d'une lecture antérieure)
+
+Une lecture précédente présentait ce goulot comme le grand manque de la conversion. **Avec l'espace K/V unifié (spec §3.2), c'est faux** : `K_in`/`V_in` est une mémoire, donc le registre n'a pas à résumer l'entrée — il peut la ré-interroger.
+
+Le flux résiduel d'un transformer fait **deux métiers simultanément** : transporter l'entrée *et* porter le calcul en cours. Thinker les sépare — `K_in` transporte l'entrée, `R` porte le calcul. L'opération n'est donc pas « compresser `T × d` en `n × d` » mais **factoriser le flux résiduel en une part adressable et une part de travail**.
+
+Conséquence de dimensionnement, qui rejoint la Phase -1 par un autre chemin : `n` se dimensionne sur le **parallélisme de raisonnement** (nombre de sous-objectifs simultanés), pas sur la longueur de séquence. Le registre est un **espace de travail**, pas un résumé. C'est l'argument le plus fort du papier en faveur de l'architecture.
+
+### Qu'est-ce qui diffère entre deux itérations ? Cinq régimes
+
+1. Rien — pur partage de poids (ALBERT). Perte de qualité connue.
+2. Adaptateur bas-rang par itération (Relaxed Recursive Transformers). Marche, mais réintroduit des paramètres par profondeur.
+3. Plongement d'étape ajouté à la requête. Peu coûteux, encode encore l'identité de l'étape.
+4. **La région de mémoire adressée** — l'étape détermine quelle partie de la mémoire union est interrogée. La spécificité passe par les **données**, pas par les paramètres.
+5. **Rien d'externe** — la trajectoire du registre porte elle-même la phase. Aucun indice d'étape nulle part.
+
+**(4) est le pont, (5) est la cible.** Seul (5) autorise le No-Op, la largeur adaptative et les steps compute-only — les trois mécanismes que le plan renvoie « après la Phase 7 » et qui constituent la vraie originalité de l'architecture.
+
+**Chemin expérimental** : entraîner avec plongement d'étape explicite (succès quasi garanti), puis **l'ablater** et mesurer si le registre seul suffit. Diagnostic direct, réutilisant la méthodologie validée en I4 (cosinus doux + contrôles triviaux) : **la distribution d'attention sur les régions de mémoire suit-elle encore l'identité de couche une fois le plongement d'étape retiré ?**
+
+### Instrument pratique : l'échelle de liage
+
+« Une couche universelle ou rien » est un test binaire, peu informatif et risqué. À la place, **lier progressivement** : 16 couches → 8 (par paires) → 4 → 2 → 1, avec distillation locale à chaque cran et mesure de la dégradation. On obtient une **courbe** au lieu d'un verdict, chaque cran est un chiffre citable, et une rupture indique *où* ça casse. Croisé avec l'axe mémoire du 2×2, ça donne le plan complet — faisable par distillation locale, donc parallèle et sans rétropropagation bout-en-bout.
+
+### Valeur pour la soumission du 26/09
+
+Nulle en résultats — c'est un programme post-soumission. **Deux choses en sont extractibles sans coût** : (a) la remesure de redondance inter-couches (queue des max de cosinus, pas la moyenne) dit si la colonne « mémoire partagée » est viable ; (b) le 2×2 lui-même s'énonce en Discussion comme la question de recherche que la Phase 12 ouvre — nettement mieux reçu qu'une liste de travaux futurs vague.
+
+### Question ouverte qui conditionne tout le reste **[à trancher par l'utilisateur]**
+
+**L'étape `t` doit-elle être connaissable par le modèle ?**
+- **Oui** → régimes (3)/(4), S3 nettement plus facile, mais récurrence nominale (profondeur déroulée).
+- **Non** → le nombre d'itérations devient libre, et le No-Op / la largeur adaptative cessent d'être « à voir après la Phase 7 » pour devenir **le cœur du mécanisme** — l'ordre du plan devrait alors changer.
+
+### Curriculum ffn2attn pour construire les poids de S3 — option, pas encore une décision **[DISCUSSION 2026-09-19]**
+
+**Proposition de l'utilisateur** : au lieu de démarrer S3 par un entraînement de zéro (ou par le seul canal de l'échelle de liage ci-dessus), construire les poids du Thinker en partant du signal/poids intermédiaire du modèle hôte, par un curriculum en quatre étapes : (1) reproduire le comportement d'une seule FFN — c'est S0, déjà planifié ; (2) fusionner une FFN avec l'attention qui la précède en une seule « couche Thinker » (composer la lecture KB `K_lm`/`V_lm` et la lecture SM/séquence `K_in`/`V_in` du Thinker pour reproduire la sortie combinée `attn_l + FFN_l` d'une couche du modèle hôte) ; (3) une fois réussi sur une couche, faire apprendre au Thinker (poids partagés, looped) **toutes** les couches de façon unifiée, quitte à augmenter le `hdim` du Thinker pour représenter l'espace combiné de toutes les couches ; (4) fine-tuner pour la fidélité au design initial de Thinker (indexation hiérarchique), quitte à faire un peu de KD classique en chemin. Objectif annoncé : moins de calcul que le KD bout-en-bout initialement prévu, en partant autant que possible des poids/activations du modèle hôte plutôt que d'un entraînement complet.
+
+**Cadrage — c'est un curriculum pour S3, pas une alternative au KD.** L'étape 2/3 est elle-même une forme de distillation locale, comme S1 — présenter ce chemin comme « au lieu du KD » est une confusion catégorielle : c'est de la distillation locale/graduelle contre de la distillation bout-en-bout, pas distillation contre pas-de-distillation.
+
+**Six réserves identifiées avant tout lancement, à garder attachées à cette idée tant qu'elles ne sont pas levées :**
+
+1. **Deux axes de progression concurrents, à réconcilier plutôt qu'à laisser en parallèle.** L'« échelle de liage » ci-dessus (16→8→4→2→1 couches originales liées) existe précisément pour éviter le saut binaire « couche universelle ou rien », jugé plus haut « peu informatif et risqué ». Le curriculum proposé avance sur un axe différent (FFN seule → FFN+attn fusionnées → toutes les couches unifiées), et son passage de l'étape 2 (une couche) à l'étape 3 (toutes les couches) **est** ce même saut binaire. Recommandation : utiliser l'échelle de liage existante comme granularité de l'étape 3 (16→8→4→2→1), pas un saut direct vers « toutes les couches ».
+
+2. **L'étape 3 présuppose une réponse à la question ouverte juste au-dessus, non tranchée.** Si les poids sont partagés entre itérations, un jeu de poids unique n'a mathématiquement aucune raison de représenter 16 fonctions de couche différentes sans un signal qui les distingue (l'un des 5 régimes du §"Qu'est-ce qui diffère entre deux itérations ?" plus haut). À trancher **avant** de lancer l'étape 3, pas après un échec.
+
+3. **Risque de confondre gain de capacité et généralisation mécanistique si `hdim` augmente.** Le plan S3 ci-dessus prévoit une union des **mémoires** (`Σ_l d_ff`, éventuellement compressée par SVD) — agrandir la banque `K_lm`/`V_lm`, pas la dimension de calcul `d` du registre Thinker lui-même. Si le curriculum augmente `d` pour absorber la richesse de 16 couches, tout succès de l'étape 3 devient inséparable d'un simple gain de capacité brute, ce qui viole la règle méthodologique permanente de ce projet (bloc chance-level obligatoire, `margin_over_shortcut > 0`). Si `hdim` doit croître, prévoir un contrôle explicite (même `hdim`, mémoire non unifiée, comme baseline) pour isoler généralisation et taille.
+
+4. **Risque de reproduire l'erreur de conflation corrigée le jour même (§"Correspondance Thinker ↔ transformer converti — version corrigée").** « Fusionner FFN + attention qui la précède » doit signifier composer les deux lectures déjà distinctes du Thinker (`K_lm`/`V_lm` puis `K_in`/`V_in`) pour reproduire la sortie combinée de la couche hôte — pas fusionner les deux mécanismes en un seul opérateur, ce qui recréerait la confusion `K_seq`/`V_seq` ↔ SM déjà identifiée comme fausse cette semaine.
+
+5. **L'économie de calcul promise ne tient probablement que pour les deux premières étapes.** L'étape 1-2 (régression locale gelée, indépendante par couche, comme S1) est bon marché et parallélisable sans rétropropagation bout-en-bout (cache CPU, cf. Piste B/S1 ci-dessus). L'étape 3 (un seul jeu de poids partagés satisfaisant simultanément 16 fonctions de couche) ne peut vraisemblablement plus être résolue par régression indépendante gelée — elle demande une optimisation jointe à travers les couches, dont le coût se rapproche d'un entraînement bout-en-bout classique, exactement là où l'économie était espérée la plus grande. À chiffrer étape par étape avant tout engagement ; ne pas supposer que l'économie de l'étape 1 se propage automatiquement aux suivantes.
+
+6. **Ne pas perdre le diagnostic d'attribution en cours de route.** Le critère de succès du projet n'est pas « la sortie ressemble à celle du LLM hôte » (mimétisme boîte noire) mais « la mémoire `K_lm`/`V_lm` fonctionne comme mémoire associative interrogeable » (méthodologie I4 : corrélation retrieval ↔ embedding de la vraie valeur, contrôles triviaux `random_kb`/`non_key`). Revalider ce diagnostic à chaque étape du curriculum, pas seulement une perte de reconstruction/perplexité.
+
+**Compatibilité calendrier — point resté ouvert, non tranché par l'utilisateur.** S3 est classé plus haut « hors périmètre de cette soumission » (au mieux un point préliminaire le 09-25 si S2 est bouclé le 09-24). Ce curriculum est un chantier au moins aussi lourd que S0+S1+S2 réunis, en plus du budget déjà comptabilisé au tableau « Budget consolidé » (~18-52 h·GPU + 66-246 h·cœur pour Piste A + I1-I5 + S0-S2). Il reste à trancher explicitement — pas le 24 — si ce curriculum vient remplacer une partie des priorités P0 (S2/Piste A), ou s'il reste strictement **P1** (remplit les nœuds inoccupés, ne consomme jamais de réservation GPU propre qui ferait la file devant ou à côté de P0, règle actée plus haut). S'il nécessite du GPU dédié, il concurrence directement le budget déjà serré de S2 sous 7 jours (deadline ICLR 2026-09-26).
+
+**Statut retenu par défaut, en l'absence de cette décision** : option valable d'enrichissement de l'instrument « échelle de liage » de S3, classée **P1/post-soumission** comme le reste de S3 — ne pas la faire glisser vers un chantier concurrent du calendrier P0 sans arbitrage explicite de l'utilisateur.
+
+#### Précision post A1/A2 v2 et ajout de code **[2026-09-20, model-design]**
+
+Les résultats A1/A2 v2 obtenus la nuit du 09-19/20 (`dev_notes/experiment.log.md`, entrée « A1/A2 v2 ») tranchent deux points qui restaient ouverts ci-dessus, et un vrai trou d'implémentation a été identifié et comblé.
+
+**Ce qui est tranché, plus la peine de re-débattre :**
+- **A1** : `score_ffn` reste plat (~0, max <1,5) à toute profondeur alors que `score_attn` croît fortement avec la profondeur (moyenne 0,26→6,50, max jusqu'à 84,7 en couche 15) — un softmax unifié naïf donne 92-93% de la masse aux clés FFN en couches basses (elles gagnent par le nombre) puis 0,29% en couche 15 (l'attention devient winner-take-all). **Branche (i) (lectures séparées, noyau `relu`/`sigmoid` côté FFN, softmax côté séquence) confirmée par la donnée, pas seulement retenue par défaut.** Toute calibration de score doit être **par couche hôte**, pas une constante globale — l'échelle de `score_attn` elle-même dérive avec la profondeur.
+- **A2** : quasi aucune quasi-duplication de clés FFN, y compris intra-couche (le contrôle le plus favorable). **Aucune compression gratuite par déduplication pour une mémoire partagée entre couches** — toute réduction de l'union des 16 couches devra venir d'une indexation/projection apprise (exactement l'hypothèse de S2), jamais de la géométrie brute. Argument direct contre l'augmentation de `hdim` du curriculum ci-dessus pour « loger toutes les couches » : ça achète de la capacité brute, pas un test de l'hypothèse d'indexation.
+
+**Trou de code identifié et comblé** : `HierarchicalMemory.build()` (`core/indexed_memory.py`) dérive toujours K et V du **même** tenseur `leaf_embeddings` via deux projections apprises (`k_proj`, `v_proj`) — incompatible avec S0, qui a besoin que K et V soient deux matrices **fixes et indépendantes** (`K=W_gate^T`, `V=W_down`, appariées par indice de neurone), pas dérivables l'une de l'autre par une projection partagée. Ajouté : `HierarchicalMemory.build_static(K, V, mask=None)` — injecte un niveau K/V précalculé directement dans `_levels_k`/`_levels_v`/`_levels_mask`, en contournant `k_proj`/`v_proj`/`compressor`, réservé à `depth=0` (assertion). Purement additif : `attend()` ne lisait déjà que ces trois attributs, aucun appelant existant de `build()` n'est affecté. Vérifié : test manuel (forme correcte, rejet correct si `depth>0`, chemin `build()` existant inchangé) + suite complète `tests/` (72/72 verts).
+
+**Prochaine action concrète, non ambiguë, CPU, faisable aujourd'hui** : nouveau script `learn/indexed_attention/convert_ffn_to_kv.py` (S0) — pour une couche OLMo, extraire `W_gate`/`W_up`/`W_down` (gérer le gating SwiGLU, piège d'implémentation déjà identifié), construire `(K, V)` statiques, charger un shard `x_l` déjà caché par `extract_olmo_activations.py` (`activation_cache/olmo2_1b/shard_*.pt`), faire `mem = HierarchicalMemory(d_model=2048, block_size=1, depth=0, n_head=1); mem.build_static(K, V); out = mem.attend(x_l)`, comparer `out` à `FFN_l(x_l)` réel avec un seuil numérique de passage — c'est la définition opérationnelle de S0, pas encore une ligne de code avant cet ajout.
+
+#### Résolution de la question ouverte S3 (signal d'étape) — plan expérimental en 3 étapes **[2026-09-20, discussion utilisateur]**
+
+Deux endroits distincts où « la couche pourrait se signaler », à ne pas confondre : **(1) dans le contenu de la mémoire interrogée** (côté `HierarchicalMemory.build()`), **(2) dans l'entrée/les poids de la boucle récurrente** (côté `Thinker.forward()`). Le code a déjà un précédent exact pour (1) : `HierarchicalMemory.source_bias = nn.Embedding(2, d_model)` étiquette déjà chaque leaf comme input/KB avant projection — c'est un mécanisme d'étiquetage du **contenu**, réutilisable directement pour étiqueter la provenance-couche, sans toucher à la boucle.
+
+Cinq régimes déjà listés plus haut, reformulés en options avec pro/con :
+- **A — embedding d'étape explicite dans la boucle (régime 3)** : quasi garanti de marcher, mais fige `n_step` sur le nombre de couches hôtes et ne prouve rien sur la capacité du registre seul.
+- **B — étiquetage de région mémoire par couche, `source_bias` étendu à `n_layers+1` catégories (régime 4)** : aucune modification de la boucle, testable **sans boucle complète** via `build_static` seul (le moins cher — CPU, pas d'entraînement). Ne dit rien seul sur si le registre choisit de fait la bonne région dans le bon ordre.
+- **C — rien d'externe (régime 5, la cible)** : objectif final (No-Op, largeur adaptative deviennent codables), mais risque d'échec élevé à tester en direct, sans baseline pour diagnostiquer un échec.
+- **D — adaptateur bas-rang par itération (régime 2, Relaxed Recursive Transformers)** : précédent publié solide, mais réintroduit des paramètres proportionnels au nombre de couches, dilue l'argument central.
+- **E — partage pur (régime 1, ALBERT-like)** : baseline plancher, perte de qualité connue dans la littérature.
+
+**Ordre retenu**, B en premier parce que seul testable sans boucle complète :
+
+| Étape | Test | Compute | Décision |
+|---|---|---|---|
+| 1 | B seul, diagnostic d'attribution (style I4) : union de 2-3 couches OLMo converties (`build_static`, une basse/moyenne/haute par stratification Geva) avec `source_bias` étendu, interroger avec des `x_l` réels de chaque couche, mesurer si l'attention retrouve la bonne région | **CPU** — même nature que A1/A2 v2 (16 couches en ~2 min sur CPU), aucun entraînement, GPU sans bénéfice à cette échelle | Signal fort → étape 2. Sinon retravailler B avant d'aller plus loin |
+| 2 | B + boucle Thinker complète, embedding d'étape (A) actif — topline, succès quasi garanti | **GPU si capacité déjà détenue et inoccupée** (vrai entraînement, rétropropagation à travers les poids partagés) — pas de réservation dédiée qui ferait la file (règle P1), fallback CPU (`paradoxe`, 104 cœurs) viable à cette petite échelle (2-3 couches, pas 16) si aucun GPU libre | Sert de plafond de référence |
+| 3 | Ablation de l'embedding d'étape, garder seulement B | idem étape 2 | Dégradation faible → régime 5 atteignable, B suffit, C devient testable sur l'échelle de liage complète. Dégradation forte → garder A (accepter `n_step` fixé) ou passer à D |
+
+**Priorité** : ce fil reste classé **P1** comme le reste du curriculum S3 (capacité déjà détenue inoccupée uniquement, jamais de réservation GPU dédiée devant/à côté de P0) — l'étape 1 (CPU) peut démarrer immédiatement sans aucun conflit de ressource.
+
+#### Limite de l'hôte OLMo-2-1B pour l'évaluation future **[note utilisateur 2026-09-20]**
+
+`allenai/OLMo-2-0425-1B` est un modèle de base, **pas un modèle "thinking"** (pas de raisonnement long entraîné dessus) — adapté aux tests de mécanisme (S0-S2, géométrie, attribution, la question du signal d'étape ci-dessus), mais **insuffisant** le jour où l'objectif devient d'évaluer si le Thinker construit par ce curriculum accomplit des tâches similaires aux LLM cibles (raisonnement). Candidats déjà identifiés pour cette évaluation future dans `dev_notes/model_selection_small_vocab_reasoning.md` : Olmo-3-Think (même famille/vocab que l'hôte actuel, AIME25 70,7%), LFM2.5-1.2B-Thinking, MiniCPM4.1-8B. Ne bloque rien dans l'immédiat (S0-S2 et la résolution du signal d'étape ne testent pas la qualité de raisonnement) — à traiter comme un changement d'hôte pour une phase d'évaluation ultérieure, pas une révision du travail en cours sur OLMo-2-1B.
