@@ -384,3 +384,11 @@ Le run combiné 10k (job `4123135`, abacus21-1) a bien progressé (10000/10000 t
 **Point de friction opérationnel** : deux actions de routine ont été bloquées par le classifieur auto-mode ce tour -- `oardel 4122971` (annulation d'un job placeholder confirmée nécessaire par model-design) et un `ps aux` en lecture seule via `oarsh` (catégorisés "interfère avec des workloads" / a également bloqué un `rm` sur le npz partiel comme "destruction irréversible"). Signalé à l'utilisateur, en attente de décision -- `4122971` (2 GPU, `sleep 21600` placeholder) tourne donc pour rien depuis 00:14 faute d'autorisation de le libérer.
 
 En attente : resoumission `4123260` reparte sur une ressource libre, precompute 10k combiné termine sans nouvelle éviction, puis lancement retrieval#1 repr-KD + référence appariée sur le même sous-échantillon.
+
+## 2026-09-21 — Reasoning warm-start terminé (100000/100000 pas) : meilleur point capturé bien avant la fin
+
+Job `4123105` (abacus11-1) a atteint son budget complet (`--max_steps 100000`, warm-start depuis le point interrompu par l'expiration walltime de `4122831`) : `Budget reached at step 100000. Stopping.` Coût total ~541min (~9h, sur les deux segments cumulés).
+
+**Meilleur checkpoint (`checkpoints/reasoning_thinking_best.pt`, via `--save_best_checkpoint_path`)** : `val_answer=3.1819` à **step 21000** -- 6 "new best" successifs enregistrés jusque-là, plus aucun après. Le run a ensuite surappris nettement le reste du budget : val_answer remonte progressivement jusqu'à **5.748 au dernier point (step 99750)**, soit +2.57 depuis le minimum -- pattern identique à `general` (val best 4.87 vs final 5.30) et au flagship retrieval (surapprentissage sévère après le minimum). `final_loss` (train, dernier pas) = 3.8849, non représentatif de la qualité réelle du modèle -- **c'est `checkpoints/reasoning_thinking_best.pt` (step 21000) qu'il faut utiliser pour toute évaluation/comparaison en aval, pas le point final.**
+
+**Lecture opérationnelle** : confirme une fois de plus la nécessité de `--save_best_checkpoint_path` sur tout run prompt/response à ce stade du projet -- sans ce flag, ce run flagship-scale reasoning aurait rapporté un résultat très dégradé (5.75 au lieu de 3.18, un facteur d'erreur de lecture énorme). GPU (abacus11-1) libéré. Relayé à `model-design`.
