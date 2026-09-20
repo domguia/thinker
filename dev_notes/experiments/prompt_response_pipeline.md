@@ -290,3 +290,20 @@ Test ciblé demandé par `model-design` : appel DIRECT de `evaluate()` (la fonct
 ## 2026-09-20 — Sync manquante trouvée : train_sft.py/chunked_loss.py/indexed_thinker_model.py jamais synchronisés
 
 Le premier relaunch de `general` avec `--save_best_checkpoint_path` a crashé 2 fois en cascade (`embedding_kd_loss` manquant, puis `chunked_loss` manquant) -- fichiers modifiés/créés par `model-design` (commits `61c9cc2`/`69cae9c`) jamais transférés vers Rennes. Diff systématique fait sur toutes les dépendances (`core/run_logging.py`, `core/model_families.py`, `data/real_text_windows.py`) -- tous les autres fichiers étaient déjà synchronisés. Relancé avec succès (3e tentative), confirmé actif.
+
+## 2026-09-20 — 3 leviers KD : préalables faits, référence + levier 1 terminés
+
+Job `4122831` (tenait `abacus22-1`/`abacus29-1`) a expiré son walltime (8h depuis 08:15) -- `reasoning` coupé net (meilleur checkpoint capturé : val_answer=3.317, trajectoire saine 4.03→3.32) et la fusion npz interrompue mid-course (déjà terminée avant l'expiration, donc sans impact). Réservation de remplacement obtenue sur le même noeud (`abacus29-1`, job `4123080`).
+
+Préalables leviers KD : embed_init extrait (SVD, d=256), hidden states LFM2 precomputés sur 2000 exemples (2.8M tokens).
+
+| variante | ce_answer @ 1000 pas |
+|---|---|
+| référence (sans levier) | 1.488 |
+| levier 1 (`loss_chunk_size=512`) | 1.450 |
+
+Levier 1 très proche de la référence (attendu -- numériquement identique par design, juste chunké pour la mémoire).
+
+**Bug trouvé et corrigé** : `embedding_kd_loss` (levier 2) crashait -- LFM2 a `tokenizer len()=64400` mais `config.vocab_size=65536` (slots réservés inutilisés), le code supposait teacher toujours ≤ student. Fixé en slicant au `min()` des deux tailles au lieu de toujours la taille du teacher. Levier 2 relancé avec succès.
+
+Levier 3 (repr-KD) lancé.
