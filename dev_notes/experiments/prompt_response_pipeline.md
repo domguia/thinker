@@ -358,3 +358,11 @@ Runs actifs après correction : embed01 (abacus3-1, ~5.5 steps/s), repr_long (ab
 **embed-anchor@0.1** : signal toujours mitigé/bruité, cohérent avec le verdict "contre-productif ou au mieux neutre" déjà porté à weight=0.01. Pas d'investissement supplémentaire (consigne model-design), conclusion figée ici.
 
 reasoning warm-start (job 4123105, abacus11-1) : step 9100, RAS, continuité saine.
+
+## 2026-09-20 — Lancement retrieval#1 avec repr-KD : precompute 20k en cours
+
+Verdict model-design : repr-KD retenu, priorité #1 = nouveau run retrieval avec repr-KD comparé à la courbe flagship existante (pas de retouche au warm-start reasoning en cours, general déjà clos).
+
+Vérification disque avant precompute pleine échelle : home NFS Rennes à 96% (913GB libres, ressource partagée) -- trop risqué pour ~370GB (81k exemples * hidden states). Décision : sous-échantillon aléatoire de 20000 exemples (`train_repr20k.jsonl`, `shuf -n 20000`), precompute hidden_layers=[16] écrit sur Group Storage (killerdroid@storage3, 3.4TB libres) plutôt que le home.
+
+Precompute lancé sur abacus21-1 (L40S), ~28.2 ex/s, ETA ~12min. Prochaine étape : lancer retrieval#1 avec `--repr_teacher_hidden`/`--repr_kd_weight 0.1`/`--repr_kd_warmup_steps` ≈5% du budget total de pas, dès le precompute terminé.
