@@ -335,6 +335,10 @@ def main() -> None:
                         "-- does 'thinking longer' at inference help solve reasoning/retrieval examples "
                         "it was never trained with that many steps on?")
     p.add_argument("--save_checkpoint_path", default=None)
+    p.add_argument("--save_best_checkpoint_path", default=None,
+                    help="save model.state_dict() here every time val_answer improves (not just at the end) "
+                         "-- lets a long run be stopped early at its best point if overfitting sets back in, "
+                         "per model-design's 2026-09-20 flagship-run protocol.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     add_run_args(p)
@@ -400,6 +404,7 @@ def main() -> None:
     model.train()
 
     step, loss_hist = 0, []
+    best_val_answer = None
     start_time = time.time()
     done = False
     while not done:
@@ -477,6 +482,13 @@ def main() -> None:
                                        ingest_n_step_max=args.ingest_n_step_max)
                 print(f"step={step:6d} VAL {val_losses}", flush=True)
                 logger.progress(step, **{f"val_{k}": v for k, v in val_losses.items()})
+                if args.save_best_checkpoint_path is not None:
+                    cur_val = val_losses["answer"]
+                    if best_val_answer is None or cur_val < best_val_answer:
+                        best_val_answer = cur_val
+                        torch.save(model.state_dict(), args.save_best_checkpoint_path)
+                        print(f"  new best val_answer={cur_val:.4f} -> checkpoint saved to "
+                              f"{args.save_best_checkpoint_path}", flush=True)
 
     elapsed = time.time() - start_time
     print("---", flush=True)
