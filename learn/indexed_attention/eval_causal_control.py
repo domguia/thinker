@@ -33,26 +33,44 @@ from core.model_families import resolve_model_name
 from data.prompt_response_dataset import RetrievalPromptDataset
 
 
-def shuffle_documents(batch, block_size: int, n_docs_max: int):
-    """Replace each example's document blocks with another example's (same
-    batch, random permutation with no fixed points when batch_size > 1) --
-    keeps the question/answer/labels untouched, only the KB content changes."""
+def shuffle_documents(batch, block_size: int, n_docs_max: int, target: str = "all"):
+    """Replace document blocks with another example's (same batch, random
+    permutation with no fixed points when batch_size > 1) -- keeps the
+    question/answer/labels untouched, only the targeted KB content changes.
+
+    target: "all" (every document block, the coarse control) / "supporting"
+    (only gold supporting-fact blocks, per-example `is_supporting` mask) /
+    "distractor" (only non-supporting blocks) -- model-design's fine-grained
+    control (2026-09-20): if corrupting "supporting" hurts much more than
+    corrupting "distractor", that's evidence of TARGETED retrieval rather
+    than generic sensitivity to any coherent text.
+    """
     b = batch["kb_tokens"].shape[0]
     if b < 2:
         return batch  # nothing to shuffle against
     perm = torch.randperm(b)
     while (perm == torch.arange(b)).any():  # avoid any example mapping to itself
         perm = torch.randperm(b)
-    doc_len = block_size * n_docs_max
     out = {k: v.clone() for k, v in batch.items()}
-    out["kb_tokens"][:, :doc_len] = batch["kb_tokens"][perm, :doc_len]
-    out["kb_leaf_mask"][:, :doc_len] = batch["kb_leaf_mask"][perm, :doc_len]
+    for i in range(n_docs_max):
+        start, end = i * block_size, (i + 1) * block_size
+        if target == "supporting":
+            sel = batch["is_supporting"][:, i]
+        elif target == "distractor":
+            sel = ~batch["is_supporting"][:, i]
+        else:
+            sel = torch.ones(b, dtype=torch.bool)
+        if not sel.any():
+            continue
+        out["kb_tokens"][sel, start:end] = batch["kb_tokens"][perm][sel, start:end]
+        out["kb_leaf_mask"][sel, start:end] = batch["kb_leaf_mask"][perm][sel, start:end]
     # kb_source_ids unchanged (still marks doc-block positions as KB=1, question stays local=0)
     return out
 
 
 @torch.no_grad()
-def run_eval(model, loader, device, block_size, n_docs_max, n_step, shuffle: bool, n_batches=None):
+def run_eval(model, loader, device, block_size, n_docs_max, n_step, shuffle: str = None, n_batches=None):
+    """shuffle: None (real documents) / "all" / "supporting" / "distractor"."""
     model.eval()
     losses = []
     for i, batch in enumerate(loader):
@@ -60,7 +78,7 @@ def run_eval(model, loader, device, block_size, n_docs_max, n_step, shuffle: boo
             break
         batch = {k: v.to(device) for k, v in batch.items()}
         if shuffle:
-            batch = shuffle_documents(batch, block_size, n_docs_max)
+            batch = shuffle_documents(batch, block_size, n_docs_max, target=shuffle)
         query_tokens = batch["kb_tokens"][:, -block_size:]
         target_input = {"answer": batch["answer_target_input"]}
         _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, n_step,
@@ -89,6 +107,8 @@ def main() -> None:
     p.add_argument("--answer_n_layers", type=int, default=1)
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--n_batches", type=int, default=None, help="cap eval batches; default = whole val set")
+    p.add_argument("--fine_grained", action="store_true",
+                   help="also run supporting-only and distractor-only corruption (needs is_supporting in data)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -117,12 +137,22 @@ def main() -> None:
     print(f"loaded checkpoint {args.checkpoint} ({n_params/1e6:.2f}M params)", flush=True)
 
     real = run_eval(model, val_loader, args.device, args.block_size, args.n_docs_max, args.n_step,
-                     shuffle=False, n_batches=args.n_batches)
-    shuffled = run_eval(model, val_loader, args.device, args.block_size, args.n_docs_max, args.n_step,
-                         shuffle=True, n_batches=args.n_batches)
-    print(f"val_answer (real documents)     : {real:.4f}", flush=True)
-    print(f"val_answer (shuffled documents) : {shuffled:.4f}", flush=True)
-    print(f"degradation (shuffled - real)   : {shuffled - real:.4f}", flush=True)
+                     shuffle=None, n_batches=args.n_batches)
+    shuffled_all = run_eval(model, val_loader, args.device, args.block_size, args.n_docs_max, args.n_step,
+                             shuffle="all", n_batches=args.n_batches)
+    print(f"val_answer (real documents)         : {real:.4f}", flush=True)
+    print(f"val_answer (all docs shuffled)      : {shuffled_all:.4f}", flush=True)
+    print(f"degradation (all - real)            : {shuffled_all - real:.4f}", flush=True)
+
+    if args.fine_grained:
+        shuffled_supporting = run_eval(model, val_loader, args.device, args.block_size, args.n_docs_max,
+                                        args.n_step, shuffle="supporting", n_batches=args.n_batches)
+        shuffled_distractor = run_eval(model, val_loader, args.device, args.block_size, args.n_docs_max,
+                                        args.n_step, shuffle="distractor", n_batches=args.n_batches)
+        print(f"val_answer (supporting shuffled only) : {shuffled_supporting:.4f}", flush=True)
+        print(f"val_answer (distractor shuffled only) : {shuffled_distractor:.4f}", flush=True)
+        print(f"degradation (supporting - real)       : {shuffled_supporting - real:.4f}", flush=True)
+        print(f"degradation (distractor - real)       : {shuffled_distractor - real:.4f}", flush=True)
 
 
 if __name__ == "__main__":

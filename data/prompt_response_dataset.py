@@ -342,6 +342,9 @@ class RetrievalPromptDataset(Dataset):
                 docs = docs[:n_docs_max]
             # doc_id = ORIGINAL row index (before this filtering) -- see
             # ReasoningPromptDataset's identical convention for why this matters.
+            is_supporting = row.get("is_supporting")
+            if is_supporting is not None:
+                is_supporting = is_supporting[:n_docs_max] + [False] * max(0, n_docs_max - len(is_supporting))
             self.examples.append({
                 "question": row["question"], "docs": docs, "answer": str(row["answer"]),
                 "doc_id": doc_id, "text": row.get("text"),
@@ -349,6 +352,10 @@ class RetrievalPromptDataset(Dataset):
                 # kept distinct from real hop counts (>=0) so downstream stratification (e.g.
                 # num_hops>=2 vs <=1, §8ter multi-hop protocol) can exclude unknowns explicitly.
                 "num_hops": row.get("num_hops", -1),
+                # None = unknown (data generated before is_supporting was added) -- used by
+                # eval_causal_control.py's fine-grained corrupt-supporting-only vs
+                # corrupt-distractors-only control (model-design, 2026-09-20).
+                "is_supporting": is_supporting,
             })
         if n_truncated_docs:
             print(f"WARNING: {n_truncated_docs}/{len(self.examples)} examples in {path} had more than "
@@ -395,10 +402,12 @@ class RetrievalPromptDataset(Dataset):
             self.max_answer_len, self.pad_id, self.teacher)
         ans_input, ans_labels = _teacher_forced_target(ans_ids, ans_mask, self.pad_id)
 
+        is_supporting = ex["is_supporting"] if ex["is_supporting"] is not None else [False] * self.n_docs_max
         out = {
             "kb_tokens": kb_tokens, "kb_source_ids": kb_source_ids, "kb_leaf_mask": kb_leaf_mask,
             "answer_target_input": ans_input, "answer_labels": ans_labels,
             "num_hops": torch.tensor(ex["num_hops"], dtype=torch.long),
+            "is_supporting": torch.tensor(is_supporting, dtype=torch.bool),
         }
         ans_kd = _kd_targets(self.teacher, ans_kd_info, ex["doc_id"], self.max_answer_len)
         if ans_kd is not None:
