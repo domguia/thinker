@@ -337,3 +337,8 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 ## 2026-09-20 — pistea_c_nstep_lr_joint reparti sur Rennes + Nancy (deux home NFS separes)
 - `graffiti-3` libere par l'OOM OLMo -- 30 cellules restantes du sweep croise (sur 40) extraites (exclusion des run_id deja `done`/`running` cote Rennes) et copiees vers le home Nancy, 4 workers lances sur les 4 GPU.
 - **Point d'attention pour la collecte** : les deux sites ont des `runs/pistea_c_nstep_lr_joint/` INDEPENDANTS (home NFS non partage inter-site) -- la collecte finale du sweep devra agreger les `state/*.json` des DEUX sites (Rennes ET Nancy), pas un seul.
+
+## 2026-09-20 — Erreur repetee : workers lances sur le frontend Rennes au lieu du noeud abacus18-1
+- Meme classe d'erreur que l'incident Nancy (frontend vs noeud) -- lance via `ssh rennes.grid5000.fr.g5k '...'` au lieu de `ssh abacus18-1.rennes.grid5000.fr.g5k '...'` directement. 18 cellules du sweep croise ont tourne (et ete tuees, rc=-9 apres 1-2 min a chaque fois, probablement une limite cgroup du frontend) sur `host=frennes` avant detection via l'observation `nvidia-smi`=0% alors que `pgrep` sur le frontend montrait des process actifs.
+- Nettoyage : process tues sur le frontend (PID directs), 18 state/claims orphelins identifies via `meta.host=="frennes"` et supprimes, relance correcte directement sur `abacus18-1.rennes.grid5000.fr.g5k`.
+- **Leçon a generaliser** : toujours verifier `meta.host` dans le state.json apres un lancement multi-noeud, quel que soit le site -- ce n'est pas specifique a Nancy, la meme erreur peut arriver sur n'importe quel site si la commande `ssh` cible le frontend par erreur.
