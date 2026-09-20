@@ -157,3 +157,15 @@ Retrains seed=1/seed=2 avec `--save_checkpoint_path` (même config, 24000 pas), 
 | **poolé** | **+0.0031** | **0.315** |
 
 **Une fois le nombre de documents corrompus égalisé, l'écart disparaît complètement** (t=0.315, aucun signe cohérent entre seeds -- contraste total avec le t=-2.430 poolé et le signe cohérent négatif obtenu SANS appariement). **La conclusion de l'entrée précédente ("pas de ciblage, distracteurs nuisent plus") est ANNULÉE -- c'était entièrement un artefact du nombre inégal de documents corrompus, pas un vrai signal.** État correct actuel : **aucun effet détectable dans un sens ou l'autre** (ni ciblage net, ni sensibilité générale prouvée) à ce N/ces seeds, une fois le confond de comptage retiré. Ne pas citer l'entrée précédente sans ce correctif. Relayé à `model-design`.
+
+## 2026-09-20 — Sweep P1 minimal-viable-model (d_model 64/128/256, budget epochs égal)
+
+Demande `model-design` : `d_model ∈ {64,128,256}`, retrieval, `n_step=4, batch_size=8`, budget égal (~5 epochs, 2277 pas sur 18000 exemples), sur `abacus11-1` (capacité P1 non-concurrente du flagship) :
+
+| d_model | final_loss (train) | val_answer (step 2100) |
+|---|---|---|
+| 64 | 5.974 | 6.133 |
+| 128 | 5.684 | 5.813 |
+| 256 | 5.346 | 5.601 |
+
+**Lecture** : amélioration monotone et régulière avec la capacité, pas encore de signe de plateau/effondrement même à `d_model=64` (le plus petit testé) -- la tâche continue de bénéficier de plus de capacité jusqu'à 256 au moins. Pas de seuil de collapse identifié dans cette plage ; `d_model=32` ou plus bas serait nécessaire pour trouver où le signal disparaît, si utile pour accélérer les futures expériences. Relayé à `model-design`.
