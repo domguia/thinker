@@ -321,6 +321,10 @@ def main() -> None:
     p.add_argument("--lr_warmup_steps", type=int, default=0)
     p.add_argument("--lr_warmup_init", type=float, default=None)
     p.add_argument("--batch_size", type=int, default=16)
+    p.add_argument("--bf16", action="store_true",
+                    help="run the forward pass (model + loss) under torch.autocast(dtype=bfloat16) -- ~1.68x "
+                         "measured elsewhere on this project (train_sft.py's 500M-core sweep). Master weights/"
+                         "optimizer state stay fp32; no GradScaler needed for bf16.")
     p.add_argument("--max_steps", type=int, default=100000)
     p.add_argument("--max_time_minutes", type=float, default=15.0)
     p.add_argument("--log_every", type=int, default=20)
@@ -412,31 +416,32 @@ def main() -> None:
             if args.dataset_type == "reasoning":
                 target_input["thinking"] = batch["thinking_target_input"]
 
-            if args.ingest_kb:
-                ingest_documents(model, batch, args.n_docs_max, args.block_size, args.ingest_n_step,
-                                  use_checkpoint=args.ingest_checkpoint, step_size=args.ingest_step_size,
-                                  n_step_min=args.ingest_n_step_min, n_step_max=args.ingest_n_step_max)
-                _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
-                                   target_input=target_input, kb_prebuilt=True)
-            else:
-                _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
-                                   kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16 and device.type == "cuda"):
+                if args.ingest_kb:
+                    ingest_documents(model, batch, args.n_docs_max, args.block_size, args.ingest_n_step,
+                                      use_checkpoint=args.ingest_checkpoint, step_size=args.ingest_step_size,
+                                      n_step_min=args.ingest_n_step_min, n_step_max=args.ingest_n_step_max)
+                    _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
+                                       target_input=target_input, kb_prebuilt=True)
+                else:
+                    _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
+                                       kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input)
 
-            ce_answer = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"], ignore_index=-100)
-            if args.dataset_type == "reasoning":
-                ce_thinking = F.cross_entropy(streams["thinking"].transpose(1, 2), batch["thinking_labels"], ignore_index=-100)
-                ce_loss = ce_answer + args.thinking_weight * ce_thinking
-            else:
-                ce_thinking = None
-                ce_loss = ce_answer
+                ce_answer = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"], ignore_index=-100)
+                if args.dataset_type == "reasoning":
+                    ce_thinking = F.cross_entropy(streams["thinking"].transpose(1, 2), batch["thinking_labels"], ignore_index=-100)
+                    ce_loss = ce_answer + args.thinking_weight * ce_thinking
+                else:
+                    ce_thinking = None
+                    ce_loss = ce_answer
 
-            if train_ds.teacher is not None:
-                kd_answer, kd_thinking = kd_losses(streams, batch, args.dataset_type)
-                kd_loss = kd_answer + args.thinking_weight * kd_thinking if kd_thinking is not None else kd_answer
-                loss = (1 - args.kd_alpha) * ce_loss + args.kd_alpha * kd_loss
-            else:
-                kd_answer = kd_thinking = None
-                loss = ce_loss
+                if train_ds.teacher is not None:
+                    kd_answer, kd_thinking = kd_losses(streams, batch, args.dataset_type)
+                    kd_loss = kd_answer + args.thinking_weight * kd_thinking if kd_thinking is not None else kd_answer
+                    loss = (1 - args.kd_alpha) * ce_loss + args.kd_alpha * kd_loss
+                else:
+                    kd_answer = kd_thinking = None
+                    loss = ce_loss
 
             for group in optimizer.param_groups:
                 group["lr"] = lr_at(step)
