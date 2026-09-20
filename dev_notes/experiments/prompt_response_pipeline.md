@@ -366,3 +366,11 @@ Verdict model-design : repr-KD retenu, priorité #1 = nouveau run retrieval avec
 Vérification disque avant precompute pleine échelle : home NFS Rennes à 96% (913GB libres, ressource partagée) -- trop risqué pour ~370GB (81k exemples * hidden states). Décision : sous-échantillon aléatoire de 20000 exemples (`train_repr20k.jsonl`, `shuf -n 20000`), precompute hidden_layers=[16] écrit sur Group Storage (killerdroid@storage3, 3.4TB libres) plutôt que le home.
 
 Precompute lancé sur abacus21-1 (L40S), ~28.2 ex/s, ETA ~12min. Prochaine étape : lancer retrieval#1 avec `--repr_teacher_hidden`/`--repr_kd_weight 0.1`/`--repr_kd_warmup_steps` ≈5% du budget total de pas, dès le precompute terminé.
+
+## 2026-09-20 — Bug d'alignement doc_id trouvé, correction en cours, 2 évictions besteffort
+
+Bug trouvé dans l'intégration repr-KD à l'échelle production : `PromptResponseReprTargets.slice_span` (data/prompt_response_dataset.py:225-230) utilise `doc_id` comme index positionnel DIRECT dans `self.offsets`, sans fallback pour couverture partielle -- crash `IndexError` si `--repr_teacher_hidden` a moins d'exemples que `--data`. Le docstring de la classe le dit explicitement : conçu pour une couverture 1:1 sur le MÊME jsonl que `--teacher_targets`. L'hypothèse "le masque gère la couverture partielle" (model-design + moi) était fausse.
+
+Correction : precompute combiné (top_k + hidden_layers en un seul passage, garantit l'alignement doc_id) sur le sous-échantillon 20k (`train_repr20k.jsonl`), qui devient lui-même le `--data` d'entraînement pour ce test -- donc "run réel sur 20k exemples (25% du dataset) avec repr-KD full-coverage", pas directement comparable au flagship 81k mais permet une comparaison propre (référence appariée SANS repr-KD sur le même 20k, à lancer en parallèle sur un 2e nœud dès le precompute terminé).
+
+Par ailleurs, 2 tentatives précédentes de precompute (v1 sur abacus21-1, v2 sur abacus3-1) ont échoué silencieusement (pas de traceback) à cause d'évictions besteffort en cours d'écriture du .npz -- contention GPU réelle et récurrente à Rennes ce soir. Root-caused via `oarstat` (jobs disparus/remplacés par resubmission idempotente) après avoir écarté à tort une hypothèse de limite mémoire cgroup (vérifiée absente).
