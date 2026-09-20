@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import time
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -48,15 +49,19 @@ from core.indexed_thinker_model import Thinker
 from core.model_families import resolve_model_name
 from core.run_logging import add_run_args, logger_from_args
 from data.prompt_response_dataset import ReasoningPromptDataset, RetrievalPromptDataset
-from learn.distill.train_sft import topk_kd_loss
+from learn.distill.chunked_loss import chunked_ce_kd_loss
+from learn.distill.train_sft import embedding_kd_loss, repr_cosine_loss, topk_kd_loss
 
 
-def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets: str = None):
+def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets: str = None, repr_teacher_hidden: str = None):
+    repr_kwargs = dict(repr_teacher_hidden=repr_teacher_hidden, repr_teacher_layer=args.repr_teacher_layer,
+                        repr_proj_dim=args.repr_proj_dim, repr_seed=args.seed)
     if dataset_type == "reasoning":
         return ReasoningPromptDataset(path, tokenizer, n_ctx=args.n_ctx,
                                        max_thinking_len=args.max_thinking_len,
                                        max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id,
-                                       teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length)
+                                       teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length,
+                                       **repr_kwargs)
     if dataset_type == "retrieval":
         # block_size/n_docs_max, NOT n_ctx/t_local (2026-09-20 redesign, user
         # decision: treat HotpotQA's multiple documents as distinct indexable
@@ -67,7 +72,8 @@ def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets
         # document correctly).
         return RetrievalPromptDataset(path, tokenizer, block_size=args.block_size, n_docs_max=args.n_docs_max,
                                        max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id,
-                                       teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length)
+                                       teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length,
+                                       **repr_kwargs)
     raise ValueError(f"unknown --dataset_type {dataset_type!r} (expected 'reasoning' or 'retrieval' -- "
                       f"'general' stays on train_real_text.py's sliding-window pipeline, not this script)")
 
@@ -317,6 +323,41 @@ def main() -> None:
     p.add_argument("--kd_alpha", type=float, default=0.5,
                     help="loss = (1-kd_alpha)*ce + kd_alpha*kd, same convention as train_sft.py/"
                          "train_real_text.py. Ignored when --teacher_targets is not given (pure CE).")
+    p.add_argument("--loss_chunk_size", type=int, default=0,
+                    help="Compute CE/KD per stream via chunked_ce_kd_loss() (learn/distill/chunked_loss.py, "
+                         "spec §13.3) instead of materializing each stream's full (B,T,vocab) logits at once -- "
+                         "memory lever only, same FLOPs. Uses Thinker.forward(return_hidden=True) to get the "
+                         "pre-head state and applies each stream's own head chunk-by-chunk. 0 (default) keeps "
+                         "the original unchunked code path unchanged.")
+    p.add_argument("--embed_teacher_target", default=None,
+                    help="extract_teacher_embed_init.py .npz output (embed_init key) -- adds a CONTINUOUS MSE "
+                         "anchor pulling Thinker's self.embed toward this fixed Teacher-projected target every "
+                         "step (spec §13.1/13.2's embed_init is a one-time copy-at-init only). Requires "
+                         "--embed_kd_weight > 0. Row correspondence requires the Teacher's own tokenizer.")
+    p.add_argument("--embed_kd_weight", type=float, default=0.0,
+                    help="weight on the embedding-anchor MSE term, added UNWEIGHTED on top of the main loss.")
+    p.add_argument("--repr_teacher_hidden", default=None,
+                    help="precompute_teacher_targets.py --hidden_layers output .npz (a hidden_<layer> key) -- "
+                         "adds a cosine representation-distillation loss (dev_notes/indexed_attention_experiment_plan.md "
+                         "Q2) between an OutputStream's pre-head hidden state (at the SAME response-token "
+                         "positions already aligned for logit-KD) and a fixed random-projected Teacher hidden "
+                         "state. Requires --teacher_targets (reuses its span alignment), --repr_teacher_layer, "
+                         "and --repr_kd_weight > 0.")
+    p.add_argument("--val_repr_teacher_hidden", default=None,
+                    help="same as --repr_teacher_hidden, computed on --val_data instead.")
+    p.add_argument("--repr_teacher_layer", type=int, default=None,
+                    help="which hidden_<layer> key to read -- must match the --hidden_layers index used at "
+                         "precompute time (e.g. the Teacher's own num_hidden_layers for --hidden_layers last).")
+    p.add_argument("--repr_proj_dim", type=int, default=64,
+                    help="output dimension of the fixed random orthogonal projection applied to the Teacher's "
+                         "raw hidden states -- a learned nn.Linear maps each stream's d_model to this same dim.")
+    p.add_argument("--repr_kd_weight", type=float, default=0.0,
+                    help="target weight on the representation-distillation cosine loss, ramped linearly from 0 "
+                         "over --repr_kd_warmup_steps (spec Q2's 'montée en poids progressive').")
+    p.add_argument("--repr_kd_warmup_steps", type=int, default=1000,
+                    help="steps over which --repr_kd_weight ramps linearly from 0 -- avoids destabilizing early "
+                         "training with a rigid representation-matching constraint (FitNets/MiniLM literature "
+                         "risk, raw/Distill-reasonning-stream.md:446).")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--lr_warmup_steps", type=int, default=0)
     p.add_argument("--lr_warmup_init", type=float, default=None)
@@ -367,18 +408,23 @@ def main() -> None:
         tok.pad_token = tok.eos_token
     vocab_size = len(tok)
 
-    train_ds = build_dataset(args.dataset_type, args.data, tok, args, teacher_targets=args.teacher_targets)
+    train_ds = build_dataset(args.dataset_type, args.data, tok, args, teacher_targets=args.teacher_targets,
+                              repr_teacher_hidden=args.repr_teacher_hidden)
     print(f"loaded {len(train_ds)} {args.dataset_type} examples from {args.data}", flush=True)
     if train_ds.teacher is not None:
         print(f"loaded Teacher targets from {args.teacher_targets}: K={train_ds.teacher.k} -- "
               f"KD enabled, kd_alpha={args.kd_alpha}", flush=True)
+    if train_ds.repr_teacher is not None:
+        print(f"loaded repr-KD targets from {args.repr_teacher_hidden} (layer={args.repr_teacher_layer}, "
+              f"proj_dim={args.repr_proj_dim}) -- weight={args.repr_kd_weight}, warmup={args.repr_kd_warmup_steps}", flush=True)
     pin_memory = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                                num_workers=args.num_workers, pin_memory=pin_memory)
 
     val_loader = None
     if args.val_data:
-        val_ds = build_dataset(args.dataset_type, args.val_data, tok, args, teacher_targets=args.val_teacher_targets)
+        val_ds = build_dataset(args.dataset_type, args.val_data, tok, args, teacher_targets=args.val_teacher_targets,
+                                repr_teacher_hidden=args.val_repr_teacher_hidden)
         print(f"loaded held-out val: {len(val_ds)} examples from {args.val_data}", flush=True)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                                  num_workers=args.num_workers, pin_memory=pin_memory)
@@ -409,6 +455,25 @@ def main() -> None:
     raw_model = model  # unwrapped module -- state_dict() below always saves/loads THIS, so checkpoints stay
                         # compatible with eval_val_loss.py/etc. regardless of --compile (an OptimizedModule's
                         # own state_dict() has carried an "_orig_mod." key prefix on some torch versions).
+
+    embed_teacher_target = None
+    if args.embed_teacher_target:
+        assert args.embed_kd_weight > 0, "--embed_teacher_target has no effect without --embed_kd_weight > 0"
+        embed_teacher_target = torch.from_numpy(
+            np.load(args.embed_teacher_target)["embed_init"].astype(np.float32)
+        ).to(device)
+        print(f"Embedding-KD enabled: anchoring self.embed toward {args.embed_teacher_target} "
+              f"(weight={args.embed_kd_weight}, shape={tuple(embed_teacher_target.shape)})", flush=True)
+
+    repr_proj = None
+    if train_ds.repr_teacher is not None:
+        assert args.repr_kd_weight > 0, "--repr_teacher_hidden has no effect without --repr_kd_weight > 0"
+        # One shared adapter across streams (thinking/answer both have the same d_model) -- simplest
+        # option for this exploratory version; a per-stream adapter is a natural follow-up if useful.
+        repr_proj = torch.nn.Linear(args.d_model, args.repr_proj_dim).to(device)
+        print(f"Representation-KD enabled: repr_proj(d_model={args.d_model}->{args.repr_proj_dim}), "
+              f"weight={args.repr_kd_weight}, warmup={args.repr_kd_warmup_steps} steps", flush=True)
+
     if args.compile:
         model = torch.compile(model)
         print("torch.compile enabled -- first steps will be slower (compilation), watch for graph breaks", flush=True)
@@ -420,7 +485,10 @@ def main() -> None:
             return args.lr
         return lr_warmup_init + (args.lr - lr_warmup_init) * (step / args.lr_warmup_steps)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr_at(0), weight_decay=1e-2,
+    opt_params = list(model.parameters())
+    if repr_proj is not None:
+        opt_params = opt_params + list(repr_proj.parameters())
+    optimizer = torch.optim.AdamW(opt_params, lr=lr_at(0), weight_decay=1e-2,
                                    fused=(device.type == "cuda"))
     model.train()
 
@@ -443,31 +511,91 @@ def main() -> None:
                 target_input["thinking"] = batch["thinking_target_input"]
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16 and device.type == "cuda"):
+                # want_hidden: either repr-KD needs the pre-head state directly, or chunked CE/KD
+                # needs it to apply each stream's head chunk-by-chunk instead of all at once.
+                want_hidden = repr_proj is not None or args.loss_chunk_size > 0
                 if args.ingest_kb:
                     ingest_documents(model, batch, args.n_docs_max, args.block_size, args.ingest_n_step,
                                       use_checkpoint=args.ingest_checkpoint, step_size=args.ingest_step_size,
                                       n_step_min=args.ingest_n_step_min, n_step_max=args.ingest_n_step_max)
                     _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
-                                       target_input=target_input, kb_prebuilt=True)
+                                       target_input=target_input, kb_prebuilt=True, return_hidden=want_hidden)
                 else:
                     _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
-                                       kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input)
+                                       kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input, return_hidden=want_hidden)
+                # `streams` holds pre-head hidden states (B,T,d_model) when want_hidden, else logits
+                # (B,T,vocab) exactly as before -- hidden_streams is kept around for the repr-KD term
+                # below regardless of which of the two paths produced them.
+                hidden_streams = streams if want_hidden else None
 
-                ce_answer = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"], ignore_index=-100)
-                if args.dataset_type == "reasoning":
-                    ce_thinking = F.cross_entropy(streams["thinking"].transpose(1, 2), batch["thinking_labels"], ignore_index=-100)
-                    ce_loss = ce_answer + args.thinking_weight * ce_thinking
-                else:
-                    ce_thinking = None
-                    ce_loss = ce_answer
+                if args.loss_chunk_size > 0:
+                    def stream_ce_kd(name, labels_key):
+                        hidden = streams[name]
+                        flat_hidden = hidden.reshape(-1, hidden.size(-1))
+                        flat_labels = batch[labels_key].reshape(-1)
+                        head = raw_model.streams[name].head
+                        kd_kwargs = {}
+                        if train_ds.teacher is not None:
+                            k = train_ds.teacher.k
+                            kd_kwargs = dict(
+                                teacher_indices=batch[f"{name}_kd_indices"].reshape(-1, k),
+                                teacher_values=batch[f"{name}_kd_values"].reshape(-1, k),
+                                teacher_residual=batch[f"{name}_kd_residual"].reshape(-1),
+                                teacher_mask=batch[f"{name}_kd_mask"].reshape(-1),
+                            )
+                        return chunked_ce_kd_loss(flat_hidden, head, flat_labels, chunk_size=args.loss_chunk_size, **kd_kwargs)
 
-                if train_ds.teacher is not None:
-                    kd_answer, kd_thinking = kd_losses(streams, batch, args.dataset_type)
-                    kd_loss = kd_answer + args.thinking_weight * kd_thinking if kd_thinking is not None else kd_answer
-                    loss = (1 - args.kd_alpha) * ce_loss + args.kd_alpha * kd_loss
+                    ce_answer, kd_answer = stream_ce_kd("answer", "answer_labels")
+                    if args.dataset_type == "reasoning":
+                        ce_thinking, kd_thinking = stream_ce_kd("thinking", "thinking_labels")
+                        ce_loss = ce_answer + args.thinking_weight * ce_thinking
+                    else:
+                        ce_thinking = kd_thinking = None
+                        ce_loss = ce_answer
+                    if train_ds.teacher is not None:
+                        kd_loss = kd_answer + args.thinking_weight * kd_thinking if kd_thinking is not None else kd_answer
+                        loss = (1 - args.kd_alpha) * ce_loss + args.kd_alpha * kd_loss
+                    else:
+                        loss = ce_loss
                 else:
-                    kd_answer = kd_thinking = None
-                    loss = ce_loss
+                    logit_streams = (
+                        {name: raw_model.streams[name].head(h) for name, h in streams.items()}
+                        if want_hidden else streams
+                    )
+                    ce_answer = F.cross_entropy(logit_streams["answer"].transpose(1, 2), batch["answer_labels"], ignore_index=-100)
+                    if args.dataset_type == "reasoning":
+                        ce_thinking = F.cross_entropy(logit_streams["thinking"].transpose(1, 2), batch["thinking_labels"], ignore_index=-100)
+                        ce_loss = ce_answer + args.thinking_weight * ce_thinking
+                    else:
+                        ce_thinking = None
+                        ce_loss = ce_answer
+
+                    if train_ds.teacher is not None:
+                        kd_answer, kd_thinking = kd_losses(logit_streams, batch, args.dataset_type)
+                        kd_loss = kd_answer + args.thinking_weight * kd_thinking if kd_thinking is not None else kd_answer
+                        loss = (1 - args.kd_alpha) * ce_loss + args.kd_alpha * kd_loss
+                    else:
+                        kd_answer = kd_thinking = None
+                        loss = ce_loss
+
+                embed_kd_value = None
+                if embed_teacher_target is not None:
+                    embed_kd_value = embedding_kd_loss(raw_model.embed.weight, embed_teacher_target)
+                    loss = loss + args.embed_kd_weight * embed_kd_value
+
+                repr_kd_value = None
+                if repr_proj is not None:
+                    repr_terms = []
+                    for name in (["answer", "thinking"] if args.dataset_type == "reasoning" else ["answer"]):
+                        repr_mask_key = f"{name}_repr_mask"
+                        if repr_mask_key not in batch or not batch[repr_mask_key].any():
+                            continue
+                        student_proj = repr_proj(hidden_streams[name]).float()
+                        repr_terms.append(repr_cosine_loss(student_proj, batch[f"{name}_repr_target"], batch[repr_mask_key]))
+                    if repr_terms:
+                        repr_kd_value = torch.stack(repr_terms).mean()
+                        repr_kd_ramp = min(1.0, step / max(1, args.repr_kd_warmup_steps))
+                        loss = loss + repr_kd_ramp * args.repr_kd_weight * repr_kd_value
 
             for group in optimizer.param_groups:
                 group["lr"] = lr_at(step)
@@ -486,11 +614,20 @@ def main() -> None:
                     kd_extra = f" kd_answer={kd_answer.item():.4f}"
                     if kd_thinking is not None:
                         kd_extra += f" kd_thinking={kd_thinking.item():.4f}"
+                extra2 = ""
+                if embed_kd_value is not None:
+                    extra2 += f" embed_kd={embed_kd_value.item():.4f}"
+                if repr_kd_value is not None:
+                    extra2 += f" repr_kd={repr_kd_value.item():.4f}(w={repr_kd_ramp * args.repr_kd_weight:.4f})"
                 print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={mean_loss:.4f} "
-                      f"ce_answer={ce_answer.item():.4f}{extra}{kd_extra} lr={lr_at(step):.2e}", flush=True)
+                      f"ce_answer={ce_answer.item():.4f}{extra}{kd_extra}{extra2} lr={lr_at(step):.2e}", flush=True)
                 log_kwargs = {"kd_answer": kd_answer.item()} if kd_answer is not None else {}
                 if kd_thinking is not None:
                     log_kwargs["kd_thinking"] = kd_thinking.item()
+                if embed_kd_value is not None:
+                    log_kwargs["embed_kd"] = embed_kd_value.item()
+                if repr_kd_value is not None:
+                    log_kwargs["repr_kd"] = repr_kd_value.item()
                 logger.progress(step, loss=mean_loss, ce_answer=ce_answer.item(), lr=lr_at(step), **log_kwargs)
             if val_loader is not None and (step % args.val_every == 0 or step == 1):
                 val_losses = evaluate(model, val_loader, device, args.dataset_type, args.n_step,

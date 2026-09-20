@@ -194,9 +194,62 @@ def _kd_targets(teacher, kd_info, doc_id, t_max):
     return teacher.slice_span(doc_id, tok_start, n, t_max)
 
 
+class PromptResponseReprTargets:
+    """precompute_teacher_targets.py --hidden_layers output .npz (a
+    hidden_<layer> key), computed on the SAME jsonl's "text" field as
+    PromptResponseTeacherTargets (dev_notes/indexed_attention_experiment_plan.md
+    Q2, representation distillation). The raw Teacher hidden_size vector is
+    projected ONCE at load time via a FIXED random orthogonal projection
+    (never fit/trained, same primitive as extract_teacher_embed_init.py's
+    random_projection()) down to proj_dim -- keeps per-example slices small
+    and pays the projection cost once, not per epoch/example.
+
+    Reuses the SAME (tok_start, n) kd_info already computed by _resolve_span
+    for logit-KD (hence requires --teacher_targets to be set alongside this
+    -- see train_prompt_response.py) and the SAME q=tok_start+t-1 convention
+    as PromptResponseTeacherTargets.slice_span: Teacher row q is the
+    contextual representation right before predicting token q+1, matching
+    the student's own teacher-forced position t (which processes
+    embed(target_token_{t-1}) to predict token t)."""
+
+    def __init__(self, npz_path: str, layer: int, proj_dim: int = 64, seed: int = 0):
+        npz = np.load(npz_path)
+        key = f"hidden_{layer}"
+        assert key in npz, f"{npz_path!r} has no {key!r} -- available: {list(npz.keys())}"
+        raw = torch.from_numpy(npz[key].astype(np.float32))
+        g = torch.Generator().manual_seed(seed)
+        P = torch.empty(raw.shape[1], proj_dim, dtype=torch.float32)
+        torch.nn.init.orthogonal_(P, generator=g)
+        self.projected = (raw @ P).numpy().astype(np.float16)
+        self.offsets = npz["offsets"]
+        self.proj_dim = proj_dim
+
+    def slice_span(self, doc_id: int, tok_start: int, n: int, t_max: int):
+        out = torch.zeros(t_max, self.proj_dim, dtype=torch.float32)
+        mask = torch.zeros(t_max, dtype=torch.bool)
+        doc_start, doc_end = int(self.offsets[doc_id]), int(self.offsets[doc_id + 1])
+        n_doc = doc_end - doc_start
+        for t in range(min(n, t_max)):
+            q = tok_start + t - 1
+            if 0 <= q < n_doc:
+                out[t] = torch.from_numpy(self.projected[doc_start + q].astype(np.float32))
+                mask[t] = True
+        return out, mask
+
+
+def _repr_targets(repr_teacher, kd_info, doc_id, t_max):
+    if repr_teacher is None:
+        return None
+    if kd_info is None:
+        return torch.zeros(t_max, repr_teacher.proj_dim, dtype=torch.float32), torch.zeros(t_max, dtype=torch.bool)
+    tok_start, n = kd_info
+    return repr_teacher.slice_span(doc_id, tok_start, n, t_max)
+
+
 class ReasoningPromptDataset(Dataset):
     def __init__(self, path, tokenizer, n_ctx: int, max_thinking_len: int, max_answer_len: int, pad_id: int = None,
-                 teacher_targets: str = None, teacher_max_length: int = 4096):
+                 teacher_targets: str = None, teacher_max_length: int = 4096,
+                 repr_teacher_hidden: str = None, repr_teacher_layer: int = None, repr_proj_dim: int = 64, repr_seed: int = 0):
         self.tokenizer = tokenizer
         self.n_ctx = n_ctx
         self.max_thinking_len = max_thinking_len
@@ -206,6 +259,13 @@ class ReasoningPromptDataset(Dataset):
         if self.teacher is not None:
             assert tokenizer.is_fast, "--teacher_targets needs a fast tokenizer (return_offsets_mapping support)"
         self.teacher_max_length = teacher_max_length
+        assert repr_teacher_hidden is None or teacher_targets is not None, (
+            "--repr_teacher_hidden requires --teacher_targets to also be set (reuses its span alignment)"
+        )
+        self.repr_teacher = (
+            PromptResponseReprTargets(repr_teacher_hidden, repr_teacher_layer, repr_proj_dim, repr_seed)
+            if repr_teacher_hidden else None
+        )
         self.examples = []
         n_no_think_tag = 0
         n_total = 0
@@ -276,6 +336,15 @@ class ReasoningPromptDataset(Dataset):
                 "answer_kd_indices": ans_idx, "answer_kd_values": ans_val,
                 "answer_kd_residual": ans_res, "answer_kd_mask": ans_kmask,
             })
+        think_repr = _repr_targets(self.repr_teacher, think_kd_info, ex["doc_id"], self.max_thinking_len)
+        ans_repr = _repr_targets(self.repr_teacher, ans_kd_info, ex["doc_id"], self.max_answer_len)
+        if think_repr is not None:
+            think_repr_target, think_repr_mask = think_repr
+            ans_repr_target, ans_repr_mask = ans_repr
+            out.update({
+                "thinking_repr_target": think_repr_target, "thinking_repr_mask": think_repr_mask,
+                "answer_repr_target": ans_repr_target, "answer_repr_mask": ans_repr_mask,
+            })
         return out
 
 
@@ -314,7 +383,8 @@ class RetrievalPromptDataset(Dataset):
     """
 
     def __init__(self, path, tokenizer, block_size: int, n_docs_max: int, max_answer_len: int, pad_id: int = None,
-                 teacher_targets: str = None, teacher_max_length: int = 4096):
+                 teacher_targets: str = None, teacher_max_length: int = 4096,
+                 repr_teacher_hidden: str = None, repr_teacher_layer: int = None, repr_proj_dim: int = 64, repr_seed: int = 0):
         self.tokenizer = tokenizer
         self.block_size = block_size
         self.n_docs_max = n_docs_max
@@ -324,6 +394,15 @@ class RetrievalPromptDataset(Dataset):
         if self.teacher is not None:
             assert tokenizer.is_fast, "--teacher_targets needs a fast tokenizer (return_offsets_mapping support)"
         self.teacher_max_length = teacher_max_length
+        # spec Q2: reuses the SAME (tok_start, n) alignment as logit-KD, so it only makes
+        # sense (and is only wired) alongside --teacher_targets -- see PromptResponseReprTargets.
+        assert repr_teacher_hidden is None or teacher_targets is not None, (
+            "--repr_teacher_hidden requires --teacher_targets to also be set (reuses its span alignment)"
+        )
+        self.repr_teacher = (
+            PromptResponseReprTargets(repr_teacher_hidden, repr_teacher_layer, repr_proj_dim, repr_seed)
+            if repr_teacher_hidden else None
+        )
         self.examples = []
         n_truncated_docs = 0
         for doc_id, line in enumerate(open(path)):
@@ -416,4 +495,8 @@ class RetrievalPromptDataset(Dataset):
                 "answer_kd_indices": ans_idx, "answer_kd_values": ans_val,
                 "answer_kd_residual": ans_res, "answer_kd_mask": ans_kmask,
             })
+        ans_repr = _repr_targets(self.repr_teacher, ans_kd_info, ex["doc_id"], self.max_answer_len)
+        if ans_repr is not None:
+            ans_repr_target, ans_repr_mask = ans_repr
+            out.update({"answer_repr_target": ans_repr_target, "answer_repr_mask": ans_repr_mask})
         return out

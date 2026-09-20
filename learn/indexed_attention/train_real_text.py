@@ -56,7 +56,7 @@ from torch.utils.data import DataLoader
 from core.indexed_thinker_model import Thinker
 from core.model_families import resolve_model_name
 from core.run_logging import add_run_args, logger_from_args
-from learn.distill.train_sft import topk_kd_loss
+from learn.distill.train_sft import embedding_kd_loss, topk_kd_loss
 
 
 class TeacherTargets:
@@ -372,6 +372,13 @@ def main():
     p.add_argument("--kd_alpha", type=float, default=0.5,
                     help="loss = (1-kd_alpha)*ce + kd_alpha*kd, same convention as train_sft.py. Ignored "
                          "when --teacher_targets is not given (pure CE, prior behavior).")
+    p.add_argument("--embed_teacher_target", default=None,
+                    help="extract_teacher_embed_init.py .npz output (embed_init key) -- adds a CONTINUOUS "
+                         "MSE anchor pulling self.embed toward this fixed Teacher-projected target every "
+                         "step (spec §13.1/13.2's embed_init is a one-time copy-at-init only). Requires "
+                         "--embed_kd_weight > 0.")
+    p.add_argument("--embed_kd_weight", type=float, default=0.0,
+                    help="weight on the embedding-anchor MSE term, added UNWEIGHTED on top of the main loss.")
     p.add_argument("--max_steps", type=int, default=100000)
     p.add_argument("--max_time_minutes", type=float, default=15.0)
     p.add_argument("--log_every", type=int, default=20)
@@ -457,6 +464,15 @@ def main():
           f"t_tgt={args.t_tgt} n_lanes={args.n_lanes} pool_n_head={args.pool_n_head} k_dim={args.k_dim} "
           f"params={n_params/1e6:.2f}M device={device}", flush=True)
 
+    embed_teacher_target = None
+    if args.embed_teacher_target:
+        assert args.embed_kd_weight > 0, "--embed_teacher_target has no effect without --embed_kd_weight > 0"
+        embed_teacher_target = torch.from_numpy(
+            np.load(args.embed_teacher_target)["embed_init"].astype(np.float32)
+        ).to(device)
+        print(f"Embedding-KD enabled: anchoring self.embed toward {args.embed_teacher_target} "
+              f"(weight={args.embed_kd_weight}, shape={tuple(embed_teacher_target.shape)})", flush=True)
+
     lr_warmup_init = args.lr_warmup_init if args.lr_warmup_init is not None else args.lr / 10
     if args.lr_warmup_steps > 0:
         print(f"lr_warmup: {lr_warmup_init:.2e} -> {args.lr:.2e} over {args.lr_warmup_steps} steps, "
@@ -525,6 +541,11 @@ def main():
         else:
             loss = ce_loss
 
+        embed_kd_value = None
+        if embed_teacher_target is not None:
+            embed_kd_value = embedding_kd_loss(model.embed.weight, embed_teacher_target)
+            loss = loss + args.embed_kd_weight * embed_kd_value
+
         for group in optimizer.param_groups:
             group["lr"] = lr_at(step)
 
@@ -545,9 +566,12 @@ def main():
             mean_loss = sum(loss_hist[-args.log_every:]) / len(loss_hist[-args.log_every:])
             ppl = torch.exp(torch.tensor(mean_loss)).item()
             kd_str = f" ce={ce_loss.item():.4f} kd={kd_loss.item():.4f}" if teacher is not None else ""
-            print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={mean_loss:.4f} ppl={ppl:.2f}{kd_str} "
+            embed_str = f" embed_kd={embed_kd_value.item():.4f}" if embed_kd_value is not None else ""
+            print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={mean_loss:.4f} ppl={ppl:.2f}{kd_str}{embed_str} "
                   f"lr={lr_at(step):.2e} active_lanes={int(valid_f.sum().item())}/{args.n_lanes}", flush=True)
             log_kwargs = {"ce": ce_loss.item(), "kd": kd_loss.item()} if teacher is not None else {}
+            if embed_kd_value is not None:
+                log_kwargs["embed_kd"] = embed_kd_value.item()
             logger.progress(step, loss=mean_loss, ppl=ppl, lr=lr_at(step),
                             active_lanes=int(valid_f.sum().item()), **log_kwargs)
         if val_ds is not None and step % args.val_every == 0 and step > 0:
