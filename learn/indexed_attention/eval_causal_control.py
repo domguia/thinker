@@ -69,10 +69,16 @@ def shuffle_documents(batch, block_size: int, n_docs_max: int, target: str = "al
 
 
 @torch.no_grad()
-def run_eval(model, loader, device, block_size, n_docs_max, n_step, shuffle: str = None, n_batches=None):
-    """shuffle: None (real documents) / "all" / "supporting" / "distractor"."""
+def run_eval(model, loader, device, block_size, n_docs_max, n_step, shuffle: str = None, n_batches=None,
+             return_per_example: bool = False):
+    """shuffle: None (real documents) / "all" / "supporting" / "distractor".
+    return_per_example: also return a flat list of per-example mean CE (not just the
+    batch-mean loss) -- needed for a paired test between two conditions on the same
+    examples (model-design, 2026-09-20: a paired design has much more power than
+    comparing two independent batch-mean series)."""
     model.eval()
     losses = []
+    per_example = []
     for i, batch in enumerate(loader):
         if n_batches and i >= n_batches:
             break
@@ -85,7 +91,16 @@ def run_eval(model, loader, device, block_size, n_docs_max, n_step, shuffle: str
                             kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input)
         ce = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"], ignore_index=-100)
         losses.append(ce.item())
-    return sum(losses) / len(losses) if losses else float("nan")
+        if return_per_example:
+            per_tok = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"],
+                                       ignore_index=-100, reduction="none")
+            valid = (batch["answer_labels"] != -100)
+            n_valid = valid.sum(dim=1).clamp(min=1)
+            per_example.extend((per_tok.sum(dim=1) / n_valid).tolist())
+    mean_loss = sum(losses) / len(losses) if losses else float("nan")
+    if return_per_example:
+        return mean_loss, per_example
+    return mean_loss
 
 
 def main() -> None:
@@ -145,14 +160,31 @@ def main() -> None:
     print(f"degradation (all - real)            : {shuffled_all - real:.4f}", flush=True)
 
     if args.fine_grained:
-        shuffled_supporting = run_eval(model, val_loader, args.device, args.block_size, args.n_docs_max,
-                                        args.n_step, shuffle="supporting", n_batches=args.n_batches)
-        shuffled_distractor = run_eval(model, val_loader, args.device, args.block_size, args.n_docs_max,
-                                        args.n_step, shuffle="distractor", n_batches=args.n_batches)
+        shuffled_supporting, per_ex_supporting = run_eval(
+            model, val_loader, args.device, args.block_size, args.n_docs_max, args.n_step,
+            shuffle="supporting", n_batches=args.n_batches, return_per_example=True)
+        shuffled_distractor, per_ex_distractor = run_eval(
+            model, val_loader, args.device, args.block_size, args.n_docs_max, args.n_step,
+            shuffle="distractor", n_batches=args.n_batches, return_per_example=True)
         print(f"val_answer (supporting shuffled only) : {shuffled_supporting:.4f}", flush=True)
         print(f"val_answer (distractor shuffled only) : {shuffled_distractor:.4f}", flush=True)
         print(f"degradation (supporting - real)       : {shuffled_supporting - real:.4f}", flush=True)
         print(f"degradation (distractor - real)       : {shuffled_distractor - real:.4f}", flush=True)
+
+        # Paired test (model-design, 2026-09-20): per-example (supporting_loss - distractor_loss),
+        # much more powerful than comparing the two batch-mean series independently.
+        import statistics as st
+        diffs = [a - b for a, b in zip(per_ex_supporting, per_ex_distractor)]
+        n = len(diffs)
+        mean_diff = st.mean(diffs)
+        std_diff = st.stdev(diffs) if n > 1 else float("nan")
+        se_diff = std_diff / (n ** 0.5) if n > 1 else float("nan")
+        t_stat = mean_diff / se_diff if se_diff else float("nan")
+        print(f"paired diff (supporting_loss - distractor_loss), n={n}: "
+              f"mean={mean_diff:.4f} std={std_diff:.4f} se={se_diff:.4f} t={t_stat:.3f}", flush=True)
+        print(f"  (|t| > ~2 => difference unlikely to be noise at this n; "
+              f"positive mean => distractor corruption hurts LESS, i.e. supporting matters more)",
+              flush=True)
 
 
 if __name__ == "__main__":
