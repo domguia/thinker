@@ -190,3 +190,35 @@ Tous les leviers validés activés (bf16, compile, use_ff, fused AdamW par défa
 Demande `model-design` : même config EXACTE que le flagship, `--n_docs_max 0` (mémorisation pure), jeu complet 81k -- pour la comparaison finale flagship-vs-noctx à la même échelle (pas les runs à 18k, préliminaires). Lancé sur `abacus29-1` en parallèle, sans concurrence avec le flagship (`abacus22-1`).
 
 Premiers points val flagship (jeu complet) : step 1 (11.342), step 750 (6.800), step 1500 (6.362) -- débit réel ~5.3 pas/s en régime stable sur A40 (bien plus rapide que le smoke test sur A100, ~0.87 pas/s). Transmis à `model-design` pour extrapolation.
+
+## 2026-09-20 — Résultat majeur : l'inversion retrieval/noctx se REPRODUIT à l'échelle flagship (81k exemples)
+
+Points val des deux runs (flagship, jeu complet, KD réel) :
+
+**Flagship (retrieval)** :
+| step | val_answer | val_kd_answer |
+|---|---|---|
+| 750 | 6.800 | 5.636 |
+| 1500 | 6.362 | 5.260 |
+| 2250 | 6.124 | 5.075 |
+| 3000 | 5.969 | 4.927 |
+| 3750 | 5.879 | 4.824 |
+| 4500 | 5.862 | 4.837 |
+| 5250 | 5.828 | 4.804 |
+| 6000 | 5.823 | 4.787 |
+| 6750 | 5.802 | 4.762 |
+| 7500 | 5.833 | 4.808 |
+
+**noctx (même config, `n_docs_max=0`)** :
+| step | val_answer | val_kd_answer |
+|---|---|---|
+| 5250 | 5.980 | 4.937 |
+| 6000 | 6.022 | 4.933 |
+| 6750 | 6.032 | 4.968 |
+| 7500 | 6.109 | 5.025 |
+| ... | ... | ... |
+| 12000 | 6.764 | 5.602 |
+
+**Écart (retrieval-noctx) croissant** : -0.152 (5250) → -0.199 (6000) → -0.230 (6750) → -0.276 (7500).
+
+**Lecture** : l'inversion trouvée précédemment sur le petit jeu (18k, `d_model=256`) se REPRODUIT clairement à l'échelle du jeu complet (81k) -- retrieval commence à plateauner (~5.80-5.83 depuis step 4500) pendant que noctx régresse nettement (5.98→6.76 entre step 5250 et 12000, surapprentissage sévère et rapide malgré le jeu 4.5x plus grand). C'est le résultat le plus solide du fil entier : réplication à une échelle bien supérieure, avec KD réel, tous les leviers de vitesse actifs. Transmis à `model-design` pour l'extrapolation (8 points flagship disponibles).
