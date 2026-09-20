@@ -136,6 +136,8 @@ def main() -> None:
     p.add_argument("--pool_n_head", type=int, default=1)
     p.add_argument("--k_dim", type=int, default=None)
     p.add_argument("--answer_n_layers", type=int, default=1)
+    p.add_argument("--use_ff", action="store_true", help="must match the checkpoint's training config exactly")
+    p.add_argument("--ff_hidden_mult", type=int, default=4)
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--n_batches", type=int, default=None, help="cap eval batches; default = whole val set")
     p.add_argument("--fine_grained", action="store_true",
@@ -159,6 +161,7 @@ def main() -> None:
         vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
         pool_n_head=args.pool_n_head, k_dim=args.k_dim,
+        use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims={"answer": vocab_size}, stream_sequence={"answer": True},
         max_target_len=args.max_answer_len, stream_n_layers={"answer": args.answer_n_layers},
     ).to(args.device)
