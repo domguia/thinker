@@ -142,3 +142,18 @@ Retrains seed=1/seed=2 avec `--save_checkpoint_path` (même config, 24000 pas), 
 **Signe cohérent sur les 3 seeds indépendantes** (diff toujours négative : corrompre les distracteurs nuit systématiquement plus que corrompre le supporting). **Test poolé (pondération inverse-variance, 3×160=480 exemples) : mean=-0.0405, se=0.0167, t=-2.430** -- maintenant significatif (`|t|>2`), alors qu'aucune seed individuelle ne l'était clairement.
 
 **Conclusion (contraire à l'hypothèse "récupération ciblée" de `model-design`)** : le signal est réel et robuste maintenant (pas du bruit), mais dans le sens INVERSE de la récupération ciblée attendue -- corrompre les distracteurs nuit systématiquement un peu plus que corrompre l'évidence gold. Lecture la plus cohérente : le modèle est sensible à la présence de texte cohérent à *n'importe quelle* position documentaire (y compris les distracteurs, jamais utiles à la réponse), pas à une lecture sélective de l'évidence pertinente -- renforce fortement la lecture "structure/charge de calcul" pour l'essentiel de l'avantage retrieval sur noctx, pas une vraie récupération d'information ciblée. Relayé à `model-design`.
+
+## 2026-09-20 — CORRECTION CRITIQUE : le résultat "distracteurs nuisent plus" était un confond de comptage
+
+`model-design` a eu raison de questionner le comptage avant d'accepter la conclusion précédente. Vérifié : HotpotQA distractor config a en moyenne **2.000 documents supporting vs 7.960 distracteurs** par exemple (`n_docs_max=10`) -- la comparaison précédente ("corrompre supporting" vs "corrompre distracteurs") corrompait donc ~2 documents dans un cas et ~8 dans l'autre, confondant pertinence et simple quantité de contexte perturbé.
+
+**Contrôle apparié en nombre** (`shuffle_documents(target="distractor_matched")`, sélectionne aléatoirement exactement `is_supporting.sum()` distracteurs par exemple, au lieu de tous) refait sur les 3 mêmes checkpoints, diff appariée (supporting - distracteurs_appariés) :
+
+| seed | diff (comptage égal) | t |
+|---|---|---|
+| 0 | +0.0464 | 1.917 |
+| 1 | +0.0002 | 0.010 |
+| 2 | -0.0077 | -0.606 |
+| **poolé** | **+0.0031** | **0.315** |
+
+**Une fois le nombre de documents corrompus égalisé, l'écart disparaît complètement** (t=0.315, aucun signe cohérent entre seeds -- contraste total avec le t=-2.430 poolé et le signe cohérent négatif obtenu SANS appariement). **La conclusion de l'entrée précédente ("pas de ciblage, distracteurs nuisent plus") est ANNULÉE -- c'était entièrement un artefact du nombre inégal de documents corrompus, pas un vrai signal.** État correct actuel : **aucun effet détectable dans un sens ou l'autre** (ni ciblage net, ni sensibilité générale prouvée) à ce N/ces seeds, une fois le confond de comptage retiré. Ne pas citer l'entrée précédente sans ce correctif. Relayé à `model-design`.
