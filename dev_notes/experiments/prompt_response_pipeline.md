@@ -334,3 +334,11 @@ Warm-start reasoning : nouveau flag `--init_from_checkpoint` (commit ab7c563) va
 - référence sans levier, même budget étendu, pour comparaison propre — abacus21-1
 
 Objectif : écarter un effet de faible échantillon sur repr-KD avant intégration dans les runs principaux A/B/C, et trancher définitivement sur embed-anchor (contre-productif à 0.01 ; test à 0.1 pour voir si l'effet s'inverse ou s'aggrave).
+
+## 2026-09-20 — Incident lancement leviers KD : flags obsolètes + micromamba PATH
+
+Deux erreurs de lancement corrigées avant que les 3 runs (embed-anchor@0.1, repr-KD étendu, référence étendue) démarrent réellement :
+1. `micromamba` absent du PATH sous `oarsh` (frontend n'a pas non plus micromamba dans son PATH par défaut) → chemin complet `~/micromamba/micromamba` requis.
+2. `--train_file`/`--val_file` n'existent pas dans `train_prompt_response.py` (vérifié via `--help`) → les vrais flags sont `--data`/`--val_data`.
+
+Runs actifs après correction : embed01 (abacus3-1, ~5.5 steps/s), repr_long (abacus29-1, ~5.7 steps/s, repr_kd loss descend 0.97→0.56 sur les 680 premiers pas), ref_long (abacus21-1, ~7.2 steps/s -- notablement plus rapide que repr_long, cohérent avec l'overhead attendu du repr_proj).
