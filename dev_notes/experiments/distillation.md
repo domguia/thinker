@@ -279,3 +279,7 @@ Fix `a71f729` synchronisé, run KD retrieval tué et relancé (checkpoint préc�
 ## 2026-09-20 — Diagnostic d'alignement retrieval après fix: 18000/18000 (100%)
 
 Confirme le fix `a71f729` de bout en bout : `RetrievalPromptDataset`, train, 18000 exemples -- **18000/18000 answer spans alignés (100%)**, contre 0/18000 avant. Exactement la prédiction de `model-design` (retrieval devait aligner presque parfaitement puisque `answer` y est verbatim, une fois la comparaison faite correctement). Run KD retrieval bénéficie maintenant d'un vrai signal KD sur 100% des exemples, pas de fallback CE résiduel à surveiller sur ce dataset.
+
+## 2026-09-20 — KD run retrieval complet (8000/8000 pas): fort surapprentissage
+
+`train_prompt_response.py --dataset_type retrieval --kd_alpha 0.5`, alignement KD 100% (fix confirmé). **Train `final_loss=2.07`, mais VAL `answer=7.54` (kd_answer=6.39) au step final** -- écart train/val massif, signe de surapprentissage marqué à ce budget (8000 pas, `d_model=1024`, pas de KD sur `thinking` ici puisque retrieval n'a qu'un stream `answer`). Le signal KD réel (confirmé actif) n'empêche pas l'écart -- à surveiller si un budget plus court ou une régularisation serait nécessaire avant de tirer des conclusions sur l'utilité du KD lui-même pour cette tâche.
