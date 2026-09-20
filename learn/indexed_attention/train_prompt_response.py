@@ -185,6 +185,13 @@ def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: 
     losses = {k: [] for k in keys}
     if teacher_enabled:
         losses.update({f"kd_{k}": [] for k in keys})
+    # §8ter multi-hop protocol (2026-09-20, long-term-memory-builder): pooled val_answer mixes
+    # trivial (1 doc suffices) and genuinely multi-hop (>=2 docs needed) questions -- an ingestion
+    # advantage, if real, can only show up in the second group. Per-EXAMPLE loss (not just the
+    # batch mean) is needed to split by num_hops, so this always accumulates sum/count separately
+    # from the pooled `losses["answer"]` above rather than replacing it.
+    hop_loss_sum = {"ge2": 0.0, "le1": 0.0}
+    hop_loss_count = {"ge2": 0, "le1": 0}
     for i, batch in enumerate(loader):
         if i >= n_batches:
             break
@@ -204,6 +211,18 @@ def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: 
                                 kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input)
         ce_answer = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"], ignore_index=-100)
         losses["answer"].append(ce_answer.item())
+        if dataset_type == "retrieval" and "num_hops" in batch:
+            per_tok = F.cross_entropy(streams["answer"].transpose(1, 2), batch["answer_labels"],
+                                       ignore_index=-100, reduction="none")  # (B, T)
+            valid = (batch["answer_labels"] != -100)
+            n_valid = valid.sum(dim=1).clamp(min=1)
+            per_example = per_tok.sum(dim=1) / n_valid  # (B,) mean CE per example
+            has_answer = valid.any(dim=1)
+            for group, sel in (("ge2", batch["num_hops"] >= 2), ("le1", (batch["num_hops"] >= 0) & (batch["num_hops"] <= 1))):
+                sel = sel & has_answer
+                if sel.any():
+                    hop_loss_sum[group] += per_example[sel].sum().item()
+                    hop_loss_count[group] += sel.sum().item()
         if dataset_type == "reasoning":
             ce_thinking = F.cross_entropy(streams["thinking"].transpose(1, 2), batch["thinking_labels"], ignore_index=-100)
             losses["thinking"].append(ce_thinking.item())
@@ -213,7 +232,13 @@ def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: 
             if kd_thinking is not None:
                 losses["kd_thinking"].append(kd_thinking.item())
     model.train()
-    return {k: (sum(v) / len(v) if v else float("nan")) for k, v in losses.items()}
+    out = {k: (sum(v) / len(v) if v else float("nan")) for k, v in losses.items()}
+    if dataset_type == "retrieval":
+        for group in ("ge2", "le1"):
+            out[f"answer_hops_{group}"] = (hop_loss_sum[group] / hop_loss_count[group]
+                                            if hop_loss_count[group] else float("nan"))
+            out[f"answer_hops_{group}_n"] = hop_loss_count[group]
+    return out
 
 
 def main() -> None:

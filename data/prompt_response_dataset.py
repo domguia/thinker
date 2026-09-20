@@ -345,6 +345,10 @@ class RetrievalPromptDataset(Dataset):
             self.examples.append({
                 "question": row["question"], "docs": docs, "answer": str(row["answer"]),
                 "doc_id": doc_id, "text": row.get("text"),
+                # -1 = unknown (data generated before num_hops was added to prepare_retrieval_data.py) --
+                # kept distinct from real hop counts (>=0) so downstream stratification (e.g.
+                # num_hops>=2 vs <=1, §8ter multi-hop protocol) can exclude unknowns explicitly.
+                "num_hops": row.get("num_hops", -1),
             })
         if n_truncated_docs:
             print(f"WARNING: {n_truncated_docs}/{len(self.examples)} examples in {path} had more than "
@@ -394,6 +398,7 @@ class RetrievalPromptDataset(Dataset):
         out = {
             "kb_tokens": kb_tokens, "kb_source_ids": kb_source_ids, "kb_leaf_mask": kb_leaf_mask,
             "answer_target_input": ans_input, "answer_labels": ans_labels,
+            "num_hops": torch.tensor(ex["num_hops"], dtype=torch.long),
         }
         ans_kd = _kd_targets(self.teacher, ans_kd_info, ex["doc_id"], self.max_answer_len)
         if ans_kd is not None:
