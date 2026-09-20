@@ -305,3 +305,11 @@ Demandé par `model-design` (priorité 1/4, urgent) : reprise du log complet `kd
 - `kd_answer`/`kd_thinking` suivent le même motif plat (~5.06-5.18 et ~3.29-3.41 respectivement).
 
 **Lecture** : contrairement au run retrieval (surapprentissage net train/val), pas de signal d'instabilité ici, mais aussi peu de variation avec le nombre d'itérations à l'inférence -- cohérent avec le signal déjà observé pour `answer` sur un run antérieur plus court (stream remarquablement plat). `thinking` a ici un léger minimum à `n_step_test=6` (=celui d'entraînement), pas aux extrêmes, contrairement à avant où `thinking` était plus variable -- possible que le budget de pas plus long (5360 vs le run antérieur bien plus court) ait stabilisé ce stream. Pas de comparaison train/val loss directe ici (val_loader utilisé seulement pour ces extrapolations, pas de courbe val_answer/val_thinking au cours de l'entraînement rapportée séparément dans ce run).
+
+## 2026-09-20 — Chantier 3 (scale-up jeux complets) : préparation lancée
+
+Demande `model-design` (priorité 3/4) : precompute Teacher sur les jeux complets (reasoning ~38-45k au lieu de 8000/18000, hotpotqa ~90k au lieu de 18000) pour attaquer la mémorisation à la racine plutôt que par régularisation seule (suite au diagnostic mémorisation générale ci-dessus). Génération lancée sur `abacus17-1` GPU0 (CPU streaming HF, pas besoin de GPU dédié pour cette étape) :
+- `learn/distill/prepare_reasoning_data.py --n_samples 45000 --out_dir data/distill/openr1_math_full` (vise ~38k gardés après filtrage, cohérent avec le chiffre historique).
+- `learn/distill/prepare_retrieval_data.py --n_samples 90000 --out_dir data/distill/hotpotqa_full`.
+
+Étape suivante une fois la génération terminée : precompute Teacher Top-K32 (LFM2-1.2B) à cette échelle -- goulot d'étranglement attendu (~3 ex/s historique sur L40S/H100, ≈5h pour ~130k exemples au total train+val) -- shard sur plusieurs GPU Ada/Hopper en parallèle comme d'habitude une fois les fichiers prêts.
