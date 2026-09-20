@@ -128,3 +128,17 @@ Ajout de `is_supporting` (booléen par document, aligné sur `context_docs`) à 
 Demande `model-design` (vérification à coût nul avant de relancer une graine) : pertes par exemple (160, mêmes exemples pour les deux conditions), différence appariée (`supporting_loss - distractor_loss`) :
 
 **mean=-0.0269, std=0.3749, se=0.0296, t=-0.907** -- `|t| < 2`, l'écart de 0.019 observé sur les moyennes n'est PAS distinguable du bruit à cet effectif (std inter-exemple ~0.37, bien plus grand que l'écart lui-même). **Conclusion : ni "récupération ciblée" ni "signal inverse" ne sont soutenus par les données actuelles -- le résultat est simplement non concluant à n=160/1 seed**, pas un signal négatif fiable comme suggéré précédemment (formulation à corriger : ne pas dire "légèrement inverse", dire "indistinguable"). Réplication multi-seed nécessaire pour trancher -- MAIS les checkpoints seed=1/seed=2 de l'extension 24k n'ont pas été sauvegardés (`--save_checkpoint_path` seulement passé pour seed=0) : une réplication nécessiterait soit un retrain avec sauvegarde (~20 min/seed sur A100), soit se limiter au résultat actuel comme non concluant. Relayé à `model-design` pour arbitrage.
+
+## 2026-09-20 — Réplication multi-seed du contrôle fin : signal poolé significatif, TOUJOURS pas de ciblage
+
+Retrains seed=1/seed=2 avec `--save_checkpoint_path` (même config, 24000 pas), contrôle causal fin (`eval_causal_control.py --fine_grained`) appliqué aux 3 checkpoints :
+
+| seed | val réel | dégr. supporting | dégr. distracteur | diff appariée (supporting-distracteur) | t (n=160) |
+|---|---|---|---|---|---|
+| 0 | 5.6053 | 0.0553 | 0.0746 | -0.0269 | -0.908 |
+| 1 | 5.7814 | 0.0040 | 0.0737 | -0.0430 | -1.012 |
+| 2 | 5.6793 | -0.0087 | 0.0184 | -0.0478 | -2.091 |
+
+**Signe cohérent sur les 3 seeds indépendantes** (diff toujours négative : corrompre les distracteurs nuit systématiquement plus que corrompre le supporting). **Test poolé (pondération inverse-variance, 3×160=480 exemples) : mean=-0.0405, se=0.0167, t=-2.430** -- maintenant significatif (`|t|>2`), alors qu'aucune seed individuelle ne l'était clairement.
+
+**Conclusion (contraire à l'hypothèse "récupération ciblée" de `model-design`)** : le signal est réel et robuste maintenant (pas du bruit), mais dans le sens INVERSE de la récupération ciblée attendue -- corrompre les distracteurs nuit systématiquement un peu plus que corrompre l'évidence gold. Lecture la plus cohérente : le modèle est sensible à la présence de texte cohérent à *n'importe quelle* position documentaire (y compris les distracteurs, jamais utiles à la réponse), pas à une lecture sélective de l'évidence pertinente -- renforce fortement la lecture "structure/charge de calcul" pour l'essentiel de l'avantage retrieval sur noctx, pas une vraie récupération d'information ciblée. Relayé à `model-design`.
