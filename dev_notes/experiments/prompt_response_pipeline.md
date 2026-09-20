@@ -169,3 +169,18 @@ Demande `model-design` : `d_model ∈ {64,128,256}`, retrieval, `n_step=4, batch
 | 256 | 5.346 | 5.601 |
 
 **Lecture** : amélioration monotone et régulière avec la capacité, pas encore de signe de plateau/effondrement même à `d_model=64` (le plus petit testé) -- la tâche continue de bénéficier de plus de capacité jusqu'à 256 au moins. Pas de seuil de collapse identifié dans cette plage ; `d_model=32` ou plus bas serait nécessaire pour trouver où le signal disparaît, si utile pour accélérer les futures expériences. Relayé à `model-design`.
+
+## 2026-09-20 — Run flagship (P0) lancé : jeu complet, KD réel, tous les leviers
+
+Chantier 3 terminé, fusion des shards (`merge_teacher_shards.py`) sur `abacus22-1` (503GB RAM, nécessaire -- la fusion a échoué avec exit 137 sur le frontend Rennes, relancée sur nœud de calcul) : `hotpotqa_full/train_topk32.npz` (81000 exemples, 114.7M tokens), `openr1_math_full/train_topk32.npz` (35011 exemples).
+
+**Note opérationnelle** : job besteffort `4122588` (tenait `abacus17-1/18-1/11-1`) évincé pendant la fusion -- perte de connexion, mais aucune donnée perdue (NFS partagé). Basculé sur `abacus22-1`/`abacus29-1` (job `4122831`, déjà tenu, libres).
+
+**Run flagship lancé** sur `abacus22-1` (A40, 46GB) :
+```
+train_prompt_response.py --dataset_type retrieval --data hotpotqa_full/train.jsonl --val_data hotpotqa_full/val.jsonl \
+  --teacher_targets hotpotqa_full/train_topk32.npz --val_teacher_targets hotpotqa_full/val_topk32.npz --kd_alpha 0.5 \
+  --d_model 256 --n_head 4 --n_step 4 --use_ff --batch_size 128 --bf16 --compile --num_workers 4 --lr 3e-4 \
+  --val_every 750 --max_time_minutes 240 --save_best_checkpoint_path checkpoints/flagship_best.pt --seed 0
+```
+Tous les leviers validés activés (bf16, compile, use_ff, fused AdamW par défaut, num_workers). Budget mural ~4h, meilleur checkpoint conservé en continu. Confirmé actif sur GPU. Résultats à suivre, points val transmis à `model-design` au fil de l'eau.
