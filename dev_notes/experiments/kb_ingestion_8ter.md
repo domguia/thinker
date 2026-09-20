@@ -14,3 +14,19 @@ Code de `ff2attn` (non committé au moment de la demande, relu en détail avant 
 - Loss initiale du premier pas comparable entre les deux runs (11.49 vs 11.68) -- pas de signe d'instabilité numérique dès le départ.
 
 **Pas encore fait** : une vraie comparaison de convergence (nécessite un budget de pas beaucoup plus long, et probablement du GPU plutôt que CPU vu le coût x7 -- à relancer avec plus de temps/sur GPU une fois qu'une capacité adaptée se libère). Runs laissés tourner en arrière-plan pour glaner quelques pas de plus avant la fin du budget de 12 min.
+
+## 2026-09-20 — Résultats des tests précédents + nouveaux tests (checkpoint, step_size)
+
+**Tests précédents (baseline §8 vs --ingest_kb, budget 12 min épuisé)** :
+- `--ingest_kb --ingest_n_step 3` : 16 pas, `final_loss=9.58`.
+- baseline §8 : 168 pas, `final_loss=7.23`.
+
+Baseline fait ~10x plus de pas dans le même budget mural et atteint une loss nettement plus basse -- cohérent avec le ratio de coût déjà mesuré (~7-10x), mais c'est une comparaison à budget mural égal, pas à nombre de pas égal (confond attendu, signalé par `ff2attn` comme la vraie question à trancher séparément).
+
+**Relu le nouveau diff de `ff2attn` (checkpointing + n_step dérivé de la longueur), additif et propre, commité (`2105c57`), synchronisé.**
+
+**`--ingest_kb --ingest_checkpoint` (batch_size doublé, 16 au lieu de 8)** : step 1 en 41.3s -- comparable au test original à batch_size=8 (46.6s) malgré le batch deux fois plus gros. Signal cohérent avec l'attente (mémoire libérée permet un plus gros batch sans ralentissement proportionnel), mais pas encore poussé jusqu'à trouver la limite OOM réelle sans le flag pour confirmer le gain quantitativement.
+
+**`--ingest_kb --ingest_step_size 8 --ingest_n_step_max 3`** : step 1 en 18.7s -- nettement plus rapide que `--ingest_n_step 3` fixe (46.6s), cohérent avec l'attente (documents courts coûtent moins cher).
+
+**Toujours pas de vraie comparaison de convergence longue** -- les deux nouveaux tests tournent avec le même budget court (10 min CPU) pour une première vérification "ça tourne, coût cohérent". La priorité annoncée par `ff2attn` (comparaison de convergence sur un nombre de pas comparable) reste à faire, idéalement sur GPU vu le coût x7-10.
