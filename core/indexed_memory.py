@@ -384,6 +384,37 @@ class HierarchicalMemory(nn.Module):
         self._levels_v.append(V)
         self._levels_mask.append(mask if mask is not None else torch.ones(B, S, dtype=torch.bool, device=K.device))
 
+    def _attend_kv(self, query_input: torch.Tensor, k_all: torch.Tensor, v_all: torch.Tensor,
+                   mask_all: torch.Tensor) -> torch.Tensor:
+        """
+        Stateless tail shared by attend() and attend_static() -- everything
+        after "levels normalized/concatenated into one (k_all, v_all,
+        mask_all)". No reference to self._levels_* here, so this is safe to
+        call with tensors that are NOT (and never become) this memory's own
+        state (spec §8ter's attend_static needs exactly that property, see
+        its docstring).
+        """
+        B, T, _ = query_input.shape
+        q = self.q_proj(query_input)  # (B, T, k_dim) -- may differ from d_model, see k_dim (spec §5.4)
+        S = k_all.shape[1]
+
+        if self.n_head > 1:
+            # k_dim (Q/K) and d_model (V) can differ (§5.4) -- SDPA supports
+            # Ev != Eqk natively, but the per-head split size must be computed
+            # from EACH tensor's own last dim, not a single shared `hd`.
+            hd_qk = self.k_dim // self.n_head
+            hd_v = self.d_model // self.n_head
+            q_h = q.view(B, T, self.n_head, hd_qk).transpose(1, 2)
+            k_h = k_all.view(B, S, self.n_head, hd_qk).transpose(1, 2)
+            v_h = v_all.view(B, S, self.n_head, hd_v).transpose(1, 2)
+            attn_mask = mask_all.view(B, 1, 1, S)
+            out = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=attn_mask)
+            out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
+        else:
+            attn_mask = mask_all.view(B, 1, S)
+            out = F.scaled_dot_product_attention(q, k_all, v_all, attn_mask=attn_mask)
+        return out
+
     def attend(self, query_input: torch.Tensor) -> torch.Tensor:
         """
         query_input: (B, T, d) raw register state (pre Q-projection).
@@ -416,23 +447,38 @@ class HierarchicalMemory(nn.Module):
                     levels_mask[i] = torch.zeros_like(levels_mask[i])
         mask_all = torch.cat(levels_mask, dim=1)  # (B, S) bool, True = attend
 
-        B, T, _ = query_input.shape
-        q = self.q_proj(query_input)  # (B, T, k_dim) -- may differ from d_model, see k_dim (spec §5.4)
-        S = k_all.shape[1]
+        return self._attend_kv(query_input, k_all, v_all, mask_all)
 
-        if self.n_head > 1:
-            # k_dim (Q/K) and d_model (V) can differ (§5.4) -- SDPA supports
-            # Ev != Eqk natively, but the per-head split size must be computed
-            # from EACH tensor's own last dim, not a single shared `hd`.
-            hd_qk = self.k_dim // self.n_head
-            hd_v = self.d_model // self.n_head
-            q_h = q.view(B, T, self.n_head, hd_qk).transpose(1, 2)
-            k_h = k_all.view(B, S, self.n_head, hd_qk).transpose(1, 2)
-            v_h = v_all.view(B, S, self.n_head, hd_v).transpose(1, 2)
-            attn_mask = mask_all.view(B, 1, 1, S)
-            out = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=attn_mask)
-            out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
-        else:
-            attn_mask = mask_all.view(B, 1, S)
-            out = F.scaled_dot_product_attention(q, k_all, v_all, attn_mask=attn_mask)
-        return out
+    def attend_static(self, query_input: torch.Tensor, K: torch.Tensor, V: torch.Tensor,
+                       mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        Spec §8ter -- STATELESS counterpart to attend()/add_static_level(),
+        added specifically so `Thinker.ingest()` can be wrapped in
+        `torch.utils.checkpoint.checkpoint()` safely.
+
+        Why this exists (bug avoided, not just an alternative API): ingest()
+        used to call `self.memory.attend(R)` to see documents already
+        ingested earlier in the same batch, i.e. it read `self.memory`'s
+        MUTABLE state at call time. `torch.utils.checkpoint` re-runs the
+        wrapped function during backward() to recompute activations it
+        didn't keep -- but by then `self.memory` may hold a DIFFERENT set of
+        levels (more documents added since, or cleared for the next batch),
+        so the recomputed activations would silently differ from the
+        original forward's, corrupting the gradient. Making ingest() read
+        only its own explicit tensor arguments (K, V, mask here, passed by
+        the caller as whatever was ingested so far) removes that dependency:
+        the recomputed forward is byte-for-byte the same computation
+        regardless of what happened to `self.memory` afterward.
+
+        K/V/mask: (B, S, ...) already-ingested documents' concatenated
+            (sm_k, sm_v, mask) -- S == 0 (empty tensors) is valid and means
+            "nothing ingested yet" (returns zeros, mirrors attend()'s
+            equivalent empty-levels case).
+        """
+        B, T, d = query_input.shape
+        if K.shape[1] == 0:
+            return torch.zeros(B, T, d, device=query_input.device, dtype=query_input.dtype)
+        k_all = self.static_level_norm(K)
+        mask_all = mask if mask is not None else torch.ones(
+            K.shape[0], K.shape[1], dtype=torch.bool, device=K.device)
+        return self._attend_kv(query_input, k_all, V, mask_all)

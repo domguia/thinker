@@ -85,7 +85,29 @@ def kd_losses(streams, batch, dataset_type: str):
     return kd_answer, kd_thinking
 
 
-def ingest_documents(model, batch, n_docs_max: int, block_size: int, n_step_ingest: int) -> None:
+def ingest_n_step_for(doc_leaf_mask: torch.Tensor, step_size: int, n_step_min: int, n_step_max: int) -> int:
+    """
+    Spec §8ter "grand volume" discussion, option B (2026-09-20, user decision:
+    implement this simple length-based rule now, keep the density-based
+    version (§8ter's [OUVERT] "densité d'information") as a separate research
+    thread, not blocking this). One n_step PER DOCUMENT SLOT (not per
+    example) -- ingest() processes the whole batch for a slot in one call, so
+    real length is reduced to the batch's max real length for that slot, a
+    coarse approximation deliberately kept simple rather than padding/masking
+    a per-example n_step (which ingest()'s fixed-iteration-count loop can't
+    express without a much larger refactor).
+
+    doc_leaf_mask: (B, block_size) bool for this one document slot.
+    step_size: real tokens "worth" one ingestion iteration.
+    """
+    real_len = int(doc_leaf_mask.sum(dim=1).max().item())
+    n = -(-real_len // step_size)  # ceil
+    return max(n_step_min, min(n_step_max, n))
+
+
+def ingest_documents(model, batch, n_docs_max: int, block_size: int, n_step_ingest: int,
+                      use_checkpoint: bool = False, step_size: int = None,
+                      n_step_min: int = 1, n_step_max: int = None) -> None:
     """
     Spec §8ter, MVP (intra-batch only, no inter-batch cache -- 2026-09-20 user
     decision to build the minimal version first): runs each document block of
@@ -95,11 +117,15 @@ def ingest_documents(model, batch, n_docs_max: int, block_size: int, n_step_inge
     injects the resulting (K, V) as one extra memory level per document via
     `add_static_level`.
 
-    Ingested in document order with the memory left populated between calls
-    (user's 2026-09-20 choice: KB access stays ON during ingestion), so
+    Ingested in document order, threading each document's own (sm_k, sm_v,
+    mask) forward as the NEXT document's `prior_k`/`prior_v`/`prior_mask`
+    (2026-09-20 checkpoint-safety fix -- ingest() no longer reads
+    self.memory's mutable state, see Thinker.ingest's docstring) -- so
     document i's ingestion pass can attend to documents 0..i-1 already
-    ingested earlier in this same call -- not to documents after it, nor
-    (in this MVP) to any other example's documents.
+    ingested earlier in this same call, not to documents after it, nor
+    (in this MVP) to any other example's documents. `self.memory` itself is
+    only populated with add_static_level AFTER all documents are ingested,
+    for the QA forward pass to read.
 
     A document slot that is fully padding for every example in the batch
     (RetrievalPromptDataset masks out missing documents when an example has
@@ -108,16 +134,30 @@ def ingest_documents(model, batch, n_docs_max: int, block_size: int, n_step_inge
     ingested (padding rows produce garbage KV for the examples missing it),
     but `add_static_level`'s mask marks those examples' entries as unreal so
     `attend()`'s softmax never reads them.
+
+    step_size (None = disabled, use the fixed n_step_ingest for every slot):
+    when set, each document slot's n_step is derived from its own real
+    length instead of being fixed (see ingest_n_step_for) -- n_step_max
+    defaults to n_step_ingest when step_size is set and n_step_max is None.
     """
     model.memory.clear()
+    prior_k = prior_v = prior_mask = None
     for i in range(n_docs_max):
         start = i * block_size
         doc_tokens = batch["kb_tokens"][:, start:start + block_size]
-        doc_present = batch["kb_leaf_mask"][:, start:start + block_size].any(dim=1)  # (B,)
+        doc_leaf_mask = batch["kb_leaf_mask"][:, start:start + block_size]
+        doc_present = doc_leaf_mask.any(dim=1)  # (B,)
         if not doc_present.any():
             continue
-        sm_k, sm_v = model.ingest(doc_tokens, n_step_ingest)
+        n_step = n_step_ingest
+        if step_size is not None:
+            n_step = ingest_n_step_for(doc_leaf_mask, step_size, n_step_min, n_step_max or n_step_ingest)
+        sm_k, sm_v = model.ingest(doc_tokens, n_step, prior_k=prior_k, prior_v=prior_v,
+                                   prior_mask=prior_mask, use_checkpoint=use_checkpoint)
         mask = doc_present.unsqueeze(1).expand(-1, sm_k.shape[1])
+        prior_k = sm_k if prior_k is None else torch.cat([prior_k, sm_k], dim=1)
+        prior_v = sm_v if prior_v is None else torch.cat([prior_v, sm_v], dim=1)
+        prior_mask = mask if prior_mask is None else torch.cat([prior_mask, mask], dim=1)
         model.memory.add_static_level(sm_k, sm_v, mask=mask)
 
 
@@ -138,7 +178,8 @@ def query_tokens_for(dataset_type: str, batch, block_size: int):
 @torch.no_grad()
 def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: int, n_batches: int = 20,
              teacher_enabled: bool = False, ingest_kb: bool = False, n_docs_max: int = 0,
-             ingest_n_step: int = 3):
+             ingest_n_step: int = 3, ingest_checkpoint: bool = False, ingest_step_size: int = None,
+             ingest_n_step_min: int = 1, ingest_n_step_max: int = None):
     model.eval()
     keys = ["answer", "thinking"] if dataset_type == "reasoning" else ["answer"]
     losses = {k: [] for k in keys}
@@ -153,7 +194,9 @@ def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: 
         if dataset_type == "reasoning":
             target_input["thinking"] = batch["thinking_target_input"]
         if ingest_kb:
-            ingest_documents(model, batch, n_docs_max, block_size, ingest_n_step)
+            ingest_documents(model, batch, n_docs_max, block_size, ingest_n_step,
+                              use_checkpoint=ingest_checkpoint, step_size=ingest_step_size,
+                              n_step_min=ingest_n_step_min, n_step_max=ingest_n_step_max)
             _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, n_step,
                                 target_input=target_input, kb_prebuilt=True)
         else:
@@ -206,8 +249,27 @@ def main() -> None:
                          "HierarchicalMemory.build()'s direct k_proj/v_proj projection. MVP: intra-batch "
                          "only, no inter-batch cache -- every document is re-ingested every batch.")
     p.add_argument("--ingest_n_step", type=int, default=3,
-                    help="--ingest_kb only: number of recurrent iterations used to ingest EACH document "
-                         "(independent of --n_step, which is the QA pass's iteration count).")
+                    help="--ingest_kb only: fixed number of recurrent iterations used to ingest EACH "
+                         "document (independent of --n_step, the QA pass's iteration count). Also the "
+                         "CAP used by --ingest_step_size when --ingest_n_step_max is not set.")
+    p.add_argument("--ingest_step_size", type=int, default=None,
+                    help="--ingest_kb only, spec §8ter option B (2026-09-20): when set, n_step for each "
+                         "document slot is derived from that slot's real length instead of being fixed "
+                         "to --ingest_n_step -- ceil(real_len / ingest_step_size), clamped to "
+                         "[--ingest_n_step_min, --ingest_n_step_max]. Unset (default): every document "
+                         "uses the fixed --ingest_n_step, regardless of length.")
+    p.add_argument("--ingest_n_step_min", type=int, default=1)
+    p.add_argument("--ingest_n_step_max", type=int, default=None,
+                    help="defaults to --ingest_n_step when --ingest_step_size is set.")
+    p.add_argument("--ingest_checkpoint", action="store_true",
+                    help="--ingest_kb only, spec §8ter option A (2026-09-20): wraps each document's "
+                         "model.ingest() call in torch.utils.checkpoint.checkpoint() to avoid keeping "
+                         "every ingested document's activations resident for the rest of the batch's "
+                         "forward pass -- trades memory for a backward-time recompute. Safe because "
+                         "ingest() is a pure function of its explicit (doc_tokens, prior_k, prior_v, "
+                         "prior_mask) arguments, not of self.memory's mutable state (see Thinker.ingest's "
+                         "docstring). Numerically identical to the default, just different memory/compute "
+                         "tradeoff -- use when --ingest_kb runs out of memory with many/long documents.")
     p.add_argument("--use_ff", action="store_true")
     p.add_argument("--ff_hidden_mult", type=int, default=4)
     p.add_argument("--thinking_weight", type=float, default=1.0,
@@ -326,7 +388,9 @@ def main() -> None:
                 target_input["thinking"] = batch["thinking_target_input"]
 
             if args.ingest_kb:
-                ingest_documents(model, batch, args.n_docs_max, args.block_size, args.ingest_n_step)
+                ingest_documents(model, batch, args.n_docs_max, args.block_size, args.ingest_n_step,
+                                  use_checkpoint=args.ingest_checkpoint, step_size=args.ingest_step_size,
+                                  n_step_min=args.ingest_n_step_min, n_step_max=args.ingest_n_step_max)
                 _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
                                    target_input=target_input, kb_prebuilt=True)
             else:
@@ -377,7 +441,10 @@ def main() -> None:
                                        args.block_size, n_batches=args.val_batches,
                                        teacher_enabled=val_ds.teacher is not None,
                                        ingest_kb=args.ingest_kb, n_docs_max=args.n_docs_max,
-                                       ingest_n_step=args.ingest_n_step)
+                                       ingest_n_step=args.ingest_n_step, ingest_checkpoint=args.ingest_checkpoint,
+                                       ingest_step_size=args.ingest_step_size,
+                                       ingest_n_step_min=args.ingest_n_step_min,
+                                       ingest_n_step_max=args.ingest_n_step_max)
                 print(f"step={step:6d} VAL {val_losses}", flush=True)
                 logger.progress(step, **{f"val_{k}": v for k, v in val_losses.items()})
 

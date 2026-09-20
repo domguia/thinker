@@ -254,17 +254,30 @@ class Thinker(nn.Module):
             for name, dim in stream_dims.items()
         })
 
-    def _step(self, R: torch.Tensor, sm_k: torch.Tensor, sm_v: torch.Tensor):
+    def _step(self, R: torch.Tensor, sm_k: torch.Tensor, sm_v: torch.Tensor, external_kb: tuple = None):
         """
         One iteration of the core recurrent loop (spec §2), factored out of
         forward() so ingest() (spec §8ter) can reuse the exact same weights
-        (memory.attend, sm_q_proj, fuse_*, sm_write_proj) instead of
-        duplicating the loop body. Reads self.memory (whatever levels are
-        currently built -- during ingestion these are the documents already
-        ingested earlier in the batch, per the user's 2026-09-20 KB-visible
-        choice for §8ter) exactly like a normal reasoning step would.
+        (memory.attend/attend_static, sm_q_proj, fuse_*, sm_write_proj)
+        instead of duplicating the loop body.
+
+        external_kb: None (default, forward()'s normal reasoning path) reads
+            self.memory.attend(R) as before. A (K, V, mask) tuple (ingest()'s
+            path) instead calls self.memory.attend_static(R, K, V, mask) --
+            a STATELESS read of exactly those tensors, not of self.memory's
+            current global state. This distinction is what makes ingest()
+            safe to wrap in torch.utils.checkpoint.checkpoint() (see
+            HierarchicalMemory.attend_static's docstring for the bug this
+            avoids: self.memory can be mutated between checkpoint's forward
+            and its backward-time recompute, but explicit tensor arguments
+            can't).
         """
-        o_kb = torch.zeros_like(R) if self.disable_kb else self.memory.attend(R)
+        if self.disable_kb:
+            o_kb = torch.zeros_like(R)
+        elif external_kb is not None:
+            o_kb = self.memory.attend_static(R, *external_kb)
+        else:
+            o_kb = self.memory.attend(R)
 
         if not self.disable_sm and sm_k.shape[1] > 0:
             q_sm = self.sm_q_proj(R)
@@ -291,7 +304,32 @@ class Thinker(nn.Module):
 
         return R, sm_k, sm_v
 
-    def ingest(self, doc_tokens: torch.Tensor, n_step: int) -> tuple:
+    def _ingest_impl(self, doc_tokens: torch.Tensor, n_step: int,
+                      prior_k: torch.Tensor, prior_v: torch.Tensor, prior_mask: torch.Tensor) -> tuple:
+        """
+        Pure function of its explicit arguments only (no read of
+        self.memory) -- see ingest()'s docstring for why this matters. Split
+        out from ingest() only so torch.utils.checkpoint.checkpoint() has a
+        plain function to wrap (checkpoint needs positional tensor args, not
+        a method carrying extra non-tensor bookkeeping).
+        """
+        B, L = doc_tokens.shape
+        device = doc_tokens.device
+        marker = torch.full((B, 1), self.ingest_token_id, dtype=doc_tokens.dtype, device=device)
+        tokens_with_marker = torch.cat([marker, doc_tokens], dim=1)
+        q_emb = self.embed(tokens_with_marker).mean(dim=1, keepdim=True)  # (B, 1, d)
+        R = self.register_init.unsqueeze(0).expand(B, -1, -1) + q_emb
+
+        sm_k = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
+        sm_v = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
+        external_kb = (prior_k, prior_v, prior_mask)
+        for _ in range(n_step):
+            R, sm_k, sm_v = self._step(R, sm_k, sm_v, external_kb=external_kb)
+        return sm_k, sm_v
+
+    def ingest(self, doc_tokens: torch.Tensor, n_step: int, prior_k: torch.Tensor = None,
+               prior_v: torch.Tensor = None, prior_mask: torch.Tensor = None,
+               use_checkpoint: bool = False) -> tuple:
         """
         Spec §8ter: runs a document through the SAME recurrent loop used for
         reasoning (self._step, shared weights, in particular sm_write_proj)
@@ -308,12 +346,33 @@ class Thinker(nn.Module):
         content to the model.
 
         Per the user's 2026-09-20 decision, KB access stays ON during
-        ingestion (self.memory.attend(R) inside _step reads whatever levels
-        are already built -- i.e. documents ingested earlier in the same
-        batch/call sequence become visible to documents ingested after them).
-        The caller controls that ordering by calling ingest() once per
-        document and add_static_level() right after each call, before the
-        next ingest() call.
+        ingestion -- but (2026-09-20, checkpoint-safety fix) this method is
+        now a PURE function of its explicit tensor arguments, not of
+        self.memory's current mutable state: `prior_k`/`prior_v`/`prior_mask`
+        are the CALLER-supplied concatenation of whatever was ingested
+        earlier (e.g. accumulated by learn/indexed_attention/train_prompt_
+        response.py's ingest_documents() as it loops over a batch's
+        documents in order), read via HierarchicalMemory.attend_static (a
+        stateless sibling of attend()) instead of self.memory.attend(R).
+        Omit all three (or pass None) for the first document -- equivalent
+        to empty (B, 0, d) tensors, attend_static returns zeros. The caller
+        is still responsible for eventually calling
+        `self.memory.add_static_level(sm_k, sm_v, mask)` once ingestion of
+        all documents is done, so the QA forward pass can read them via the
+        normal (stateful) attend() path.
+
+        use_checkpoint (2026-09-20, spec §8ter "grand volume" discussion,
+        option A): wraps the actual computation in
+        torch.utils.checkpoint.checkpoint(), trading recompute-on-backward
+        for not keeping this document's ingestion activations resident for
+        the rest of the batch's forward pass. Safe ONLY because this method
+        no longer reads self.memory (see above) -- checkpoint's recompute
+        during backward() would otherwise silently read whatever self.memory
+        looks like AT THAT LATER TIME (more documents added, or cleared for
+        the next batch), not what it looked like during the original
+        forward, corrupting the gradient without any error or NaN to signal
+        it. use_checkpoint=False (default) is the plain/no-recompute MVP
+        path -- identical numerically, just keeps all activations.
 
         doc_tokens: (B, L) token ids of ONE document (no ingestion marker --
             added here).
@@ -330,18 +389,21 @@ class Thinker(nn.Module):
             "Thinker.ingest requires use_ingest_token=True (spec §8ter point 1: "
             "a dedicated marker embedding, not a reused vocabulary token)"
         )
-        B, L = doc_tokens.shape
-        device = doc_tokens.device
-        marker = torch.full((B, 1), self.ingest_token_id, dtype=doc_tokens.dtype, device=device)
-        tokens_with_marker = torch.cat([marker, doc_tokens], dim=1)
-        q_emb = self.embed(tokens_with_marker).mean(dim=1, keepdim=True)  # (B, 1, d)
-        R = self.register_init.unsqueeze(0).expand(B, -1, -1) + q_emb
+        B, device, dtype = doc_tokens.shape[0], doc_tokens.device, self.register_init.dtype
+        if prior_k is None:
+            # sm_write_proj (2 * d_model -> chunked) always produces d_model-wide
+            # K and V, matching add_static_level's existing assumption that
+            # ingested K/V share d_model regardless of HierarchicalMemory's own
+            # k_dim (only meaningful for k_proj/v_proj-derived levels, §5.4).
+            prior_k = torch.zeros(B, 0, self.d_model, device=device, dtype=dtype)
+            prior_v = torch.zeros(B, 0, self.d_model, device=device, dtype=dtype)
+            prior_mask = torch.zeros(B, 0, dtype=torch.bool, device=device)
 
-        sm_k = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
-        sm_v = torch.zeros(B, 0, self.d_model, device=device, dtype=R.dtype)
-        for _ in range(n_step):
-            R, sm_k, sm_v = self._step(R, sm_k, sm_v)
-        return sm_k, sm_v
+        if use_checkpoint:
+            import torch.utils.checkpoint as ckpt
+            return ckpt.checkpoint(self._ingest_impl, doc_tokens, n_step, prior_k, prior_v, prior_mask,
+                                    use_reentrant=False)
+        return self._ingest_impl(doc_tokens, n_step, prior_k, prior_v, prior_mask)
 
     def forward(self, kb_tokens: torch.Tensor, kb_source_ids: torch.Tensor,
                 query_tokens: torch.Tensor, n_step: int, kb_leaf_mask: torch.Tensor = None,
