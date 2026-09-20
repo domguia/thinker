@@ -56,6 +56,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from data.real_text_windows import RealTextWindowDataset
 from core.model_families import resolve_model_name
 from core.run_logging import add_run_args, logger_from_args
+from learn.distill.chunked_loss import chunked_ce_kd_loss
 
 
 class JsonlTextDataset(Dataset):
@@ -66,7 +67,8 @@ class JsonlTextDataset(Dataset):
     sequences always line up position-for-position.
     """
 
-    def __init__(self, path, tokenizer, block_size, teacher_targets=None):
+    def __init__(self, path, tokenizer, block_size, teacher_targets=None,
+                 repr_teacher_hidden=None, repr_teacher_layer=None, repr_proj_dim=64, repr_seed=0):
         self.examples = []
         teacher = None
         if teacher_targets is not None:
@@ -77,22 +79,55 @@ class JsonlTextDataset(Dataset):
             }
             self.k = int(npz["k"])
 
+        # Q2 (dev_notes/indexed_attention_experiment_plan.md): representation
+        # distillation from a precompute_teacher_targets.py --hidden_layers
+        # output. The raw hidden_size vector is projected ONCE here via a
+        # FIXED random orthogonal matrix (never fit/trained -- same primitive
+        # as extract_teacher_embed_init.py's random_projection(), just not
+        # imported from there to avoid a GPU-only-script import at CPU-loop
+        # dataset-construction time) down to repr_proj_dim, so the stored
+        # per-example slices are already small and the projection cost is
+        # paid once for the whole file, not per epoch.
+        repr_teacher = None
+        self.repr_proj_dim = None
+        if repr_teacher_hidden is not None:
+            assert repr_teacher_layer is not None, "--repr_teacher_layer is required with --repr_teacher_hidden"
+            rnpz = np.load(repr_teacher_hidden)
+            key = f"hidden_{repr_teacher_layer}"
+            assert key in rnpz, f"{repr_teacher_hidden!r} has no {key!r} -- available: {list(rnpz.keys())}"
+            raw_hidden = torch.from_numpy(rnpz[key].astype(np.float32))  # (total_tokens, teacher_hidden_size)
+            g = torch.Generator().manual_seed(repr_seed)
+            P = torch.empty(raw_hidden.shape[1], repr_proj_dim, dtype=torch.float32)
+            torch.nn.init.orthogonal_(P, generator=g)
+            projected = (raw_hidden @ P).to(torch.float16).numpy()  # (total_tokens, repr_proj_dim)
+            repr_teacher = {"projected": projected, "offsets": rnpz["offsets"]}
+            self.repr_proj_dim = repr_proj_dim
+
         with open(path) as f:
             for i, line in enumerate(f):
                 row = json.loads(line)
                 ids = tokenizer(row["text"], truncation=True, max_length=block_size)["input_ids"]
-                target = None
+                n_cap = len(ids)
                 if teacher is not None:
-                    start, end = teacher["offsets"][i], teacher["offsets"][i + 1]
-                    n = min(len(ids), end - start)
-                    if n < 2:
-                        continue
-                    ids = ids[:n]
-                    target = {
-                        "indices": teacher["indices"][start:start + n],
-                        "values": teacher["values"][start:start + n],
-                        "residual": teacher["residual"][start:start + n],
-                    }
+                    n_cap = min(n_cap, teacher["offsets"][i + 1] - teacher["offsets"][i])
+                if repr_teacher is not None:
+                    n_cap = min(n_cap, repr_teacher["offsets"][i + 1] - repr_teacher["offsets"][i])
+                if (teacher is not None or repr_teacher is not None) and n_cap < 2:
+                    continue
+                ids = ids[:n_cap]
+                target = None
+                if teacher is not None or repr_teacher is not None:
+                    target = {}
+                    if teacher is not None:
+                        start = teacher["offsets"][i]
+                        target.update(
+                            indices=teacher["indices"][start:start + n_cap],
+                            values=teacher["values"][start:start + n_cap],
+                            residual=teacher["residual"][start:start + n_cap],
+                        )
+                    if repr_teacher is not None:
+                        rstart = repr_teacher["offsets"][i]
+                        target["repr"] = repr_teacher["projected"][rstart:rstart + n_cap]
                 if len(ids) >= 2:
                     self.examples.append((ids, target))
 
@@ -103,7 +138,7 @@ class JsonlTextDataset(Dataset):
         return self.examples[idx]
 
 
-def collate(batch, pad_id, k=None):
+def collate(batch, pad_id, k=None, repr_dim=None):
     ids_batch = [ids for ids, _ in batch]
     max_len = max(len(x) for x in ids_batch)
     input_ids = torch.full((len(batch), max_len), pad_id, dtype=torch.long)
@@ -131,6 +166,15 @@ def collate(batch, pad_id, k=None):
             teacher_indices=teacher_indices, teacher_values=teacher_values,
             teacher_residual=teacher_residual, teacher_mask=teacher_mask,
         )
+
+    if repr_dim is not None:
+        repr_target = torch.zeros((len(batch), max_len, repr_dim), dtype=torch.float32)
+        repr_mask = torch.zeros((len(batch), max_len), dtype=torch.bool)
+        for i, (_, target) in enumerate(batch):
+            n = len(target["repr"])
+            repr_target[i, :n] = torch.from_numpy(target["repr"].astype(np.float32))
+            repr_mask[i, :n] = True
+        out.update(repr_target=repr_target, repr_mask=repr_mask)
     return out
 
 
@@ -364,6 +408,47 @@ def topk_kd_loss(student_logits, teacher_indices, teacher_values, teacher_residu
     return per_token_kl.sum() / denom
 
 
+def embedding_kd_loss(student_weight: torch.Tensor, teacher_weight: torch.Tensor) -> torch.Tensor:
+    """MSE between the student's embedding table and a fixed Teacher-projected
+    target (learn/distill/extract_teacher_embed_init.py) -- a CONTINUOUS anchor
+    toward the Teacher's embedding space throughout training, complementing
+    embed_init's one-time copy-at-init (core/indexed_thinker_model.py spec
+    §13.1/13.2): without this, Adam is free to drift the embedding away from
+    the Teacher's space after the very first step. Symmetric with
+    topk_kd_loss (logit-level KD) but at the parameter level, not per-example.
+
+    student_weight may have more rows than teacher_weight (e.g. Thinker's
+    optional ingest-token row, spec §8ter) -- only the first
+    teacher_weight.shape[0] rows are compared, the rest are ignored.
+
+    2026-09-20 fix (experiment-manager, found via a real crash on LFM2):
+    the reverse can also happen -- LFM2's tokenizer `len()` (64400, the actual
+    vocabulary) is SMALLER than its model config's `vocab_size` (65536, some
+    reserved/unused slots) -- so a Teacher embedding extracted at the
+    model-config vocab size has MORE rows than the student's embedding table
+    built from the tokenizer. Slice to min() of both, not just teacher's
+    size, so this works regardless of which side is larger.
+    """
+    n = min(student_weight.shape[0], teacher_weight.shape[0])
+    return F.mse_loss(student_weight[:n], teacher_weight[:n])
+
+
+def repr_cosine_loss(student_repr: torch.Tensor, teacher_repr: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """1 - cosine_similarity, averaged over valid (masked) token positions --
+    representation-distillation loss (dev_notes/indexed_attention_experiment_plan.md
+    Q2): cosine rather than raw MSE per spec §11bis's flagged instability risk
+    with an unnormalized MSE between latents of very different natural scales.
+
+    student_repr/teacher_repr: (B,T,D) (D must already match -- the caller is
+    responsible for projecting the student's hidden size to the Teacher's
+    projected D, e.g. via a small trainable nn.Linear). mask: (B,T) bool.
+    """
+    cos = F.cosine_similarity(student_repr, teacher_repr, dim=-1)  # (B,T)
+    per_tok = (1 - cos).masked_fill(~mask, 0.0)
+    denom = mask.sum().clamp(min=1)
+    return per_tok.sum() / denom
+
+
 def evaluate_val(model, val_loader, device, args, width_mult):
     """Full pass over --val_file/--val_teacher_targets, CE+KD averaged over
     batches (no grad, eval mode) -- the train-vs-val curve this gives (called
@@ -415,6 +500,68 @@ def main():
              "on top of the plain CE loss. --tokenizer must match the one used to produce it.",
     )
     parser.add_argument("--kd_alpha", type=float, default=0.5, help="weight on the KD/KL term; (1-alpha) on CE")
+    parser.add_argument(
+        "--loss_chunk_size", type=int, default=0,
+        help="Compute CE/KD via chunked_ce_kd_loss() (learn/distill/chunked_loss.py, spec §13.3) instead of "
+             "materializing the full (B,T,vocab) logits tensor at once -- a memory lever only (same FLOPs, "
+             "trades peak memory for a recompute at backward via torch.utils.checkpoint), meant to unlock a "
+             "bigger --batch_size at the large Teacher-aligned vocab head. 0 (default) keeps the original, "
+             "unchunked code path byte-for-byte unchanged.",
+    )
+    parser.add_argument(
+        "--embed_teacher_target", default=None,
+        help="extract_teacher_embed_init.py .npz output (embed_init key) -- adds a CONTINUOUS MSE anchor "
+             "pulling the student's input embedding table toward this fixed Teacher-projected target every "
+             "step, on top of whatever the main CE/KD loss already is (spec §13.1/13.2's embed_init is a "
+             "one-time copy-at-init only; Adam is then free to drift away from it -- this keeps pulling it "
+             "back throughout training instead). Requires --embed_kd_weight > 0 to have any effect. Row "
+             "correspondence requires the SAME tokenizer as the Teacher used to build this target (§13.1).",
+    )
+    parser.add_argument(
+        "--embed_kd_weight", type=float, default=0.0,
+        help="weight on the embedding-anchor MSE term, added UNWEIGHTED on top of the main loss (not part "
+             "of the (1-kd_alpha)/kd_alpha split against CE/logit-KD).",
+    )
+    parser.add_argument(
+        "--val_repr_teacher_hidden", default=None,
+        help="same as --repr_teacher_hidden, computed on --val_file instead, for held-out repr-KD loss reporting.",
+    )
+    parser.add_argument(
+        "--repr_teacher_hidden", default=None,
+        help="precompute_teacher_targets.py --hidden_layers output .npz (a hidden_<layer> key) -- adds a "
+             "cosine-similarity representation-distillation loss (dev_notes/indexed_attention_experiment_plan.md "
+             "Q2) between a chosen student transformer block's hidden state and a FIXED random-orthogonal "
+             "projection of the Teacher's raw hidden state at the same token positions (never fit/trained, "
+             "just a fixed dimensionality reduction -- see --repr_proj_dim). Requires --repr_teacher_layer and "
+             "--repr_kd_weight > 0 to have any effect.",
+    )
+    parser.add_argument(
+        "--repr_teacher_layer", type=int, default=None,
+        help="which hidden_<layer> key to read from --repr_teacher_hidden -- must match the --hidden_layers "
+             "index used at precompute time (e.g. the Teacher's own num_hidden_layers for --hidden_layers last).",
+    )
+    parser.add_argument(
+        "--repr_student_layer", type=int, default=-1,
+        help="which entry of output_hidden_states to align (0 = embedding output, -1 = final block's output, "
+             "the default) -- indexes the SAME tuple convention parse_hidden_layers() uses at precompute time.",
+    )
+    parser.add_argument(
+        "--repr_proj_dim", type=int, default=64,
+        help="output dimension of the fixed random orthogonal projection applied to the Teacher's raw hidden "
+             "states before comparison (a learned nn.Linear maps the student's own hidden size to this same "
+             "dimension) -- keeps the comparison space small without needing an SVD fit pass over the corpus.",
+    )
+    parser.add_argument(
+        "--repr_kd_weight", type=float, default=0.0,
+        help="target weight on the representation-distillation cosine loss, ramped linearly from 0 over "
+             "--repr_kd_warmup_steps (spec Q2's 'montée en poids progressive').",
+    )
+    parser.add_argument(
+        "--repr_kd_warmup_steps", type=int, default=1000,
+        help="steps over which --repr_kd_weight ramps linearly from 0 -- avoids destabilizing early training "
+             "with a rigid representation-matching constraint before the student has learned anything useful "
+             "(FitNets/MiniLM literature risk on overly rigid latent geometry, raw/Distill-reasonning-stream.md:446).",
+    )
     parser.add_argument(
         "--mup", action="store_true",
         help="use muP (Yang et al., Tensor Programs V) init + Adam-LR scaling by width, so --lr tuned "
@@ -551,6 +698,28 @@ def main():
         apply_depth_mup_scaling(model, depth_mult)
         print(f"Depth-muP enabled: depth_mult={depth_mult:.2f} (n_layer={args.n_layer} / base {args.mup_base_depth}), residual branches scaled by {depth_mult ** -0.5:.3f}")
     model.to(device)
+
+    embed_teacher_target = None
+    if args.embed_teacher_target:
+        assert args.embed_kd_weight > 0, "--embed_teacher_target has no effect without --embed_kd_weight > 0"
+        embed_teacher_target = torch.from_numpy(
+            np.load(args.embed_teacher_target)["embed_init"].astype(np.float32)
+        ).to(device)
+        print(f"Embedding-KD enabled: anchoring wte toward {args.embed_teacher_target} "
+              f"(weight={args.embed_kd_weight}, shape={tuple(embed_teacher_target.shape)})", flush=True)
+
+    repr_proj = None
+    if args.repr_teacher_hidden:
+        assert args.repr_kd_weight > 0, "--repr_teacher_hidden has no effect without --repr_kd_weight > 0"
+        assert args.repr_teacher_layer is not None, "--repr_teacher_hidden requires --repr_teacher_layer"
+        # A small TRAINABLE adapter, not part of the fixed random projection applied to the Teacher's
+        # side (JsonlTextDataset already did that) -- lets the student's own hidden size differ freely
+        # from --repr_proj_dim without needing to know it ahead of the precompute run.
+        repr_proj = torch.nn.Linear(config.n_embd, args.repr_proj_dim).to(device)
+        print(f"Representation-KD enabled: student block {args.repr_student_layer} -> repr_proj({config.n_embd}->"
+              f"{args.repr_proj_dim}) vs {args.repr_teacher_hidden} (weight={args.repr_kd_weight}, "
+              f"warmup={args.repr_kd_warmup_steps} steps)", flush=True)
+
     num_params = sum(p.numel() for p in model.parameters())
     # Core (transformer blocks + positional embedding) vs. head (vocab-sized embedding/lm_head) --
     # the vocab-driven head can dominate at small core sizes; report both so tier comparisons stay
@@ -576,16 +745,24 @@ def main():
         mlflow.log_params(run_config)
 
     if args.real_text_windows:
+        assert not args.repr_teacher_hidden, "--real_text_windows doesn't support --repr_teacher_hidden yet"
         train_ds = RealTextWindowsSFT(args.train_file, tokenizer, args.n_ctx, args.t_local, args.t_tgt, args.stride)
         print(f"Train windows: {len(train_ds)} (real_text_windows mode, n_ctx={args.n_ctx} t_tgt={args.t_tgt} "
               f"stride={args.stride if args.stride is not None else args.t_tgt} -> block_size={args.block_size})")
         k = None
+        repr_dim = None
         train_collate = collate_real_text_windows
     else:
-        train_ds = JsonlTextDataset(args.train_file, tokenizer, args.block_size, teacher_targets=args.teacher_targets)
-        print(f"Train examples: {len(train_ds)}" + (f" (KD against {args.teacher_targets}, K={train_ds.k})" if args.teacher_targets else ""))
+        train_ds = JsonlTextDataset(
+            args.train_file, tokenizer, args.block_size, teacher_targets=args.teacher_targets,
+            repr_teacher_hidden=args.repr_teacher_hidden, repr_teacher_layer=args.repr_teacher_layer,
+            repr_proj_dim=args.repr_proj_dim, repr_seed=args.seed,
+        )
+        print(f"Train examples: {len(train_ds)}" + (f" (KD against {args.teacher_targets}, K={train_ds.k})" if args.teacher_targets else "")
+              + (f" (repr-KD against {args.repr_teacher_hidden}, dim={train_ds.repr_proj_dim})" if args.repr_teacher_hidden else ""))
         k = train_ds.k if args.teacher_targets else None
-        train_collate = lambda b: collate(b, tokenizer.pad_token_id, k=k)
+        repr_dim = train_ds.repr_proj_dim
+        train_collate = lambda b: collate(b, tokenizer.pad_token_id, k=k, repr_dim=repr_dim)
 
     # DistributedSampler shards+shuffles the dataset itself (each rank sees a
     # disjoint 1/world_size slice per epoch) -- DataLoader's own shuffle=True
@@ -603,10 +780,14 @@ def main():
 
     val_loader = None
     if args.val_file and args.val_every:
-        val_ds = JsonlTextDataset(args.val_file, tokenizer, args.block_size, teacher_targets=args.val_teacher_targets)
+        val_ds = JsonlTextDataset(
+            args.val_file, tokenizer, args.block_size, teacher_targets=args.val_teacher_targets,
+            repr_teacher_hidden=args.val_repr_teacher_hidden, repr_teacher_layer=args.repr_teacher_layer,
+            repr_proj_dim=args.repr_proj_dim, repr_seed=args.seed,
+        )
         val_loader = DataLoader(
             val_ds, batch_size=args.batch_size, shuffle=False,
-            collate_fn=lambda b: collate(b, tokenizer.pad_token_id, k=k),
+            collate_fn=lambda b: collate(b, tokenizer.pad_token_id, k=k, repr_dim=val_ds.repr_proj_dim),
         )
         print(f"Val examples: {len(val_ds)} (evaluated every {args.val_every} steps)")
 
@@ -617,9 +798,16 @@ def main():
     # first and wrapping in DDP after is safe (same objects, no name lookup
     # needed post-wrap).
     if args.mup:
-        optimizer = torch.optim.AdamW(build_mup_param_groups(model, args.lr, width_mult), weight_decay=args.weight_decay)
+        param_groups = build_mup_param_groups(model, args.lr, width_mult)
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        param_groups = [{"params": list(model.parameters()), "lr": args.lr}]
+    if repr_proj is not None:
+        # repr_proj is a small standalone adapter (spec Q2), not part of the muP width-scaling
+        # scheme -- always at the base (unscaled) LR, like embeddings/LayerNorm/biases. Must be its
+        # own param GROUP (not appended to a flat param list) -- AdamW rejects a mix of bare
+        # Parameters and group dicts in the same list.
+        param_groups = param_groups + [{"params": list(repr_proj.parameters()), "lr": args.lr}]
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, weight_decay=args.weight_decay)
     if is_distributed:
         model = DDP(model, device_ids=[local_rank])
     model.train()
@@ -649,36 +837,106 @@ def main():
         for batch in train_loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16):
-                if args.teacher_targets:
+                repr_target = batch.pop("repr_target", None)
+                repr_mask = batch.pop("repr_mask", None)
+                want_hidden = repr_target is not None
+                raw_model = model.module if is_distributed else model
+                student_hidden_for_repr = None
+
+                if args.loss_chunk_size > 0:
+                    labels = batch.pop("labels")
+                    teacher_indices = batch.pop("teacher_indices", None)
+                    teacher_values = batch.pop("teacher_values", None)
+                    teacher_residual = batch.pop("teacher_residual", None)
+                    teacher_mask = batch.pop("teacher_mask", None)
+                    # Bypasses the LM head entirely here -- the whole point of chunking is to never
+                    # materialize a full (B,T,vocab) logits tensor, which model(**batch).logits would.
+                    base_out = raw_model.transformer(**batch, output_hidden_states=want_hidden)
+                    hidden = base_out.last_hidden_state
+                    flat_hidden = hidden.reshape(-1, hidden.size(-1))
+                    flat_labels = labels.reshape(-1)
+
+                    def head_fn(h, _m=raw_model, _wm=width_mult, _mup=args.mup):
+                        out_logits = _m.lm_head(h)
+                        return out_logits / _wm if _mup else out_logits
+
+                    kd_kwargs = {}
+                    if teacher_indices is not None:
+                        kdim = teacher_indices.shape[-1]
+                        kd_kwargs = dict(
+                            teacher_indices=teacher_indices.reshape(-1, kdim), teacher_values=teacher_values.reshape(-1, kdim),
+                            teacher_residual=teacher_residual.reshape(-1), teacher_mask=teacher_mask.reshape(-1),
+                        )
+                    ce, kd = chunked_ce_kd_loss(flat_hidden, head_fn, flat_labels, chunk_size=args.loss_chunk_size, **kd_kwargs)
+                    loss = (1 - args.kd_alpha) * ce + args.kd_alpha * kd if teacher_indices is not None else ce
+                    if want_hidden:
+                        student_hidden_for_repr = base_out.hidden_states[args.repr_student_layer]
+                elif args.teacher_targets:
                     labels = batch.pop("labels")
                     teacher_indices = batch.pop("teacher_indices")
                     teacher_values = batch.pop("teacher_values")
                     teacher_residual = batch.pop("teacher_residual")
                     teacher_mask = batch.pop("teacher_mask")
-                    logits = model(**batch).logits
+                    out = model(**batch, output_hidden_states=want_hidden)
+                    logits = out.logits
                     if args.mup:
                         logits = logits / width_mult  # muP readout output scaling
                     ce = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
                     kd = topk_kd_loss(logits, teacher_indices, teacher_values, teacher_residual, teacher_mask)
                     loss = (1 - args.kd_alpha) * ce + args.kd_alpha * kd
+                    if want_hidden:
+                        student_hidden_for_repr = out.hidden_states[args.repr_student_layer]
                 elif args.mup:
                     labels = batch.pop("labels")
-                    logits = model(**batch).logits / width_mult  # muP readout output scaling
+                    out = model(**batch, output_hidden_states=want_hidden)
+                    logits = out.logits / width_mult  # muP readout output scaling
                     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+                    if want_hidden:
+                        student_hidden_for_repr = out.hidden_states[args.repr_student_layer]
                 else:
-                    loss = model(**batch).loss
+                    out = model(**batch, output_hidden_states=want_hidden)
+                    loss = out.loss
+                    if want_hidden:
+                        student_hidden_for_repr = out.hidden_states[args.repr_student_layer]
+
+                embed_kd_value = None
+                if embed_teacher_target is not None:
+                    embed_kd_value = embedding_kd_loss(raw_model.transformer.wte.weight, embed_teacher_target)
+                    loss = loss + args.embed_kd_weight * embed_kd_value
+
+                repr_kd_value = None
+                if repr_target is not None:
+                    student_proj = repr_proj(student_hidden_for_repr).float()
+                    repr_kd_value = repr_cosine_loss(student_proj, repr_target, repr_mask)
+                    repr_kd_ramp = min(1.0, step / max(1, args.repr_kd_warmup_steps))
+                    loss = loss + repr_kd_ramp * args.repr_kd_weight * repr_kd_value
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
             losses.append(loss.item())
             step += 1
             if is_main and (step % args.log_every == 0 or step == 1):
+                step_metrics = {"loss": loss.item()}
+                extra = ""
                 if args.teacher_targets:
-                    print(f"step {step} loss {loss.item():.4f} (ce {ce.item():.4f} kd {kd.item():.4f})")
-                    step_metrics = {"loss": loss.item(), "ce": ce.item(), "kd": kd.item()}
-                else:
-                    print(f"step {step} loss {loss.item():.4f}")
-                    step_metrics = {"loss": loss.item()}
+                    step_metrics["ce"] = ce.item()
+                    step_metrics["kd"] = kd.item()
+                    extra += f" (ce {ce.item():.4f} kd {kd.item():.4f})"
+                elif args.loss_chunk_size > 0:
+                    step_metrics["ce"] = ce.item()
+                    extra += f" (ce {ce.item():.4f}"
+                    if teacher_indices is not None:
+                        step_metrics["kd"] = kd.item()
+                        extra += f" kd {kd.item():.4f}"
+                    extra += ")"
+                if embed_kd_value is not None:
+                    step_metrics["embed_kd"] = embed_kd_value.item()
+                    extra += f" embed_kd {embed_kd_value.item():.4f}"
+                if repr_kd_value is not None:
+                    step_metrics["repr_kd"] = repr_kd_value.item()
+                    step_metrics["repr_kd_weight"] = repr_kd_ramp * args.repr_kd_weight
+                    extra += f" repr_kd {repr_kd_value.item():.4f} (w={repr_kd_ramp * args.repr_kd_weight:.4f})"
+                print(f"step {step} loss {loss.item():.4f}{extra}")
                 logger.progress(step, **step_metrics)
                 if args.wandb:
                     wandb.log(step_metrics, step=step)
