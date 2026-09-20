@@ -249,3 +249,11 @@ Arrêté volontairement au lieu d'aller jusqu'à 240min -- l'écart retrieval-no
 ## 2026-09-20 — Réplication seed=1 du flagship lancée (robustesse à grande échelle)
 
 Demande `model-design` : le résultat flagship (5.80 vs jamais <5.98) repose sur une seule seed -- réplication avec `--seed 1`, même config exacte, `--max_steps 11250` (plafonné un peu au-delà du meilleur point connu ~6750, pas besoin d'aller jusqu'à 15750+ vu la forme de courbe déjà connue). Lancé sur `abacus22-1` (retrieval) et `abacus29-1` (noctx). `checkpoints/flagship_seed1_best.pt` / `flagship_noctx_seed1_best.pt`. Résultat à suivre.
+
+## 2026-09-20 — Reasoning (thinking-only) et general lancés en parallèle
+
+Demande `model-design` (relais utilisateur : couvrir les 3 tâches en parallèle) :
+- **reasoning** (`d_model=256, use_ff, batch=128, bf16, compile, num_workers=4`, jeu complet 35011, KD réel `kd_alpha=0.5`) -- le stream `answer` reste automatiquement CE-only (0% alignement KD, `kd_answer` toujours nul de fait), aucun flag spécial nécessaire pour l'isoler. Lancé sur `abacus22-1`.
+- **general** (`train_real_text.py`, `d_model=256, use_ff`, pas de bf16/compile/num_workers -- absents du script, non bloquant) sur `data/distill/general_realtext/{train,val}.jsonl`. Lancé sur `abacus21-1`.
+
+Sondage des 7 sites jamais explorés cette session (Lyon, Grenoble, Toulouse, Lille, Strasbourg, Sophia, Nantes) : capacité GPU trouvée réelle sur Toulouse (`estats`, exotic) et Lyon (`neowise`, exotic), réservations testées et confirmées fonctionnelles -- mais abandonnées (home NFS séparé de Rennes, coût de resynchronisation des gros fichiers KD (~10-20Go) jugé trop élevé face à la capacité Rennes déjà libre au même moment). Réservations libérées proprement.
