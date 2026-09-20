@@ -6,8 +6,17 @@ there is no natural "1 doc suffices" control group in that dataset, so stratifyi
 num_hops there cannot show anything (confirmed empirically: answer_hops_le1_n=0 on every
 val batch of the real run). This script builds a SYNTHETIC dataset with both groups
 present by construction, output in the same jsonl schema RetrievalPromptDataset/
-prepare_retrieval_data.py already consume (question/answer/context/context_docs/text/
-num_tokens/num_hops/id).
+prepare_retrieval_data.py already consume (question/answer/context/context_docs/
+is_supporting/text/num_tokens/num_hops/id).
+
+`is_supporting` (2026-09-21, model-design): per-doc boolean aligned with context_docs,
+True for the doc(s) structurally REQUIRED to answer (both A/B in composition, the single
+direct doc in control), False for distractors -- added so eval_causal_control.py's
+targeted/count-matched corruption (built for HotpotQA's is_supporting) works unmodified
+on this dataset. Unlike HotpotQA, necessity here is exact by construction (not just
+statistically likely), giving a higher-power causal control for the same question:
+does the model's advantage over noctx come from genuinely targeted retrieval of the
+documents it needs, or from generic sensitivity to processing coherent text?
 
 Two groups, same surface structure, same distractor pool, only the number of documents
 genuinely REQUIRED to answer differs:
@@ -68,7 +77,7 @@ def build_composition_example(rng, idx, n_distractors):
     doc_a = f"{entity} {rel1} {bridge}."
     doc_b = f"{bridge} {rel2} {final}."
     question = f"Dans quel lieu {entity} a-t-elle fini par se retrouver, en suivant son parcours ?"
-    docs = [doc_a, doc_b]
+    slots = [(doc_a, True), (doc_b, True)]
     used = {bridge, final}
     for _ in range(n_distractors):
         d_entity, d_bridge, d_final = sample_triple(rng, used)
@@ -76,13 +85,17 @@ def build_composition_example(rng, idx, n_distractors):
         d_rel1, d_rel2 = rng.choice(list(zip(REL1, REL2)))
         # distractors are themselves split doc_a/doc_b style, same surface form,
         # so a length/format-based shortcut doesn't separate real docs from noise
-        docs.append(f"{d_entity} {d_rel1} {d_bridge}." if rng.random() < 0.5
-                    else f"{d_bridge} {d_rel2} {d_final}.")
-    rng.shuffle(docs)
+        d_text = (f"{d_entity} {d_rel1} {d_bridge}." if rng.random() < 0.5
+                  else f"{d_bridge} {d_rel2} {d_final}.")
+        slots.append((d_text, False))
+    rng.shuffle(slots)
+    docs = [s[0] for s in slots]
+    is_supporting = [s[1] for s in slots]
     context = "\n".join(docs)
     text = f"USER: {question}\nContext:\n{context}\nASSISTANT: {final}"
     return {
         "question": question, "answer": final, "context": context, "context_docs": docs,
+        "is_supporting": is_supporting,
         "text": text, "num_tokens": len(text.split()), "num_hops": 2,
         "id": f"synth-composition-{idx}",
     }
@@ -93,19 +106,23 @@ def build_control_example(rng, idx, n_distractors):
     _rel1, _rel2, rel_direct = rng.choice(REL_DIRECT)
     doc_direct = f"{entity} {rel_direct} {final}."
     question = f"Dans quel lieu {entity} a-t-elle fini par se retrouver, en suivant son parcours ?"
-    docs = [doc_direct]
+    slots = [(doc_direct, True)]
     used = {final}
     for _ in range(n_distractors):
         d_entity, d_bridge, d_final = sample_triple(rng, used)
         used |= {d_bridge, d_final}
         d_rel1, d_rel2 = rng.choice(list(zip(REL1, REL2)))
-        docs.append(f"{d_entity} {d_rel1} {d_bridge}." if rng.random() < 0.5
-                    else f"{d_bridge} {d_rel2} {d_final}.")
-    rng.shuffle(docs)
+        d_text = (f"{d_entity} {d_rel1} {d_bridge}." if rng.random() < 0.5
+                  else f"{d_bridge} {d_rel2} {d_final}.")
+        slots.append((d_text, False))
+    rng.shuffle(slots)
+    docs = [s[0] for s in slots]
+    is_supporting = [s[1] for s in slots]
     context = "\n".join(docs)
     text = f"USER: {question}\nContext:\n{context}\nASSISTANT: {final}"
     return {
         "question": question, "answer": final, "context": context, "context_docs": docs,
+        "is_supporting": is_supporting,
         "text": text, "num_tokens": len(text.split()), "num_hops": 1,
         "id": f"synth-control-{idx}",
     }
