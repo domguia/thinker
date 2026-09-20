@@ -222,3 +222,20 @@ Points val des deux runs (flagship, jeu complet, KD réel) :
 **Écart (retrieval-noctx) croissant** : -0.152 (5250) → -0.199 (6000) → -0.230 (6750) → -0.276 (7500).
 
 **Lecture** : l'inversion trouvée précédemment sur le petit jeu (18k, `d_model=256`) se REPRODUIT clairement à l'échelle du jeu complet (81k) -- retrieval commence à plateauner (~5.80-5.83 depuis step 4500) pendant que noctx régresse nettement (5.98→6.76 entre step 5250 et 12000, surapprentissage sévère et rapide malgré le jeu 4.5x plus grand). C'est le résultat le plus solide du fil entier : réplication à une échelle bien supérieure, avec KD réel, tous les leviers de vitesse actifs. Transmis à `model-design` pour l'extrapolation (8 points flagship disponibles).
+
+## 2026-09-20 — CORRECTION : le rebond step 7500 était réel, pas du bruit -- les deux surapprennent, mais l'écart reste large
+
+Le "léger rebond" à step 7500 signalé par `model-design` comme probable bruit était en fait le DÉBUT d'une vraie remontée continue -- pas un plateau suivi d'une lente décroissance comme l'extrapolation initiale le prédisait :
+
+| step | retrieval val_answer | noctx val_answer | écart (retrieval-noctx) |
+|---|---|---|---|
+| 7500 | 5.833 | -- | -- |
+| 9000 | 6.013 | -- | -- |
+| 12000 | 6.244 | -- | -- |
+| 12750 | 6.464 | 7.044 | -0.580 |
+| 13500 | 6.563 | 7.145 | -0.582 |
+| 14250 | 6.643 | 7.299 | -0.656 |
+| 15000 | 6.728 | 7.349 | -0.621 |
+| 15750 | 6.884 | 7.509 | -0.625 |
+
+**Lecture** : retrieval surapprend AUSSI clairement au-delà de step ~6750 (minimum ~5.80, remonte ensuite jusqu'à 6.88 à 15750) -- l'extrapolation de `model-design` sur les 10 premiers points (qui prédisait une décroissance lente continue) est invalidée par les points suivants, exactement le risque qu'elle avait elle-même anticipé avec seulement 10 points. **Mais l'écart retrieval-noctx reste large et stable (~-0.58 à -0.66)** même une fois les deux en phase de surapprentissage -- retrieval conserve un net avantage, cohérent avec `save_best_checkpoint_path` qui a déjà capturé le vrai meilleur point de retrieval (autour de step 6750, val≈5.80) avant que la remontée ne commence. Relayé à `model-design` avec correction explicite de la lecture précédente.
