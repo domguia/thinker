@@ -245,3 +245,7 @@ Le "léger rebond" à step 7500 signalé par `model-design` comme probable bruit
 Arrêté volontairement au lieu d'aller jusqu'à 240min -- l'écart retrieval-noctx reste large et stable (-0.58 à -0.66) même en régime de surapprentissage confirmé sur les deux côtés, résultat déjà exploitable. Meilleur checkpoint retrieval (`checkpoints/flagship_best.pt`) confirmé sauvegardé : **val_answer=5.8015 à step 6750** (dernier "new best" avant la remontée). Meilleur point noctx également capturé via `checkpoints/flagship_noctx_best.pt` (son propre minimum, avant step 5250 selon les VAL déjà journalisées).
 
 **Résultat final retenu pour le papier** : à échelle flagship (81k exemples, KD réel, tous leviers actifs), retrieval atteint son meilleur point à val_answer≈5.80, contre noctx qui n'a jamais atteint ce niveau (son minimum était déjà >5.98 dès step 5250 dans les données observées) -- avantage retrieval confirmé à grande échelle, cohérent avec le résultat à 18k. GPU libérés pour la suite.
+
+## 2026-09-20 — Réplication seed=1 du flagship lancée (robustesse à grande échelle)
+
+Demande `model-design` : le résultat flagship (5.80 vs jamais <5.98) repose sur une seule seed -- réplication avec `--seed 1`, même config exacte, `--max_steps 11250` (plafonné un peu au-delà du meilleur point connu ~6750, pas besoin d'aller jusqu'à 15750+ vu la forme de courbe déjà connue). Lancé sur `abacus22-1` (retrieval) et `abacus29-1` (noctx). `checkpoints/flagship_seed1_best.pt` / `flagship_noctx_seed1_best.pt`. Résultat à suivre.
