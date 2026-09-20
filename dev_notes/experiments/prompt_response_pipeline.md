@@ -109,3 +109,16 @@ Demande `model-design` (priorité immédiate) : checkpoint retrieval seed=0 rela
 - **structure/charge de calcul** (mélangé vs noctx) : -0.2077 (**~54%** de l'avantage total).
 
 **Lecture** : ni l'hypothèse "pure régularisation/charge" ni "pure récupération réelle" ne l'emportent -- les deux effets contribuent à parts presque égales. Le modèle utilise BIEN le contenu documentaire (dégradation nette et non négligeable quand on le retire, 0.177 sur un total de 0.384) -- ce n'est pas qu'un artefact de calcul -- mais une part comparable de l'avantage vient aussi du simple fait de traiter des documents (même non pertinents), cohérent avec l'hypothèse de ralentissement du surapprentissage déjà documentée (noctx surapprend ~2x plus fort que retrieval après son minimum). Relayé à `model-design`.
+
+## 2026-09-20 — Contrôle causal fin (supporting seul vs distracteurs seuls) : PAS de récupération ciblée détectée
+
+Ajout de `is_supporting` (booléen par document, aligné sur `context_docs`) à `prepare_retrieval_data.py`, régénéré `hotpotqa/{train,val}.jsonl` (mêmes 18000/2000 exemples, mêmes `n_samples=20000 seed=0` -- reproductible, champ additionnel seulement). Corruption ciblée testée séparément sur le même checkpoint (seed=0 @ 24000 pas) :
+
+| condition | val_answer | dégradation vs réel |
+|---|---|---|
+| documents réels | 5.6053 | -- |
+| TOUS les documents mélangés | 5.7819 | 0.1766 |
+| SEULS les documents supporting (gold) mélangés | 5.6606 | **0.0553** |
+| SEULS les distracteurs mélangés | 5.6800 | **0.0746** |
+
+**Lecture** : contrairement à l'hypothèse "récupération ciblée" (`model-design` : corrompre supporting devrait faire plus mal que corrompre distracteurs si le modèle lit vraiment l'évidence pertinente), **c'est l'inverse, légèrement** -- corrompre les distracteurs seuls dégrade un peu PLUS (0.0746) que corrompre le supporting seul (0.0553). Différence faible (0.019, peut être du bruit à ce N -- 160 exemples, 1 seed), mais dans tous les cas **pas de signal net en faveur d'une récupération ciblée sur l'évidence pertinente**. Lecture la plus cohérente : sensibilité générale à la présence de texte cohérent à n'importe quelle position documentaire, pas une lecture sélective de l'évidence gold -- renforce la lecture "structure/charge de calcul" plutôt que "vraie récupération d'information ciblée" pour la part restante (~46%) attribuée au "contenu réel" dans le contrôle grossier. Relayé à `model-design`.
