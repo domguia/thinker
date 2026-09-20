@@ -283,3 +283,14 @@ Confirme le fix `a71f729` de bout en bout : `RetrievalPromptDataset`, train, 180
 ## 2026-09-20 — KD run retrieval complet (8000/8000 pas): fort surapprentissage
 
 `train_prompt_response.py --dataset_type retrieval --kd_alpha 0.5`, alignement KD 100% (fix confirmé). **Train `final_loss=2.07`, mais VAL `answer=7.54` (kd_answer=6.39) au step final** -- écart train/val massif, signe de surapprentissage marqué à ce budget (8000 pas, `d_model=1024`, pas de KD sur `thinking` ici puisque retrieval n'a qu'un stream `answer`). Le signal KD réel (confirmé actif) n'empêche pas l'écart -- à surveiller si un budget plus court ou une régularisation serait nécessaire avant de tirer des conclusions sur l'utilité du KD lui-même pour cette tâche.
+
+## 2026-09-20 — KD run reasoning complet (arrêté par max_time_minutes=90, pas par max_steps)
+
+`train_prompt_response.py --dataset_type reasoning --kd_alpha 0.5`, `d_model=1024, n_step=6, batch_size=8`, Teacher LFM2-1.2B (`openr1_math`, KD sur `answer` ET `thinking`). Arrêté à **step 5360/8000** par le budget mural (`max_time_minutes=90`), pas par `max_steps` -- `final_loss=7.109`, `training_seconds=5400`.
+
+**Extrapolation `n_step_test` (2 à 12, entraîné à `n_step=6`)** : les deux streams restent quasi plats sur toute la plage :
+- `answer` : 4.199 (n=2) → 4.215 (n=4) → 4.217 (n=6) → 4.219 (n=8) → 4.272 (n=12).
+- `thinking` : 3.790 (n=2) → 3.700 (n=4) → 3.675 (n=6, minimum) → 3.677 (n=8) → 3.704 (n=12).
+- `kd_answer`/`kd_thinking` suivent le même motif plat (~5.06-5.18 et ~3.29-3.41 respectivement).
+
+**Lecture** : contrairement au run retrieval (surapprentissage net train/val), pas de signal d'instabilité ici, mais aussi peu de variation avec le nombre d'itérations à l'inférence -- cohérent avec le signal déjà observé pour `answer` sur un run antérieur plus court (stream remarquablement plat). `thinking` a ici un léger minimum à `n_step_test=6` (=celui d'entraînement), pas aux extrêmes, contrairement à avant où `thinking` était plus variable -- possible que le budget de pas plus long (5360 vs le run antérieur bien plus court) ait stabilisé ce stream. Pas de comparaison train/val loss directe ici (val_loader utilisé seulement pour ces extrapolations, pas de courbe val_answer/val_thinking au cours de l'entraînement rapportée séparément dans ce run).
