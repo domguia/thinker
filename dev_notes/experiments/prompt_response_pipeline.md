@@ -184,3 +184,9 @@ train_prompt_response.py --dataset_type retrieval --data hotpotqa_full/train.jso
   --val_every 750 --max_time_minutes 240 --save_best_checkpoint_path checkpoints/flagship_best.pt --seed 0
 ```
 Tous les leviers validés activés (bf16, compile, use_ff, fused AdamW par défaut, num_workers). Budget mural ~4h, meilleur checkpoint conservé en continu. Confirmé actif sur GPU. Résultats à suivre, points val transmis à `model-design` au fil de l'eau.
+
+## 2026-09-20 — Baseline noctx à l'échelle flagship lancé (comparaison finale)
+
+Demande `model-design` : même config EXACTE que le flagship, `--n_docs_max 0` (mémorisation pure), jeu complet 81k -- pour la comparaison finale flagship-vs-noctx à la même échelle (pas les runs à 18k, préliminaires). Lancé sur `abacus29-1` en parallèle, sans concurrence avec le flagship (`abacus22-1`).
+
+Premiers points val flagship (jeu complet) : step 1 (11.342), step 750 (6.800), step 1500 (6.362) -- débit réel ~5.3 pas/s en régime stable sur A40 (bien plus rapide que le smoke test sur A100, ~0.87 pas/s). Transmis à `model-design` pour extrapolation.
