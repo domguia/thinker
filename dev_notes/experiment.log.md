@@ -99,6 +99,8 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 
 - **2026-09-20** -- [nstep_lr_joint complet: degradation confirmee meme au meilleur LR teste, pas quun confond](experiments/real_text_baselines.md)
 
+- **2026-09-20** -- [3 baselines prompt_response completes: ablation sans contexte bat retrieval avec contexte](experiments/prompt_response_pipeline.md)
+
 ## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
 
 **En cours de rédaction, mis à jour au fil de la nuit -- lire la version la plus récente en tête de ce fichier au réveil.**
