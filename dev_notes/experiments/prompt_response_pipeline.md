@@ -268,3 +268,7 @@ Sondage des 7 sites jamais explorés cette session (Lyon, Grenoble, Toulouse, Li
 Écart cohérent et robuste sur 2 graines indépendantes, à l'échelle complète (81000 exemples, KD réel). Résultat central du papier, prêt à documenter.
 
 Sauvegarde vers `storage3.rennes.grid5000.fr` (killerdroid) lancée en tâche de fond (CPU/réseau uniquement, aucune concurrence GPU) : targets Top-K precomputées (hotpotqa_full + openr1_math_full, train+val) et tous les checkpoints. Quota home Rennes à 149G/191G (78% du quota souple) -- justifie l'action maintenant sans être critique.
+
+## 2026-09-20 — reasoning OOM à batch_size=128, relancé à batch_size=32
+
+`reasoning` (2 streams thinking+answer, max_thinking_len=1024) a planté en OOM à `batch_size=128` (44GB A40 insuffisant, contrairement à retrieval qui a de la marge à cette taille -- le stream `thinking` fait exploser la mémoire, contrairement au simple stream `answer` de retrieval). Relancé à `batch_size=32`, confirmé actif.
