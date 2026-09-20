@@ -313,3 +313,14 @@ Demande `model-design` (priorité 3/4) : precompute Teacher sur les jeux complet
 - `learn/distill/prepare_retrieval_data.py --n_samples 90000 --out_dir data/distill/hotpotqa_full`.
 
 Étape suivante une fois la génération terminée : precompute Teacher Top-K32 (LFM2-1.2B) à cette échelle -- goulot d'étranglement attendu (~3 ex/s historique sur L40S/H100, ≈5h pour ~130k exemples au total train+val) -- shard sur plusieurs GPU Ada/Hopper en parallèle comme d'habitude une fois les fichiers prêts.
+
+## 2026-09-20 — Chantier 4 (use_ff x n_step degradation, retrieval) : dégradation quasi nulle ici, use_ff aide un peu partout
+
+Demande `model-design` (priorité 4/4) : comparaison `use_ff=True/False` à `n_step=4` vs `n_step=8`, `d_model=256`, HotpotQA, 2000 pas, GPU (`abacus17-1`), CE pure (pas de KD).
+
+| | n_step=4 | n_step=8 | dégradation (8-4) |
+|---|---|---|---|
+| `use_ff=False` | 5.9215 | 5.9304 | +0.009 (quasi nulle) |
+| `use_ff=True` | 5.7676 | 5.7198 | **-0.048** (amélioration) |
+
+**Lecture** : contrairement à Piste A/C sur texte réel (où `use_ff=True` bat clairement `False` de ~1 point ET où la dégradation `n_step` était un vrai problème documenté), ici sur retrieval/HotpotQA à cette échelle (`d_model=256`, 2000 pas), **la dégradation `n_step` de 4 à 8 est quasiment inexistante même SANS `use_ff`** (+0.009, dans le bruit) -- donc rien à "réparer" ici, `use_ff` n'a pas de dégradation à corriger sur cette tâche/config. `use_ff=True` bat quand même `False` dans l'absolu (~0.15-0.21 de moins, cohérent en signe avec le résultat Piste A/C) et améliore même légèrement en passant de n_step=4 à 8 (au lieu de dégrader). Conclusion : le phénomène de dégradation `n_step` semble spécifique à la tâche/échelle de Piste A/C (texte réel, `d_model=1024`, budget plus long), pas un phénomène général reproduit ici sur retrieval à petite échelle. Relayé à `model-design`.
