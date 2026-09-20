@@ -63,3 +63,40 @@ Logs : `logs/ingest8ter_scale_baseline.log`, `logs/ingest8ter_scale_ingest.log` 
 | `--ingest_kb --ingest_n_step 3`, `d_model=512` | 3000 | 295s | **4.665** | **5.484** |
 
 **Lecture** : l'hypothèse de `long-term-memory-builder` (le mécanisme récurrent a besoin de plus de capacité pour rivaliser) n'est **pas confirmée** -- à `d_model=512` avec des documents plus riches (`block_size=128, n_docs_max=20` au lieu de `64/10`), l'écart baseline vs `--ingest_kb` **persiste et s'accentue légèrement en train** (0.251 d'écart vs 0.007 à `d_model=256`) et reste présent en val (+0.11, quasi identique à l'écart mesuré à petite échelle). Coût toujours ~1.3x supérieur ici (295s vs 226s, ratio plus faible qu'à `d_model=256` où c'était ~2x -- cohérent avec un coût fixe d'ingestion qui pèse relativement moins à mesure que le coût du reste du modèle augmente). **Conclusion renforcée** : sur ces deux échelles testées (`d_model=256` et `512`) et sur HotpotQA (lookup à faible profondeur), la projection statique k_proj/v_proj reste au moins aussi bonne que l'ingestion dynamique par pass récurrent, à moindre coût. Relayé à `long-term-memory-builder`.
+
+## 2026-09-20 — Protocole synthétique composition (num_hops=2) vs contrôle (num_hops=1) : premier signal positif pour `--ingest_kb`
+
+Constat préalable : `num_hops` (= `len(supporting_facts.title)`) vaut **2 au minimum sur tout le val set HotpotQA** (distribution {2:1394, 3:438, 4:143, 5:19, 6:5, 8:1}) -- structurel au format "distractor" du dataset, aucun exemple à 0/1 hop. La stratification `answer_hops_ge2`/`answer_hops_le1` (câblée dans `evaluate()`, `learn/indexed_attention/train_prompt_response.py`, commit `e798ed4`) ne peut donc rien montrer sur HotpotQA seul (`answer_hops_le1_n=0` confirmé sur tous les batches val d'un run réel). Généré un jeu synthétique dédié (`learn/distill/prepare_synthetic_composition_data.py`, commit `95ba141`) avec un vrai groupe à 1 hop :
+- **composition** (`num_hops=2`) : Doc A relie une entité à un "pont", Doc B relie ce pont à la valeur finale -- la valeur finale n'apparaît JAMAIS avec l'entité directement, les deux docs sont strictement nécessaires, aucun raccourci lexical.
+- **contrôle** (`num_hops=1`) : un seul doc énonce directement entité → valeur finale, même structure de question, mêmes distracteurs (même famille de templates, entités/lieux inventés par combinatoire préfixe+suffixe).
+
+900 train (444 composition / 456 contrôle), 100 val (56/44). Lancé baseline §8 vs `--ingest_kb --ingest_n_step 3` (`d_model=512, n_head=8`, `block_size=64, n_docs_max=10`, `max_steps=3000`, seed=0) sur `abacus17-1` GPU0.
+
+**Résultat (3000 pas fixés pour les deux)** :
+
+| variante | final_loss (train) | val_answer (pooled) | val composition (`ge2`, n=56) | val contrôle (`le1`, n=44) |
+|---|---|---|---|---|
+| baseline §8 | 1.111 | 1.255 | **1.344** | 1.224 |
+| `--ingest_kb --ingest_n_step 3` | 1.211 | **1.208** | **1.230** | 1.247 |
+
+**Lecture** : c'est le premier signal positif pour `--ingest_kb` dans tout ce fil. Sur le groupe composition (celui qui nécessite structurellement de chaîner deux documents), `--ingest_kb` bat la baseline (1.230 vs 1.344, -0.114) -- exactement l'effet attendu si le pass récurrent d'ingestion permet une forme de composition/liaison inter-documents que la simple projection k_proj/v_proj ne capture pas aussi bien. Sur le groupe contrôle (1 doc suffit), c'est l'inverse mais plus faible (1.247 vs 1.224, +0.023) -- cohérent avec l'idée que l'ingestion n'apporte rien (voire coûte un peu) quand la composition n'est pas nécessaire. Le pooled val (moyenne des deux groupes) devient même favorable à `--ingest_kb` (1.208 vs 1.255) alors qu'il ne l'était jamais sur HotpotQA pur.
+
+**Prudence nécessaire** : un seul seed, un seul budget, jeu synthétique de petite taille (900 exemples train, structure volontairement simple/template) -- signal à confirmer (plusieurs seeds, budget plus long, éventuellement un vrai jeu composition plus varié) avant de le traiter comme un résultat définitif, mais c'est la première fois que la stratification montre un effet différencié cohérent avec l'hypothèse de départ (`--ingest_kb` utile spécifiquement pour la composition inter-documents). Relayé à `long-term-memory-builder`.
+
+## 2026-09-20 — Protocole proposé : synthèse inter-documents (stratification par num_hops)
+
+**Motivation.** Les deux tests précédents (`d_model=256` et `512`, HotpotQA distractor, budget 3000 pas) sont négatifs sur une métrique de val_answer POOLÉE sur toutes les questions, quel que soit leur nombre de sauts réels. Or l'avantage attendu de l'ingestion dynamique (mémoire associative construite par le pass récurrent, capable de fusionner l'info de plusieurs documents dans le registre `R_t`) n'a de raison de se manifester QUE sur les questions qui exigent réellement de combiner ≥2 documents ingérés -- pas sur celles où une seule passe de projection directe suffit déjà à localiser le fait. En moyennant tout ensemble, un gain réel mais localisé sur le sous-ensemble multi-hop peut être noyé par la majorité des questions à faible profondeur (déjà noté : "HotpotQA lookup peu profond" dans le run `noctx`, où la mémorisation pure sans documents gagnait légèrement).
+
+**Bonne nouvelle : la donnée existe déjà.** `learn/distill/prepare_retrieval_data.py::build_example` calcule déjà `num_hops = len(supporting_facts.title)` par exemple (HotpotQA fournit nativement ce label), mais ce champ n'est actuellement PAS propagé jusqu'à `data/prompt_response_dataset.py` ni `learn/indexed_attention/train_prompt_response.py` -- aucune évaluation stratifiée par hop-count n'existe. Pas besoin de régénérer de données, juste de brancher ce champ jusqu'à l'éval.
+
+**Protocole.**
+1. Propager `num_hops` de `prepare_retrieval_data.py` jusqu'à `RetrievalPromptDataset` (déjà lu dans le JSONL, juste ne pas le jeter) et jusqu'à `evaluate()` de `train_prompt_response.py`.
+2. Construire deux sous-ensembles de val (même run, pas de nouvelle donnée) :
+   - **A (multi-hop réel)** : `num_hops >= 2`.
+   - **B (contrôle, faible profondeur)** : `num_hops <= 1`.
+3. Reprendre EXACTEMENT la config du dernier test négatif (`d_model=512, block_size=128, n_docs_max=20, max_steps=3000, seed=0`, baseline §8 vs `--ingest_kb --ingest_n_step 3`) -- pas de nouveau réglage à calibrer, seul l'axe d'évaluation change.
+4. Rapporter `val_answer` séparément sur A et B pour les deux variantes, et l'écart `ingest_kb - baseline` PAR sous-ensemble (pas seulement l'écart pooled déjà connu).
+5. **Lecture attendue si l'hypothèse est vraie** : écart favorable à `ingest_kb` (ou au moins réduit) sur A, écart défavorable ou neutre sur B (cohérent avec le pooled déjà mesuré, dominé par B qui est numériquement majoritaire dans HotpotQA distractor).
+6. **Repli si non concluant** : HotpotQA multi-hop est connu dans la littérature QA pour être souvent résoluble par raccourci lexical (chevauchement de mots entre question et un seul document) sans vraie combinaison -- si la stratification par `num_hops` natif ne révèle rien, construire un petit jeu SYNTHÉTIQUE de composition (2 documents, chacun porteur de la moitié de l'info nécessaire à la réponse, aucun raccourci lexical possible sur un seul document) pour un signal plus propre, avant de conclure que le mécanisme n'apporte aucun avantage même en présence de vraie synthèse.
+
+**Coût** : quasi nul en plus des runs déjà faits -- même pipeline, même budget H100 (~250-500s/run à `d_model=512`), le seul travail est le branchement de `num_hops` + le split de l'éval en deux rapports au lieu d'un.
