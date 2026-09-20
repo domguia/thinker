@@ -49,6 +49,18 @@ instead of the shared `self.embed`. Lets several streams each decode into
 once, without the KD tokenizer-matching constraint this project has had to
 work around so far (core/model_families.py). Streams absent from this dict
 are unaffected.
+
+`tie_stream_embed`/`embed_init`/`stream_embed_init`/`stream_head_init`
+(spec §13.1/13.2, 2026-09-20): a large vocab's embedding+head are the
+biggest parameter block by far (§13). `tie_stream_embed` shares a stream's
+head weight with its own input embedding table (self.embed or
+stream_embed[name]) instead of a second independent matrix -- halves that
+block at zero behavior cost beyond the tied gradient. The `*_init` args let
+a caller (offline, from an actual Teacher checkpoint -- not this module's
+job to load one) seed these tables from a projected Teacher matrix instead
+of random init; `freeze_embed`/`freeze_stream_embed` then stop the
+optimizer from tracking state for them (does not reduce forward/backward
+FLOPs through them, only optimizer memory/update cost).
 """
 
 import torch
@@ -160,7 +172,10 @@ class Thinker(nn.Module):
                  decouple_kv: bool = True, pool_n_head: int = 1, k_dim: int = None,
                  disable_kb: bool = False, disable_sm: bool = False,
                  stream_sequence: dict = None, max_target_len: int = None,
-                 stream_vocab_sizes: dict = None, use_ingest_token: bool = False):
+                 stream_vocab_sizes: dict = None, use_ingest_token: bool = False,
+                 tie_stream_embed: set = None, embed_init: torch.Tensor = None,
+                 freeze_embed: bool = False, stream_embed_init: dict = None,
+                 freeze_stream_embed: set = None, stream_head_init: dict = None):
         super().__init__()
         # spec §8ter: a dedicated ingestion-marker embedding, id reserved just
         # past the tokenizer's own vocab_size (same pattern as the synthetic
@@ -253,6 +268,88 @@ class Thinker(nn.Module):
             )
             for name, dim in stream_dims.items()
         })
+
+        # spec §13.2: a stream's head and its input embedding table are the
+        # same shape ((vocab, d_model)) whenever the stream's out_dim equals
+        # that table's vocab size -- tying them (sharing the same Parameter,
+        # not just copying values) roughly halves the single biggest
+        # parameter block at a large vocab size, standard LM practice. Named
+        # per-stream (not a single tie_embed_head bool) because §11ter's
+        # per-stream vocabularies mean there can be several independent
+        # (embed, head) pairs to tie, not just one.
+        tie_stream_embed = tie_stream_embed or set()
+        for name in tie_stream_embed:
+            assert name in self.streams, f"tie_stream_embed: unknown stream {name!r}"
+            table = self.stream_embed[name] if name in self.stream_embed else self.embed
+            head = self.streams[name].head
+            assert head.weight.shape == table.weight.shape, (
+                f"tie_stream_embed[{name!r}]: stream_dims[{name!r}]={head.weight.shape[0]} must equal "
+                f"the embedding table's vocab size ({table.weight.shape[0]}) to tie weights"
+            )
+            head.weight = table.weight
+
+        # spec §13.1/13.2: initialize self.embed/stream_embed/a stream's head
+        # from an already-projected Teacher matrix instead of random init --
+        # the projection itself (Teacher hidden_size -> d_model, random or
+        # SVD, spec §13.1) is the CALLER's job (needs the actual Teacher
+        # checkpoint, offline, not something Thinker itself should load).
+        # freeze_embed/freeze_stream_embed matter for optimizer state size,
+        # not FLOPs (the forward/backward matmul through a frozen table still
+        # happens) -- per §13.1, freezing the head is deliberately not
+        # offered: it must keep adapting to this model's own internal state,
+        # unlike the input embedding's largely architecture-independent
+        # token-to-representation role.
+        if embed_init is not None:
+            assert embed_init.shape == self.embed.weight.shape, (
+                f"embed_init shape {tuple(embed_init.shape)} != self.embed.weight shape "
+                f"{tuple(self.embed.weight.shape)}"
+            )
+            with torch.no_grad():
+                self.embed.weight.copy_(embed_init)
+            self.embed.weight.requires_grad = not freeze_embed
+        if freeze_embed:
+            tied_to_embed = [name for name in tie_stream_embed if name not in self.stream_embed]
+            assert not tied_to_embed, (
+                f"freeze_embed=True would also freeze {tied_to_embed}'s head (tie_stream_embed shares "
+                f"the same Parameter) -- spec §13.1 deliberately recommends against freezing a stream's "
+                f"head, only its input embedding; untie {tied_to_embed} from self.embed if this is intended"
+            )
+
+        # (tying + stream_embed_init on the same name is fine and expected --
+        # it initializes the shared table both the embedding and, since
+        # tie_stream_embed makes them the same Parameter, the head read from
+        # for free. Only tying + stream_head_init together is a real
+        # conflict, guarded below: that would ambiguously specify two
+        # different init tensors for what is now a single shared weight.)
+        stream_embed_init = stream_embed_init or {}
+        freeze_stream_embed = freeze_stream_embed or set()
+        for name, init in stream_embed_init.items():
+            table = self.stream_embed[name]
+            assert init.shape == table.weight.shape, (
+                f"stream_embed_init[{name!r}] shape {tuple(init.shape)} != {tuple(table.weight.shape)}"
+            )
+            with torch.no_grad():
+                table.weight.copy_(init)
+            table.weight.requires_grad = name not in freeze_stream_embed
+        tied_stream_embed_frozen = [name for name in tie_stream_embed
+                                     if name in self.stream_embed and name in freeze_stream_embed]
+        assert not tied_stream_embed_frozen, (
+            f"freeze_stream_embed would also freeze {tied_stream_embed_frozen}'s head (tied via "
+            f"tie_stream_embed) -- spec §13.1 recommends against freezing a stream's head"
+        )
+
+        stream_head_init = stream_head_init or {}
+        for name, init in stream_head_init.items():
+            assert name not in tie_stream_embed, (
+                f"stream_head_init[{name!r}]: this stream's head is tied to its embedding, "
+                f"initializing it here would silently also overwrite the embedding weight"
+            )
+            head = self.streams[name].head
+            assert init.shape == head.weight.shape, (
+                f"stream_head_init[{name!r}] shape {tuple(init.shape)} != {tuple(head.weight.shape)}"
+            )
+            with torch.no_grad():
+                head.weight.copy_(init)
 
     def _step(self, R: torch.Tensor, sm_k: torch.Tensor, sm_v: torch.Tensor, external_kb: tuple = None):
         """

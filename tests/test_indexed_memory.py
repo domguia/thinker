@@ -988,5 +988,111 @@ class TestCrossTokenizerStream(unittest.TestCase):
                   n_step=1, target_input=torch.randint(0, 20, (B, T)))
 
 
+class TestWeightTyingAndTeacherInit(unittest.TestCase):
+    """spec §13.1/13.2: reduce the vocab embedding/head's parameter/init
+    cost via weight tying and optional Teacher-derived initialization."""
+
+    def _make_model(self, vocab=20, d_model=8, **kwargs):
+        return Thinker(
+            vocab_size=vocab, d_model=d_model, n_register=2, block_size=4, depth=1,
+            stream_dims={'answer': vocab}, **kwargs,
+        )
+
+    def test_tie_stream_embed_shares_the_same_parameter(self):
+        model = self._make_model(tie_stream_embed={'answer'})
+        self.assertIs(model.streams['answer'].head.weight, model.embed.weight)
+
+    def test_tied_weight_updates_from_either_gradient_path(self):
+        torch.manual_seed(0)
+        model = self._make_model(vocab=20, d_model=8, tie_stream_embed={'answer'})
+        B, N = 2, 4
+        kb_tokens = torch.randint(0, 20, (B, N))
+        query_tokens = torch.randint(0, 20, (B, 2))
+        _, streams = model(kb_tokens, torch.zeros(B, N, dtype=torch.long), query_tokens, n_step=1)
+        streams['answer'].sum().backward()
+        self.assertIsNotNone(model.embed.weight.grad)
+        self.assertTrue(torch.any(model.embed.weight.grad != 0))
+
+    def test_tie_rejects_mismatched_vocab_size(self):
+        with self.assertRaises(AssertionError):
+            Thinker(vocab_size=20, d_model=8, n_register=2, block_size=4, depth=1,
+                    stream_dims={'answer': 30}, tie_stream_embed={'answer'})
+
+    def test_untied_streams_have_independent_weights_by_default(self):
+        model = self._make_model()
+        self.assertIsNot(model.streams['answer'].head.weight, model.embed.weight)
+
+    def test_embed_init_copies_values_and_freeze_stops_gradient(self):
+        vocab, d_model = 20, 8
+        init = torch.randn(vocab, d_model)
+        model = self._make_model(vocab=vocab, d_model=d_model, embed_init=init, freeze_embed=True)
+        torch.testing.assert_close(model.embed.weight.data, init)
+        self.assertFalse(model.embed.weight.requires_grad)
+
+    def test_embed_init_without_freeze_stays_trainable(self):
+        vocab, d_model = 20, 8
+        init = torch.randn(vocab, d_model)
+        model = self._make_model(vocab=vocab, d_model=d_model, embed_init=init)
+        self.assertTrue(model.embed.weight.requires_grad)
+
+    def test_embed_init_rejects_wrong_shape(self):
+        with self.assertRaises(AssertionError):
+            self._make_model(vocab=20, d_model=8, embed_init=torch.randn(20, 999))
+
+    def test_stream_embed_init_targets_the_right_table(self):
+        d_model = 8
+        other_vocab = 15
+        init = torch.randn(other_vocab, d_model)
+        model = Thinker(
+            vocab_size=20, d_model=d_model, n_register=2, block_size=4, depth=1,
+            stream_dims={'answer': 20, 'other_tok': other_vocab},
+            stream_vocab_sizes={'other_tok': other_vocab},
+            stream_embed_init={'other_tok': init}, freeze_stream_embed={'other_tok'},
+        )
+        torch.testing.assert_close(model.stream_embed['other_tok'].weight.data, init)
+        self.assertFalse(model.stream_embed['other_tok'].weight.requires_grad)
+        self.assertTrue(model.embed.weight.requires_grad)  # unaffected
+
+    def test_stream_head_init_copies_values(self):
+        vocab, d_model = 20, 8
+        init = torch.randn(vocab, d_model)
+        model = self._make_model(vocab=vocab, d_model=d_model, stream_head_init={'answer': init})
+        torch.testing.assert_close(model.streams['answer'].head.weight.data, init)
+
+    def test_stream_head_init_rejects_tied_stream(self):
+        vocab, d_model = 20, 8
+        init = torch.randn(vocab, d_model)
+        with self.assertRaises(AssertionError):
+            self._make_model(vocab=vocab, d_model=d_model, tie_stream_embed={'answer'},
+                              stream_head_init={'answer': init})
+
+    def test_freeze_embed_rejects_when_a_stream_is_tied_to_it(self):
+        with self.assertRaises(AssertionError):
+            self._make_model(tie_stream_embed={'answer'}, freeze_embed=True)
+
+    def test_freeze_stream_embed_rejects_when_its_stream_is_tied(self):
+        d_model = 8
+        other_vocab = 15
+        with self.assertRaises(AssertionError):
+            Thinker(
+                vocab_size=20, d_model=d_model, n_register=2, block_size=4, depth=1,
+                stream_dims={'answer': 20, 'other_tok': other_vocab},
+                stream_vocab_sizes={'other_tok': other_vocab},
+                tie_stream_embed={'other_tok'}, freeze_stream_embed={'other_tok'},
+            )
+
+    def test_tie_and_stream_embed_init_together_initializes_the_shared_head_too(self):
+        d_model = 8
+        other_vocab = 15
+        init = torch.randn(other_vocab, d_model)
+        model = Thinker(
+            vocab_size=20, d_model=d_model, n_register=2, block_size=4, depth=1,
+            stream_dims={'answer': 20, 'other_tok': other_vocab},
+            stream_vocab_sizes={'other_tok': other_vocab},
+            tie_stream_embed={'other_tok'}, stream_embed_init={'other_tok': init},
+        )
+        torch.testing.assert_close(model.streams['other_tok'].head.weight.data, init)
+
+
 if __name__ == '__main__':
     unittest.main()
