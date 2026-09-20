@@ -342,3 +342,7 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 - Meme classe d'erreur que l'incident Nancy (frontend vs noeud) -- lance via `ssh rennes.grid5000.fr.g5k '...'` au lieu de `ssh abacus18-1.rennes.grid5000.fr.g5k '...'` directement. 18 cellules du sweep croise ont tourne (et ete tuees, rc=-9 apres 1-2 min a chaque fois, probablement une limite cgroup du frontend) sur `host=frennes` avant detection via l'observation `nvidia-smi`=0% alors que `pgrep` sur le frontend montrait des process actifs.
 - Nettoyage : process tues sur le frontend (PID directs), 18 state/claims orphelins identifies via `meta.host=="frennes"` et supprimes, relance correcte directement sur `abacus18-1.rennes.grid5000.fr.g5k`.
 - **Leçon a generaliser** : toujours verifier `meta.host` dans le state.json apres un lancement multi-noeud, quel que soit le site -- ce n'est pas specifique a Nancy, la meme erreur peut arriver sur n'importe quel site si la commande `ssh` cible le frontend par erreur.
+
+## 2026-09-20 — OLMo-2-7B crash (flash_attn2 exige fp16/bf16, fp32 par defaut) -- corrige et relance
+- Job A100 (4122675) a tourne et Terminated sans produire de .npz -- `RuntimeError: FlashAttention only support fp16 and bf16 data type` (le chargement par defaut est fp32, `precompute_teacher_targets.py` a deja un flag `--dtype bfloat16` non utilise au premier lancement).
+- Relance : job **4122729** (abacus21, meme profil), avec `--dtype bfloat16` explicite pour les deux precomputes (val openr1_math + hotpotqa).
