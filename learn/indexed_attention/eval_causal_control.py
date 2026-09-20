@@ -40,10 +40,15 @@ def shuffle_documents(batch, block_size: int, n_docs_max: int, target: str = "al
 
     target: "all" (every document block, the coarse control) / "supporting"
     (only gold supporting-fact blocks, per-example `is_supporting` mask) /
-    "distractor" (only non-supporting blocks) -- model-design's fine-grained
-    control (2026-09-20): if corrupting "supporting" hurts much more than
-    corrupting "distractor", that's evidence of TARGETED retrieval rather
-    than generic sensitivity to any coherent text.
+    "distractor" (only non-supporting blocks) / "distractor_matched" (a
+    RANDOM subset of distractor blocks, exactly `is_supporting.sum()` many
+    per example -- count-matched against "supporting", since HotpotQA has
+    ~2 supporting vs ~8 distractors: comparing "corrupt 2 docs" against
+    "corrupt 8 docs" confounds relevance with sheer amount of context
+    corrupted, caught by model-design 2026-09-20) -- if corrupting
+    "supporting" hurts much more than corrupting an EQUAL COUNT of
+    distractors, that's evidence of TARGETED retrieval rather than generic
+    sensitivity to any coherent text / amount of context disturbed.
     """
     b = batch["kb_tokens"].shape[0]
     if b < 2:
@@ -52,12 +57,23 @@ def shuffle_documents(batch, block_size: int, n_docs_max: int, target: str = "al
     while (perm == torch.arange(b)).any():  # avoid any example mapping to itself
         perm = torch.randperm(b)
     out = {k: v.clone() for k, v in batch.items()}
+    if target == "distractor_matched":
+        n_sup = batch["is_supporting"].sum(dim=1)  # (b,) per-example count to match
+        distractor_mask = ~batch["is_supporting"]  # (b, n_docs_max)
+        # random priority per distractor slot, per example; select the n_sup lowest-priority
+        # ones among the True distractor slots (equivalent to sampling n_sup without replacement)
+        priority = torch.rand(b, n_docs_max)
+        priority[~distractor_mask] = 2.0  # exclude supporting slots from selection entirely
+        rank = priority.argsort(dim=1).argsort(dim=1)  # rank within row, 0 = lowest priority value
+        sel_matrix = rank < n_sup.unsqueeze(1)  # (b, n_docs_max) bool
     for i in range(n_docs_max):
         start, end = i * block_size, (i + 1) * block_size
         if target == "supporting":
             sel = batch["is_supporting"][:, i]
         elif target == "distractor":
             sel = ~batch["is_supporting"][:, i]
+        elif target == "distractor_matched":
+            sel = sel_matrix[:, i]
         else:
             sel = torch.ones(b, dtype=torch.bool)
         if not sel.any():
@@ -185,6 +201,26 @@ def main() -> None:
         print(f"  (|t| > ~2 => difference unlikely to be noise at this n; "
               f"positive mean => distractor corruption hurts LESS, i.e. supporting matters more)",
               flush=True)
+
+        # Count-matched control (model-design, 2026-09-20): "distractor" above corrupts ~8
+        # docs/example vs "supporting"'s ~2 -- confounds relevance with sheer document COUNT.
+        # This corrupts a random subset of distractors, exactly matching each example's own
+        # supporting-doc count, for an apples-to-apples comparison.
+        shuffled_matched, per_ex_matched = run_eval(
+            model, val_loader, args.device, args.block_size, args.n_docs_max, args.n_step,
+            shuffle="distractor_matched", n_batches=args.n_batches, return_per_example=True)
+        print(f"val_answer (distractor shuffled, COUNT-MATCHED to supporting) : {shuffled_matched:.4f}",
+              flush=True)
+        print(f"degradation (matched_distractor - real)                      : "
+              f"{shuffled_matched - real:.4f}", flush=True)
+        diffs_matched = [a - b for a, b in zip(per_ex_supporting, per_ex_matched)]
+        n_m = len(diffs_matched)
+        mean_m = st.mean(diffs_matched)
+        std_m = st.stdev(diffs_matched) if n_m > 1 else float("nan")
+        se_m = std_m / (n_m ** 0.5) if n_m > 1 else float("nan")
+        t_m = mean_m / se_m if se_m else float("nan")
+        print(f"paired diff (supporting_loss - matched_distractor_loss), n={n_m}: "
+              f"mean={mean_m:.4f} std={std_m:.4f} se={se_m:.4f} t={t_m:.3f}", flush=True)
 
 
 if __name__ == "__main__":
