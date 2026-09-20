@@ -278,3 +278,11 @@ Sauvegarde vers `storage3.rennes.grid5000.fr` (killerdroid) lancée en tâche de
 `reasoning` a encore planté en OOM à `batch_size=32` (cross_entropy sur vocab 64400 x 2 streams reste trop lourd même réduit de 128 à 32). Relancé à `batch_size=8`, confirmé actif (en chargement).
 
 `general` (KD, precompute Teacher fait -- 2700 train/300 val) tourne bien : loss 10.45→~4.8 en ~1300 pas, val_loss=6.08/val_ppl=437 au step 1000, KD actif (kd~3.8-4.3 stable).
+
+## 2026-09-20 — Diagnostic contrôle causal RÉSOLU : régénération de données non-déterministe, pas un bug de script
+
+Test ciblé demandé par `model-design` : appel DIRECT de `evaluate()` (la fonction d'entraînement elle-même, pas ma réimplémentation) sur `flagship_best.pt` avec un DataLoader construit à l'identique -- **même résultat anormal (10.61)**. Ceci élimine définitivement l'hypothèse "bug dans eval_causal_control.py" : le harnais d'évaluation est correct.
+
+**Cause confirmée** : `hotpotqa_full/{train,val}.jsonl` ont été régénérés APRÈS l'entraînement flagship (pour ajouter `is_supporting`) via `prepare_retrieval_data.py --n_samples 90000 --seed 0`, en supposant le streaming HF déterministe. Un test de déterminisme à petite échelle (`n_samples=100`) avait donné un résultat identique sur deux exécutions, MAIS ce test ne couvre pas la même échelle -- à 90000 exemples, le stream HF (buffer de shuffle interne) n'est probablement PAS parfaitement déterministe malgré le seed fixé, produisant un tirage différent des documents/questions à grande échelle. Le modèle voit donc des exemples qu'il n'a jamais vus à l'entraînement (même domaine HotpotQA, mais échantillon différent) -- expliquant une performance dégradée mais pas totalement aléatoire (9.32 sur "train" régénéré vs ~11.3 aléatoire vs ~3.3-4 sur les vrais batches d'entraînement).
+
+**Conséquence** : tous les résultats du contrôle causal (grossier ET fin, sur les 3 seeds) sont **INVALIDES** -- ils ont été calculés sur un val set différent de celui utilisé pendant l'entraînement flagship, pas sur les données réelles vues par le modèle. Nécessite soit de regénérer une val.jsonl et de VÉRIFIER qu'elle donne un résultat cohérent avec les logs d'entraînement AVANT de relancer le contrôle causal, soit d'accepter que ce fil reste non concluant faute de fichier de référence exact. Relayé à `model-design`.
