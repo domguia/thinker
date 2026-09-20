@@ -53,4 +53,13 @@ Lancé (baseline §8 vs `--ingest_kb --ingest_n_step 3`), config passée à l'é
 - `block_size=64, n_docs_max=10` → **`block_size=128, n_docs_max=20`** (documents plus riches/plus nombreux).
 - Budget identique : `--max_steps 3000 --max_time_minutes 480`, `--val_data` inclus, `seed=0` identique aux deux runs.
 
-Logs : `logs/ingest8ter_scale_baseline.log`, `logs/ingest8ter_scale_ingest.log` sur `abacus27-1`. Confirmés actifs sur GPU (`nvidia-smi` avant lancement : H100 à 0 MiB, code/données déjà présents via NFS Rennes partagé). Résultat à suivre.
+Logs : `logs/ingest8ter_scale_baseline.log`, `logs/ingest8ter_scale_ingest.log` sur `abacus27-1`. Confirmés actifs sur GPU (`nvidia-smi` avant lancement : H100 à 0 MiB, code/données déjà présents via NFS Rennes partagé).
+
+**Résultat (2026-09-20, H100, 3000 pas fixés pour les deux)** :
+
+| variante | pas | temps | final_loss (train) | val_answer |
+|---|---|---|---|---|
+| baseline §8, `d_model=512` | 3000 | 226s | **4.414** | **5.370** |
+| `--ingest_kb --ingest_n_step 3`, `d_model=512` | 3000 | 295s | **4.665** | **5.484** |
+
+**Lecture** : l'hypothèse de `long-term-memory-builder` (le mécanisme récurrent a besoin de plus de capacité pour rivaliser) n'est **pas confirmée** -- à `d_model=512` avec des documents plus riches (`block_size=128, n_docs_max=20` au lieu de `64/10`), l'écart baseline vs `--ingest_kb` **persiste et s'accentue légèrement en train** (0.251 d'écart vs 0.007 à `d_model=256`) et reste présent en val (+0.11, quasi identique à l'écart mesuré à petite échelle). Coût toujours ~1.3x supérieur ici (295s vs 226s, ratio plus faible qu'à `d_model=256` où c'était ~2x -- cohérent avec un coût fixe d'ingestion qui pèse relativement moins à mesure que le coût du reste du modèle augmente). **Conclusion renforcée** : sur ces deux échelles testées (`d_model=256` et `512`) et sur HotpotQA (lookup à faible profondeur), la projection statique k_proj/v_proj reste au moins aussi bonne que l'ingestion dynamique par pass récurrent, à moindre coût. Relayé à `long-term-memory-builder`.
