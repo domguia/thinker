@@ -141,12 +141,17 @@ class OutputStream(nn.Module):
         self.head = nn.Linear(d_model, out_dim)
 
     def forward(self, sm_k: torch.Tensor, sm_v: torch.Tensor,
-                query_input: torch.Tensor = None) -> torch.Tensor:
+                query_input: torch.Tensor = None, return_hidden: bool = False) -> torch.Tensor:
         """
         query_input (sequence_mode only): (B, T, d_model) teacher-forced
         target-token embeddings (spec §14.3's q_t = embed(target_token_{t-1}),
         computed by the caller since only Thinker owns `self.embed`) -- this
         method adds the learned position embedding on top.
+
+        return_hidden=True returns the pre-head hidden state (B, T, d_model)
+        instead of `self.head(x)` -- lets a caller run the head itself
+        through a chunked loss (spec §13.3, learn/distill/chunked_loss.py)
+        instead of materializing the full (B, T, vocab) logits tensor here.
         """
         B = sm_k.shape[0]
         if self.sequence_mode:
@@ -160,7 +165,7 @@ class OutputStream(nn.Module):
             x = self.query_seed.unsqueeze(0).expand(B, -1, -1)
         for layer in self.layers:
             x = layer(x, sm_k, sm_v)
-        return self.head(x)
+        return x if return_hidden else self.head(x)
 
 
 class Thinker(nn.Module):
@@ -505,7 +510,7 @@ class Thinker(nn.Module):
     def forward(self, kb_tokens: torch.Tensor, kb_source_ids: torch.Tensor,
                 query_tokens: torch.Tensor, n_step: int, kb_leaf_mask: torch.Tensor = None,
                 register_init_override: torch.Tensor = None, target_input: torch.Tensor = None,
-                kb_prebuilt: bool = False):
+                kb_prebuilt: bool = False, return_hidden: bool = False):
         """
         kb_tokens: (B, N) leaf token ids for the unified input∪KB sequence
             (N must equal block_size ** depth when depth > 0).
@@ -551,6 +556,11 @@ class Thinker(nn.Module):
             already populated via `self.memory.add_static_level(...)` (one
             call per ingested document, using `self.ingest(...)`'s output),
             instead of deriving K/V from `kb_tokens` via k_proj/v_proj.
+        return_hidden: spec §13.3 -- when True, every stream in the returned
+            dict yields its pre-head hidden state (B, T, d_model) instead of
+            logits (B, T, out_dim), letting the caller run the head itself
+            through a chunked loss (learn/distill/chunked_loss.py) instead of
+            materializing the full (B, T, vocab) logits tensor here.
 
         Returns: (R, stream_outputs) with R: (B, n_register, d_model) the final
                  core register state, and stream_outputs a dict {name: (B, 1, out_dim)}
@@ -613,7 +623,10 @@ class Thinker(nn.Module):
             return shared_target_embed
 
         stream_outputs = {
-            name: (stream(sm_k, sm_v, query_input=stream_query_input(name)) if stream.sequence_mode else stream(sm_k, sm_v))
+            name: (
+                stream(sm_k, sm_v, query_input=stream_query_input(name), return_hidden=return_hidden)
+                if stream.sequence_mode else stream(sm_k, sm_v, return_hidden=return_hidden)
+            )
             for name, stream in self.streams.items()
         }
         return R, stream_outputs
