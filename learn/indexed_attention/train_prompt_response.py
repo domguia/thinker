@@ -385,6 +385,9 @@ def main() -> None:
                    help="comma-separated n_step_test values, probed on held-out --val_data after training "
                         "-- does 'thinking longer' at inference help solve reasoning/retrieval examples "
                         "it was never trained with that many steps on?")
+    p.add_argument("--init_from_checkpoint", default=None,
+                    help="warm-start: load model.state_dict() from this .pt before training -- weights only, "
+                         "fresh optimizer/LR schedule/step counter (no real resume mechanism yet).")
     p.add_argument("--save_checkpoint_path", default=None)
     p.add_argument("--save_best_checkpoint_path", default=None,
                     help="save model.state_dict() here every time val_answer improves (not just at the end) "
@@ -455,6 +458,14 @@ def main() -> None:
     raw_model = model  # unwrapped module -- state_dict() below always saves/loads THIS, so checkpoints stay
                         # compatible with eval_val_loss.py/etc. regardless of --compile (an OptimizedModule's
                         # own state_dict() has carried an "_orig_mod." key prefix on some torch versions).
+
+    if args.init_from_checkpoint:
+        # Warm-start (2026-09-20, model-design): load weights only, fresh optimizer/LR schedule/step
+        # counter -- not a real resume (no optimizer state saved), but enough to not throw away
+        # progress from a run interrupted by walltime expiry (e.g. reasoning at val_answer=3.317).
+        init_sd = torch.load(args.init_from_checkpoint, map_location=device)
+        raw_model.load_state_dict(init_sd)
+        print(f"warm-started weights from {args.init_from_checkpoint} (fresh optimizer/step)", flush=True)
 
     embed_teacher_target = None
     if args.embed_teacher_target:
