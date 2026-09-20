@@ -93,6 +93,8 @@ zero perte -- voir les fichiers `dev_notes/experiments/*.md`.
 
 - **2026-09-20** -- [lr_warmup_sweep_ext lance: extension LR 1e-4 a 7e-4](experiments/real_text_baselines.md)
 
+- **2026-09-20** -- [Run KD retrieval actif, kd_answer=0 (fallback), npz corrompu par kill premature puis corrige](experiments/distillation.md)
+
 ## Résumé de nuit 2026-09-19 -> 2026-09-20 (autonomie confirmée par l'utilisateur ~15h35)
 
 **En cours de rédaction, mis à jour au fil de la nuit -- lire la version la plus récente en tête de ce fichier au réveil.**
