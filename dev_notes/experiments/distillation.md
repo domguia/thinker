@@ -280,6 +280,17 @@ Fix `a71f729` synchronisé, run KD retrieval tué et relancé (checkpoint préc�
 
 Confirme le fix `a71f729` de bout en bout : `RetrievalPromptDataset`, train, 18000 exemples -- **18000/18000 answer spans alignés (100%)**, contre 0/18000 avant. Exactement la prédiction de `model-design` (retrieval devait aligner presque parfaitement puisque `answer` y est verbatim, une fois la comparaison faite correctement). Run KD retrieval bénéficie maintenant d'un vrai signal KD sur 100% des exemples, pas de fallback CE résiduel à surveiller sur ce dataset.
 
+## 2026-09-20 — Diagnostic mémorisation retrieval (val_ce vs val_kd) : mémorisation GÉNÉRALE, pas spécifique au KD
+
+Demandé par `model-design` (priorité 1/4, urgent) : reprise du log complet `kd_run_retrieval_v2.log` (8000/8000 pas), comparaison train/val pour `ce_answer` (val `answer`) et `kd_answer` séparément, à steps comparables :
+
+| step | train `ce_answer` | val `answer` (=ce) | écart CE | train `kd_answer` | val `kd_answer` | écart KD |
+|---|---|---|---|---|---|---|
+| ~2000 | 5.86 | 6.80 | 0.94 | 4.75 | 5.68 | 0.93 |
+| ~8000 | 2.26-2.34 | 7.54 | ~5.2 | 1.70 | 6.39 | ~4.69 |
+
+**Lecture** : les deux écarts (CE et KD) croissent de façon quasi identique (facteur ×5.5 pour CE, ×5 pour KD entre step 2000 et 8000) -- contrairement au run 500M-core historique (`train_sft.py`, où `val_ce` restait plat ~0.10-0.13 pendant que `val_kd` divergeait seul de 0.40 à 0.82+), ici **les deux composantes divergent ensemble et dans des proportions comparables**. Conclusion directe (hypothèse 2 de `model-design`) : **mémorisation générale du modèle sur ce petit jeu (18000 exemples), pas un effet spécifique au terme KD**. Pas la peine de baisser `kd_alpha` sur cette base -- selon la propre logique de branchement de `model-design`, ça pointe plutôt vers le chantier scale-up (jeu complet plutôt que sous-échantillon) comme prochaine étape utile. Relayé immédiatement à `model-design`.
+
 ## 2026-09-20 — KD run retrieval complet (8000/8000 pas): fort surapprentissage
 
 `train_prompt_response.py --dataset_type retrieval --kd_alpha 0.5`, alignement KD 100% (fix confirmé). **Train `final_loss=2.07`, mais VAL `answer=7.54` (kd_answer=6.39) au step final** -- écart train/val massif, signe de surapprentissage marqué à ce budget (8000 pas, `d_model=1024`, pas de KD sur `thinking` ici puisque retrieval n'a qu'un stream `answer`). Le signal KD réel (confirmé actif) n'empêche pas l'écart -- à surveiller si un budget plus court ou une régularisation serait nécessaire avant de tirer des conclusions sur l'utilité du KD lui-même pour cette tâche.
