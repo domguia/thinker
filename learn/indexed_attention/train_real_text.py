@@ -384,6 +384,9 @@ def main():
     p.add_argument("--log_every", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--save_best_checkpoint_path", default=None,
+                    help="save model.state_dict() here every time val_loss improves (not just at the end) -- "
+                         "same pattern as train_prompt_response.py.")
     p.add_argument("--save_checkpoint_path", default=None,
                     help="save model.state_dict() here after training -- same convention as "
                          "learn/indexed_attention/train_kb_chain.py's flag of the same name. A "
@@ -490,6 +493,7 @@ def main():
     start_time = time.time()
     max_time_seconds = args.max_time_minutes * 60
     step = 0
+    best_val_loss = None
     loss_hist = []
     for batch_items, lane_doc in batcher:
         elapsed = time.time() - start_time
@@ -580,6 +584,12 @@ def main():
             val_ppl = torch.exp(torch.tensor(val_loss)).item()
             print(f"step={step:6d} val_loss={val_loss:.4f} val_ppl={val_ppl:.2f} (held-out)", flush=True)
             logger.progress(step, val_loss=val_loss, val_ppl=val_ppl)
+            if args.save_best_checkpoint_path is not None:
+                if best_val_loss is None or val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    torch.save(model.state_dict(), args.save_best_checkpoint_path)
+                    print(f"  new best val_loss={val_loss:.4f} -> checkpoint saved to "
+                          f"{args.save_best_checkpoint_path}", flush=True)
         step += 1
 
     print("\n---", flush=True)
