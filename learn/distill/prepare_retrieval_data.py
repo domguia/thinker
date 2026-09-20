@@ -49,14 +49,22 @@ def build_example(ex, tokenizer, max_length):
     if num_tokens > max_length:
         return None
 
+    # 2026-09-20 (model-design's fine-grained causal control): which of context_docs are
+    # gold "supporting" evidence vs distractors -- format_context's docs_list order matches
+    # ctx["title"], so this boolean mask lines up 1:1 with context_docs by position.
+    supporting_titles = set(ex.get("supporting_facts", {}).get("title", []))
+    titles = context.get("title", [])
+    is_supporting = [t in supporting_titles for t in titles]
+
     return {
         "question": question,
         "answer": answer,
         "context": context_text,
         "context_docs": context_docs,
+        "is_supporting": is_supporting,
         "text": text,
         "num_tokens": num_tokens,
-        "num_hops": len(ex.get("supporting_facts", {}).get("title", [])),
+        "num_hops": len(supporting_titles),
         "id": ex.get("id"),
     }
 
