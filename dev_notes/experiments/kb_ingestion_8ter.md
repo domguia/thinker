@@ -30,3 +30,7 @@ Baseline fait ~10x plus de pas dans le même budget mural et atteint une loss ne
 **`--ingest_kb --ingest_step_size 8 --ingest_n_step_max 3`** : step 1 en 18.7s -- nettement plus rapide que `--ingest_n_step 3` fixe (46.6s), cohérent avec l'attente (documents courts coûtent moins cher).
 
 **Toujours pas de vraie comparaison de convergence longue** -- les deux nouveaux tests tournent avec le même budget court (10 min CPU) pour une première vérification "ça tourne, coût cohérent". La priorité annoncée par `ff2attn` (comparaison de convergence sur un nombre de pas comparable) reste à faire, idéalement sur GPU vu le coût x7-10.
+
+## 2026-09-20 — Comparaison de convergence longue lancée sur GPU (abacus11-1, priorité utilisateur)
+
+`--ingest_kb --ingest_n_step 3` vs baseline §8, même config que le premier smoke test (`d_model=256, n_step=4, batch_size=8, lr=3e-4, seed=0`), cette fois `--max_steps 3000 --max_time_minutes 480` sur GPU (abacus11-1, partagent GPU1) au lieu de CPU -- ~5 pas/s pour ingest_kb (contre 0.021 pas/s en CPU), donc un budget de pas long devient réellement atteignable. Les deux confirmés actifs, `--val_data` inclus dès le départ (contrairement au premier test). Résultat à suivre.
