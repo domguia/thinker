@@ -214,3 +214,7 @@ Full grid : `runs/pistea_c_lr_warmup_sweep/state/*.json` (Rennes home).
 **Read : signal net et cohérent sur les 4 seeds (aucun chevauchement des plages) -- `use_ff=True` bat `use_ff=False` de ~1 point de loss.** Selon la lecture déjà posée par `model-design` avant le lancement de ce sweep : **un gain net de `use_ff=True` indique une capacité de composition/calcul manquante dans le stream (qui devrait rester un lecteur léger selon spec §11bis/§-1), pas que la boucle Thinker elle-même est une mauvaise idée.** Ce résultat va dans le sens de la contre-hypothèse -- le stream fait un travail de calcul non trivial au-delà de la simple lecture, à documenter et discuter plutôt qu'à écarter. Pertinent aussi pour la lecture du résultat "A bat C" de Piste A : une partie de l'écart pourrait venir d'une capacité insuffisante côté `fuse`/stream plutôt que d'une limite intrinsèque de la boucle.
 
 Full grid : `runs/pistea_c_useff_sweep/state/*.json` (Rennes home).
+
+## 2026-09-20 — pistea_c_lr_warmup_sweep_ext lancé: extension vers des LR plus hauts (1e-4 à 7e-4)
+
+Suite au garde-fou posé par `model-design` (le meilleur point du sweep précédent, 7e-5, était en bord de plage, tendance encore strictement croissante -- ne pas conclure sur un point de bord). `pistea_c_lr_warmup_sweep_ext` (24 cellules, `lr` in {1e-4,2e-4,4e-4,7e-4} x `lr_warmup_steps` in {0,200,500} x 2 seeds, même config sinon), lancé sur `abacus17-1` (1 GPU trouvé libre).
