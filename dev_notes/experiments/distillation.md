@@ -326,3 +326,14 @@ Demande `model-design` (priorité 4/4) : comparaison `use_ff=True/False` à `n_s
 **Lecture** : contrairement à Piste A/C sur texte réel (où `use_ff=True` bat clairement `False` de ~1 point ET où la dégradation `n_step` était un vrai problème documenté), ici sur retrieval/HotpotQA à cette échelle (`d_model=256`, 2000 pas), **la dégradation `n_step` de 4 à 8 est quasiment inexistante même SANS `use_ff`** (+0.009, dans le bruit). `use_ff=True` bat quand même `False` dans l'absolu (~0.15-0.21 de moins, cohérent en signe avec le résultat Piste A/C) et améliore même légèrement en passant de n_step=4 à 8 (au lieu de dégrader).
 
 **Correction (`model-design`) : NE PAS conclure "spécifique à Piste A/C"** -- ce test change SIMULTANÉMENT deux variables par rapport à Piste A/C (`d_model=256` vs `1024`, ET budget 2000 pas vs beaucoup plus long), confond non résolu ; et on vient littéralement de voir sur le chantier 2 (noctx/retrieval) qu'un effet peut être invisible à 3000-6000 pas et net à 12000+ -- "absent à 2000 pas" ne permet pas de conclure "absent en général", même piège méthodologique. **Statut correct : pas encore concluant, budget et `d_model` confondus avec Piste A/C, pas "spécifique à Piste A/C".** Suivi possible si un GPU se libère sans urgence : étendre ce même test (`retrieval, d_model=256`) à 8000-12000 pas comme pour noctx/retrieval -- pas prioritaire devant chantiers 2/3.
+
+## 2026-09-20 — Chantier 3 : data prep terminée, precompute Teacher shardé lancé (6 GPU)
+
+Génération complète (`prepare_reasoning_data.py --n_samples 45000`, `prepare_retrieval_data.py --n_samples 90000`) terminée : `openr1_math_full/{train,val}.jsonl` (35011/3890, filtrage 38901/93733 gardés au streaming), `hotpotqa_full/{train,val}.jsonl` (81000/9000, aucun skip).
+
+Precompute Teacher Top-K32 (LFM2-1.2B) sur ces jeux complets (128901 exemples au total) shardé sur 6 GPU en parallèle (aucune contrainte Ada/Hopper -- LFM2-1.2B est dense, non quantifié, correction de `model-design`) :
+- `hotpotqa_full/train.jsonl` (81000) découpé en 3 shards (`split -d -n l/3`) : `abacus17-1` GPU0, `abacus18-1` GPU0/GPU1.
+- `openr1_math_full/train.jsonl` (35011) découpé en 2 shards : `abacus18-1` GPU2, `abacus11-1` GPU0.
+- Les deux `val.jsonl` (3890+9000) en séquentiel sur `abacus11-1` GPU1.
+
+Tous confirmés actifs sur GPU (88-100% util). Fusion des shards npz (concaténation indices/values/residual + réindexation de `offsets`) à faire une fois tous les shards terminés -- script de fusion pas encore écrit, à préparer avant la fin du premier shard.
