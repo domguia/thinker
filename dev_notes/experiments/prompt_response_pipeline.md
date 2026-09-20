@@ -323,3 +323,14 @@ Levier 3 (repr-KD) lancé.
 - Levier 3 (repr-KD, weight=0.1, warmup=200) : **améliore nettement** (1.361 vs 1.488, -0.127) -- signal positif net. Levier le plus prometteur des 3 à cette échelle.
 
 Warm-start reasoning : nouveau flag `--init_from_checkpoint` (commit ab7c563) validé -- step 1 VAL answer=3.318, continuité exacte avec le meilleur point du run interrompu (3.317). Relancé sur `abacus11-1`, walltime 12h.
+
+## 2026-09-20 — general confirmé best=4.87, retest embed-anchor 0.1 + confirmation repr-KD budget étendu
+
+`general` (train_real_text.py, KD) confirmé terminé proprement : meilleur `val_loss=4.8723` capturé via `--save_best_checkpoint_path` (checkpoints/general_kd_best.pt), très supérieur au `final_val_loss=5.3050` (point final, le pire — le run avait overfitté monotonement après le meilleur point, confirmant la nécessité du fix ajouté ce jour).
+
+3 runs lancés en parallèle sur les GPU libérés (leviers KD terminés + general libéré) :
+- embed-anchor retest à `--embed_kd_weight 0.1` (au lieu de 0.01) — abacus3-1
+- repr-KD confirmation à budget étendu (3000 pas au lieu de 1000, même fichier train_sample2000) — abacus29-1
+- référence sans levier, même budget étendu, pour comparaison propre — abacus21-1
+
+Objectif : écarter un effet de faible échantillon sur repr-KD avant intégration dans les runs principaux A/B/C, et trancher définitivement sur embed-anchor (contre-productif à 0.01 ; test à 0.1 pour voir si l'effet s'inverse ou s'aggrave).
