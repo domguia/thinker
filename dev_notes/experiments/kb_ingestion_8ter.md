@@ -33,4 +33,13 @@ Baseline fait ~10x plus de pas dans le même budget mural et atteint une loss ne
 
 ## 2026-09-20 — Comparaison de convergence longue lancée sur GPU (abacus11-1, priorité utilisateur)
 
-`--ingest_kb --ingest_n_step 3` vs baseline §8, même config que le premier smoke test (`d_model=256, n_step=4, batch_size=8, lr=3e-4, seed=0`), cette fois `--max_steps 3000 --max_time_minutes 480` sur GPU (abacus11-1, partagent GPU1) au lieu de CPU -- ~5 pas/s pour ingest_kb (contre 0.021 pas/s en CPU), donc un budget de pas long devient réellement atteignable. Les deux confirmés actifs, `--val_data` inclus dès le départ (contrairement au premier test). Résultat à suivre.
+`--ingest_kb --ingest_n_step 3` vs baseline §8, même config que le premier smoke test (`d_model=256, n_step=4, batch_size=8, lr=3e-4, seed=0`), cette fois `--max_steps 3000 --max_time_minutes 480` sur GPU (abacus11-1, partagent GPU1) au lieu de CPU -- ~5 pas/s pour ingest_kb (contre 0.021 pas/s en CPU), donc un budget de pas long devient réellement atteignable. Les deux confirmés actifs, `--val_data` inclus dès le départ (contrairement au premier test).
+
+**Résultat (2026-09-20, comparaison à pas égal, `max_steps=3000` fixé pour les deux -- pas de confond temps/pas)** :
+
+| variante | pas | temps | final_loss (train) | val_answer |
+|---|---|---|---|---|
+| baseline §8 (k_proj/v_proj) | 3000 | 247s (12.06 pas/s) | 5.006 | **5.529** |
+| `--ingest_kb --ingest_n_step 3` | 3000 | 481s (6.20 pas/s) | 5.013 | **5.641** |
+
+**Lecture** : à nombre de pas identique, les deux variantes convergent à une loss train quasi identique (5.006 vs 5.013, écart négligeable). En val, `--ingest_kb` est légèrement moins bon (5.641 vs 5.529, +0.11), pas d'avantage de généralisation à ce budget. Coût par pas ~2x plus élevé (481s vs 247s) sur GPU pour ce résultat comparable-à-légèrement-pire. **Conclusion provisoire** : sur cette config (`d_model=256`, `hotpotqa`, 3000 pas), l'ingestion dynamique de la KB via le pass récurrent du modèle n'apporte pas de gain de généralisation mesurable par rapport à la projection statique k_proj/v_proj, à un coût ~2x supérieur. Ne pas généraliser au-delà de cette taille de modèle/config sans re-tester -- possible que l'avantage attendu de l'ingestion dynamique (mémoire associative vs simple projection) se manifeste à plus grande échelle ou sur des tâches nécessitant plus de raisonnement inter-documents que du lookup HotpotQA à faible profondeur. Relayé à `long-term-memory-builder` et `ff2attn`.
