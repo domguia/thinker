@@ -342,3 +342,19 @@ Deux erreurs de lancement corrigées avant que les 3 runs (embed-anchor@0.1, rep
 2. `--train_file`/`--val_file` n'existent pas dans `train_prompt_response.py` (vérifié via `--help`) → les vrais flags sont `--data`/`--val_data`.
 
 Runs actifs après correction : embed01 (abacus3-1, ~5.5 steps/s), repr_long (abacus29-1, ~5.7 steps/s, repr_kd loss descend 0.97→0.56 sur les 680 premiers pas), ref_long (abacus21-1, ~7.2 steps/s -- notablement plus rapide que repr_long, cohérent avec l'overhead attendu du repr_proj).
+
+## 2026-09-20 — repr-KD confirmé à budget étendu ; embed-anchor@0.1 verdict final
+
+3 runs terminés (2000 exemples train, d_model=256, régime de surapprentissage sévère attendu à cette échelle -- val n'est qu'un signal indicatif, pas la métrique de production) :
+
+| run | steps | ce_answer final | val_answer final | note |
+|---|---|---|---|---|
+| référence (sans levier) | 3000 | 0.4584 | 13.512 | GPU: L40S (abacus21-1) |
+| repr-KD (weight=0.1) | 3000 | 0.3975 | 13.053 | GPU: A100-40GB (abacus29-1) |
+| embed-anchor (weight=0.1) | 1000 | 2.2920 | 13.173 | GPU: RTX A5000 (abacus3-1) |
+
+**repr-KD** : avantage confirmé au-delà de 1000 pas (déjà observé), tient jusqu'à 3000 pas sur les deux métriques (ce_answer et val_answer). Pas un artefact de faible échantillon. Overhead wall-clock non mesurable proprement ici -- les 3 runs tournaient sur des GPU différents (matériel hétérogène par nœud disponible), donc pas de comparaison iso-matériel. Décision : intégrer repr-KD dans les runs principaux A/B/C, mesurer l'overhead réel dans ce contexte si besoin.
+
+**embed-anchor@0.1** : signal toujours mitigé/bruité, cohérent avec le verdict "contre-productif ou au mieux neutre" déjà porté à weight=0.01. Pas d'investissement supplémentaire (consigne model-design), conclusion figée ici.
+
+reasoning warm-start (job 4123105, abacus11-1) : step 9100, RAS, continuité saine.
