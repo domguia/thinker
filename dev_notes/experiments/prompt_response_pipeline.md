@@ -239,3 +239,9 @@ Le "léger rebond" à step 7500 signalé par `model-design` comme probable bruit
 | 15750 | 6.884 | 7.509 | -0.625 |
 
 **Lecture** : retrieval surapprend AUSSI clairement au-delà de step ~6750 (minimum ~5.80, remonte ensuite jusqu'à 6.88 à 15750) -- l'extrapolation de `model-design` sur les 10 premiers points (qui prédisait une décroissance lente continue) est invalidée par les points suivants, exactement le risque qu'elle avait elle-même anticipé avec seulement 10 points. **Mais l'écart retrieval-noctx reste large et stable (~-0.58 à -0.66)** même une fois les deux en phase de surapprentissage -- retrieval conserve un net avantage, cohérent avec `save_best_checkpoint_path` qui a déjà capturé le vrai meilleur point de retrieval (autour de step 6750, val≈5.80) avant que la remontée ne commence. Relayé à `model-design` avec correction explicite de la lecture précédente.
+
+## 2026-09-20 — Run flagship arrêté (décision `model-design`) : meilleur checkpoint capturé
+
+Arrêté volontairement au lieu d'aller jusqu'à 240min -- l'écart retrieval-noctx reste large et stable (-0.58 à -0.66) même en régime de surapprentissage confirmé sur les deux côtés, résultat déjà exploitable. Meilleur checkpoint retrieval (`checkpoints/flagship_best.pt`) confirmé sauvegardé : **val_answer=5.8015 à step 6750** (dernier "new best" avant la remontée). Meilleur point noctx également capturé via `checkpoints/flagship_noctx_best.pt` (son propre minimum, avant step 5250 selon les VAL déjà journalisées).
+
+**Résultat final retenu pour le papier** : à échelle flagship (81k exemples, KD réel, tous leviers actifs), retrieval atteint son meilleur point à val_answer≈5.80, contre noctx qui n'a jamais atteint ce niveau (son minimum était déjà >5.98 dès step 5250 dans les données observées) -- avantage retrieval confirmé à grande échelle, cohérent avec le résultat à 18k. GPU libérés pour la suite.
