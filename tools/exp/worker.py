@@ -143,7 +143,27 @@ def main() -> None:
     p.add_argument("--retry-failed", action="store_true",
                    help="reprendre aussi les cellules marquées failed/incomplete")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--allow-frontend", action="store_true",
+                   help="desactive le garde-fou frontend (voir ci-dessous) -- ne jamais utiliser "
+                        "pour un vrai calcul, seulement pour un test delibere sur le frontend")
     args = p.parse_args()
+
+    # Grid'5000 : le hostname court d'un frontend suit toujours le motif "f"+site
+    # (frennes, fnancy, flyon, ...) alors qu'un noeud de calcul a son propre nom
+    # de cluster (abacus18-1, paradoxe-5, graffiti-3, ...) -- jamais ce motif.
+    # Erreur reelle rencontree deux fois cette nuit (Nancy puis Rennes) : lancer
+    # des workers via `ssh <site>.grid5000.fr.g5k` au lieu de `ssh <noeud>...` --
+    # le frontend accepte la commande puis tue les process au bout d'1-2 min
+    # (limite cgroup probable), gaspillant du temps mural avant detection.
+    _KNOWN_SITES = ("rennes", "nancy", "lyon", "grenoble", "toulouse", "lille",
+                     "strasbourg", "nantes", "sophia")
+    _hostname = socket.gethostname().split(".")[0]
+    if not args.allow_frontend and _hostname in {f"f{s}" for s in _KNOWN_SITES}:
+        print(f"REFUS : ce worker semble lance sur le FRONTEND ({_hostname}), pas un noeud de "
+              f"calcul reserve -- relancer via 'ssh <noeud>.<site>.grid5000.fr.g5k' au lieu de "
+              f"'ssh <site>.grid5000.fr.g5k'. Utiliser --allow-frontend pour forcer (deconseille).",
+              file=sys.stderr)
+        sys.exit(1)
 
     grid = args.grid.resolve()
     root = grid.parent
