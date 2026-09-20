@@ -257,3 +257,14 @@ Demande `model-design` (relais utilisateur : couvrir les 3 tâches en parallèle
 - **general** (`train_real_text.py`, `d_model=256, use_ff`, pas de bf16/compile/num_workers -- absents du script, non bloquant) sur `data/distill/general_realtext/{train,val}.jsonl`. Lancé sur `abacus21-1`.
 
 Sondage des 7 sites jamais explorés cette session (Lyon, Grenoble, Toulouse, Lille, Strasbourg, Sophia, Nantes) : capacité GPU trouvée réelle sur Toulouse (`estats`, exotic) et Lyon (`neowise`, exotic), réservations testées et confirmées fonctionnelles -- mais abandonnées (home NFS séparé de Rennes, coût de resynchronisation des gros fichiers KD (~10-20Go) jugé trop élevé face à la capacité Rennes déjà libre au même moment). Réservations libérées proprement.
+
+## 2026-09-20 — Récapitulatif 2 graines (résultat central pour le papier)
+
+| seed | retrieval (meilleur val_answer) | noctx (minimum observé) |
+|---|---|---|
+| 0 | 5.8015 (step 6750) | ≥5.980 (jamais descendu sous) |
+| 1 | 5.8560 (step ~6600) | ≥5.931 (step 3750) |
+
+Écart cohérent et robuste sur 2 graines indépendantes, à l'échelle complète (81000 exemples, KD réel). Résultat central du papier, prêt à documenter.
+
+Sauvegarde vers `storage3.rennes.grid5000.fr` (killerdroid) lancée en tâche de fond (CPU/réseau uniquement, aucune concurrence GPU) : targets Top-K precomputées (hotpotqa_full + openr1_math_full, train+val) et tous les checkpoints. Quota home Rennes à 149G/191G (78% du quota souple) -- justifie l'action maintenant sans être critique.
