@@ -218,3 +218,22 @@ Full grid : `runs/pistea_c_useff_sweep/state/*.json` (Rennes home).
 ## 2026-09-20 — pistea_c_lr_warmup_sweep_ext lancé: extension vers des LR plus hauts (1e-4 à 7e-4)
 
 Suite au garde-fou posé par `model-design` (le meilleur point du sweep précédent, 7e-5, était en bord de plage, tendance encore strictement croissante -- ne pas conclure sur un point de bord). `pistea_c_lr_warmup_sweep_ext` (24 cellules, `lr` in {1e-4,2e-4,4e-4,7e-4} x `lr_warmup_steps` in {0,200,500} x 2 seeds, même config sinon), lancé sur `abacus17-1` (1 GPU trouvé libre).
+
+## 2026-09-20 — pistea_c_nstep_lr_joint complete (64/70 uniques, agrégé Rennes+Nancy): dégradation confirmée même au meilleur LR testé -- pas qu'un confond
+
+`d_model=1024, max_steps=8000`, `n_step` in {2,4,6,8} x `lr` in {1e-5,2e-5,3e-5,5e-5,1e-4} x 2 seeds. Grille exécutée en parallèle sur Rennes (relève GPU) et Nancy (`graffiti-3`), agrégée ici (moyennes sur les doublons inter-sites, n=2-3 selon overlap).
+
+**Moyenne `final_loss` par `(n_step, lr)`** :
+
+| n_step | 1e-5 | 2e-5 | 3e-5 | 5e-5 | 1e-4 |
+|---|---|---|---|---|---|
+| 2 | 5.695 | 5.055 | 4.705 | 4.296 | **3.808** |
+| 4 | 6.124 | 5.528 | 5.233 | 4.744 | **4.176** |
+| 6 | 6.397 | 5.887 | 5.706 | 5.323 | **4.612** |
+| 8 | 6.656 | 6.631 | 6.205 | 5.598 | **5.036** |
+
+**Read, résultat décisif pour ce fil** : à chaque `n_step`, la loss diminue avec `lr` sur toute la plage testée (même motif que `lr_warmup_sweep` -- `1e-4` reste le point le plus bas testé, encore en amélioration, garde-fou de bord de plage toujours actif). **Mais même en comparant chaque `n_step` à SON PROPRE meilleur LR testé (`1e-4`), la dégradation avec `n_step` persiste clairement** : `n_step=2` → 3.81, `n_step=4` → 4.18, `n_step=6` → 4.61, `n_step=8` → 5.04 -- un écart de 1.23 point entre les deux extrêmes, à LR égal (le meilleur disponible pour chacun).
+
+**Conclusion : ce n'est PAS purement un confond LR.** Le garde-fou posé était juste (le motif observé initialement à `lr=3e-5` fixe était en partie un LR sous-optimal, la dégradation semblait plus forte qu'elle ne l'est réellement) -- mais une fois ce confond en grande partie retiré (comparaison à LR optimal par `n_step`), un écart réel et substantiel demeure. **Reste une inconnue : `1e-4` est encore un point de bord (la tendance continue de s'améliorer) -- il est possible qu'à un LR encore plus haut, l'écart continue de se réduire davantage.** `pistea_c_lr_warmup_sweep_ext` (1e-4 à 7e-4, déjà en cours pour `n_step=6` seul) donnera un premier élément de réponse pour ce `n_step` précis, mais pas pour 2/4/8 -- une extension du sweep croisé lui-même vers des LR plus hauts serait nécessaire pour trancher complètement.
+
+Full grid (deux sites) : `runs/pistea_c_nstep_lr_joint/state/*.json` (Rennes home) et idem sur Nancy home.
