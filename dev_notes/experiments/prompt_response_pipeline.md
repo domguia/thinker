@@ -307,3 +307,19 @@ Levier 1 très proche de la référence (attendu -- numériquement identique par
 **Bug trouvé et corrigé** : `embedding_kd_loss` (levier 2) crashait -- LFM2 a `tokenizer len()=64400` mais `config.vocab_size=65536` (slots réservés inutilisés), le code supposait teacher toujours ≤ student. Fixé en slicant au `min()` des deux tailles au lieu de toujours la taille du teacher. Levier 2 relancé avec succès.
 
 Levier 3 (repr-KD) lancé.
+
+## 2026-09-20 — Résultat des 4 leviers KD (référence + 3), petite échelle (2000 exemples, 1000 pas)
+
+| variante | ce_answer @ 1000 pas |
+|---|---|
+| référence (sans levier) | 1.488 |
+| levier 1 : `loss_chunk_size=512` | 1.450 |
+| levier 2 : `embed_teacher_target, embed_kd_weight=0.01` | **1.641 (pire que la référence)** |
+| levier 3 : `repr_teacher_hidden, repr_kd_weight=0.1` | **1.361 (meilleur que la référence)** |
+
+**Lecture** :
+- Levier 1 (chunked loss) : quasi identique à la référence (1.450 vs 1.488), cohérent avec l'attente de `model-design` -- levier mémoire uniquement, pas censé accélérer à pas/batch égal, l'écart est du bruit.
+- Levier 2 (embed anchor, weight=0.01) : **dégrade** la convergence (1.641 vs 1.488) -- l'ancrage MSE vers l'embedding Teacher semble gêner l'apprentissage à ce poids, pas d'accélération. À retester avec weight=0.1 avant de conclure à un levier inefficace.
+- Levier 3 (repr-KD, weight=0.1, warmup=200) : **améliore nettement** (1.361 vs 1.488, -0.127) -- signal positif net. Levier le plus prometteur des 3 à cette échelle.
+
+Warm-start reasoning : nouveau flag `--init_from_checkpoint` (commit ab7c563) validé -- step 1 VAL answer=3.318, continuité exacte avec le meilleur point du run interrompu (3.317). Relancé sur `abacus11-1`, walltime 12h.
