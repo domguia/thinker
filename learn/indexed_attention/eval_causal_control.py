@@ -62,7 +62,7 @@ def shuffle_documents(batch, block_size: int, n_docs_max: int, target: str = "al
         distractor_mask = ~batch["is_supporting"]  # (b, n_docs_max)
         # random priority per distractor slot, per example; select the n_sup lowest-priority
         # ones among the True distractor slots (equivalent to sampling n_sup without replacement)
-        priority = torch.rand(b, n_docs_max)
+        priority = torch.rand(b, n_docs_max, device=batch["kb_tokens"].device)
         priority[~distractor_mask] = 2.0  # exclude supporting slots from selection entirely
         rank = priority.argsort(dim=1).argsort(dim=1)  # rank within row, 0 = lowest priority value
         sel_matrix = rank < n_sup.unsqueeze(1)  # (b, n_docs_max) bool
