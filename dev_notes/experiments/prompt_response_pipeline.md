@@ -272,3 +272,9 @@ Sauvegarde vers `storage3.rennes.grid5000.fr` (killerdroid) lancée en tâche de
 ## 2026-09-20 — reasoning OOM à batch_size=128, relancé à batch_size=32
 
 `reasoning` (2 streams thinking+answer, max_thinking_len=1024) a planté en OOM à `batch_size=128` (44GB A40 insuffisant, contrairement à retrieval qui a de la marge à cette taille -- le stream `thinking` fait exploser la mémoire, contrairement au simple stream `answer` de retrieval). Relancé à `batch_size=32`, confirmé actif.
+
+## 2026-09-20 — general en KD confirmé, reasoning relancé à batch_size=8 (2e OOM à batch=32)
+
+`reasoning` a encore planté en OOM à `batch_size=32` (cross_entropy sur vocab 64400 x 2 streams reste trop lourd même réduit de 128 à 32). Relancé à `batch_size=8`, confirmé actif (en chargement).
+
+`general` (KD, precompute Teacher fait -- 2700 train/300 val) tourne bien : loss 10.45→~4.8 en ~1300 pas, val_loss=6.08/val_ppl=437 au step 1000, KD actif (kd~3.8-4.3 stable).
