@@ -83,6 +83,25 @@ Constat préalable : `num_hops` (= `len(supporting_facts.title)`) vaut **2 au mi
 
 **Prudence nécessaire** : un seul seed, un seul budget, jeu synthétique de petite taille (900 exemples train, structure volontairement simple/template) -- signal à confirmer (plusieurs seeds, budget plus long, éventuellement un vrai jeu composition plus varié) avant de le traiter comme un résultat définitif, mais c'est la première fois que la stratification montre un effet différencié cohérent avec l'hypothèse de départ (`--ingest_kb` utile spécifiquement pour la composition inter-documents). Relayé à `long-term-memory-builder`.
 
+## 2026-09-20 — Confirmation multi-seed : le signal ne réplique PAS comme "spécifique à la composition"
+
+Demandé par `long-term-memory-builder` : seed=1 et seed=2 lancées, même config (`d_model=512`, `3000` pas), même synthétique.
+
+| seed | groupe | baseline | `--ingest_kb` | Δ (ingest-baseline) |
+|---|---|---|---|---|
+| 0 | composition (ge2) | 1.344 | 1.230 | -0.114 |
+| 0 | contrôle (le1) | 1.224 | 1.247 | **+0.023** |
+| 1 | composition (ge2) | 1.718 | 1.221 | -0.497 |
+| 1 | contrôle (le1) | 1.541 | 1.220 | -0.320 |
+| 2 | composition (ge2) | 1.525 | 1.250 | -0.275 |
+| 2 | contrôle (le1) | 1.491 | 1.253 | -0.239 |
+
+**Moyenne/écart-type sur les 3 seeds** : Δ composition = -0.295 (std 0.192), Δ contrôle = -0.179 (std 0.179).
+
+**Lecture honnête (le signe ne reste PAS cohérent comme prévu par le protocole)** : le signe de Δ sur le groupe contrôle **flippe** entre seed=0 (+0.023, défavorable à `--ingest_kb`) et seed=1/2 (-0.320/-0.239, favorable) -- exactement le critère que `long-term-memory-builder` avait posé comme "signal = bruit à ce N". **Mais la vraie cause identifiée en creusant plus loin n'est pas juste du bruit d'échantillonnage aléatoire : c'est une instabilité d'optimisation de la BASELINE elle-même.** `--ingest_kb` est remarquablement stable entre seeds (composition : 1.230/1.221/1.250, std=0.015 -- moins de 2% de variation), alors que la baseline varie énormément (composition : 1.344/1.718/1.525, std=0.187 -- **12.6x plus de variance que ingest_kb**, même chose sur le groupe contrôle). Deux des trois seeds de la baseline (1 et 2) semblent être tombées dans un mauvais minimum local/instabilité à `lr=3e-4` sur ce petit dataset synthétique (900 exemples, structure template simple), pas spécifiquement liée au nombre de hops.
+
+**Conclusion révisée** : le résultat "positif" de seed=0 n'était pas un effet architectural spécifique à la composition inter-documents -- c'est une baseline instable sur ce petit jeu/LR qui, par chance, a bien convergé sur ce seed précis. `--ingest_kb` semble structurellement plus stable à l'optimisation ici (peut-être parce que l'ingestion pré-traite les documents avant la passe QA, ce qui pourrait régulariser implicitement), mais ce n'est PAS la même chose que "meilleur sur la composition spécifiquement" -- avant de tirer une conclusion sur la stabilité elle-même, il faudrait re-tester à un LR plus bas pour la baseline (voir si son instabilité disparaît) avant de comparer à nouveau les deux variantes à leur LR optimal respectif -- règle déjà établie ailleurs dans ce projet ("jamais conclure sur une comparaison à LR non réoptimisé pour chaque variante"). Relayé à `long-term-memory-builder`.
+
 ## 2026-09-20 — Protocole proposé : synthèse inter-documents (stratification par num_hops)
 
 **Motivation.** Les deux tests précédents (`d_model=256` et `512`, HotpotQA distractor, budget 3000 pas) sont négatifs sur une métrique de val_answer POOLÉE sur toutes les questions, quel que soit leur nombre de sauts réels. Or l'avantage attendu de l'ingestion dynamique (mémoire associative construite par le pass récurrent, capable de fusionner l'info de plusieurs documents dans le registre `R_t`) n'a de raison de se manifester QUE sur les questions qui exigent réellement de combiner ≥2 documents ingérés -- pas sur celles où une seule passe de projection directe suffit déjà à localiser le fait. En moyennant tout ensemble, un gain réel mais localisé sur le sous-ensemble multi-hop peut être noyé par la majorité des questions à faible profondeur (déjà noté : "HotpotQA lookup peu profond" dans le run `noctx`, où la mémorisation pure sans documents gagnait légèrement).
