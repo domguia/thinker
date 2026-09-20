@@ -102,6 +102,18 @@ Demandé par `long-term-memory-builder` : seed=1 et seed=2 lancées, même confi
 
 **Conclusion révisée** : le résultat "positif" de seed=0 n'était pas un effet architectural spécifique à la composition inter-documents -- c'est une baseline instable sur ce petit jeu/LR qui, par chance, a bien convergé sur ce seed précis. `--ingest_kb` semble structurellement plus stable à l'optimisation ici (peut-être parce que l'ingestion pré-traite les documents avant la passe QA, ce qui pourrait régulariser implicitement), mais ce n'est PAS la même chose que "meilleur sur la composition spécifiquement" -- avant de tirer une conclusion sur la stabilité elle-même, il faudrait re-tester à un LR plus bas pour la baseline (voir si son instabilité disparaît) avant de comparer à nouveau les deux variantes à leur LR optimal respectif -- règle déjà établie ailleurs dans ce projet ("jamais conclure sur une comparaison à LR non réoptimisé pour chaque variante"). Relayé à `long-term-memory-builder`.
 
+## 2026-09-20 — Sweep LR baseline (1e-4, 5e-5) : l'instabilité NE disparaît PAS à LR plus bas
+
+Baseline seule, 3 seeds à `lr=1e-4`, 2 seeds à `lr=5e-5` (composition/`ge2`, même config) :
+
+| lr | seed0 | seed1 | seed2 | std |
+|---|---|---|---|---|
+| 3e-4 (original) | 1.344 | 1.718 | 1.525 | 0.187 |
+| 1e-4 | 1.375 | 1.683 | 1.704 | 0.184 |
+| 5e-5 | 1.313 | -- (non lancé) | 1.565 | (écart 0.252 sur les 2 points dispo) |
+
+**L'instabilité entre seeds ne diminue pas** en baissant le LR d'un facteur 3-6x (std quasi identique 0.187→0.184, écart comparable à 5e-5) -- ce n'est donc PAS un simple problème de LR trop agressif pour la baseline sur ce jeu. La cause de l'instabilité reste à identifier (pourrait être liée à la petite taille du jeu synthétique lui-même, à l'initialisation, ou à une alternative non testée -- LR encore plus bas, ou un batch_size plus grand). Le point d'`ingest_kb` structurellement plus stable reste donc non expliqué pour l'instant, pas encore de comparaison "aux optima respectifs" possible tant que la baseline ne se stabilise sur aucun LR testé. Relayé à `long-term-memory-builder`.
+
 ## 2026-09-20 — Protocole proposé : synthèse inter-documents (stratification par num_hops)
 
 **Motivation.** Les deux tests précédents (`d_model=256` et `512`, HotpotQA distractor, budget 3000 pas) sont négatifs sur une métrique de val_answer POOLÉE sur toutes les questions, quel que soit leur nombre de sauts réels. Or l'avantage attendu de l'ingestion dynamique (mémoire associative construite par le pass récurrent, capable de fusionner l'info de plusieurs documents dans le registre `R_t`) n'a de raison de se manifester QUE sur les questions qui exigent réellement de combiner ≥2 documents ingérés -- pas sur celles où une seule passe de projection directe suffit déjà à localiser le fait. En moyennant tout ensemble, un gain réel mais localisé sur le sous-ensemble multi-hop peut être noyé par la majorité des questions à faible profondeur (déjà noté : "HotpotQA lookup peu profond" dans le run `noctx`, où la mémorisation pure sans documents gagnait légèrement).
