@@ -34,9 +34,28 @@ NOT required to equal n_ctx, unlike the KB leaves.
 Optional KD (2026-09-20, `teacher_targets=...`): both dataset classes can
 attach per-span Top-K Teacher targets (a precompute_teacher_targets.py .npz
 computed on the SAME jsonl's "text" field) via `PromptResponseTeacherTargets`
--- see that class's docstring for the alignment scheme (response spans are
-tokenized standalone, not sliced out of `text`'s own tokenization, so
-alignment is verified per example and falls back to CE-only, not assumed).
+-- see that class's docstring for the alignment scheme.
+
+**Correction 2026-09-20 (real-data bug, found via experiment-manager's
+diagnostic on hotpotqa: 0/18000 aligned, deterministically)**: an earlier
+version of this alignment tokenized each response span STANDALONE
+(`_tokenize_padded` on the extracted substring) and only used the
+in-context tokenization (`_locate_token_span`) to verify agreement. That
+verification could never pass: (1) standalone tokenization adds a leading
+BOS the in-context slice never has, and (2) BPE leading-space merges
+differ in/out of context regardless of BOS (e.g. `"São Miguel"` standalone
+-> `[1, 560, 2388, 22661]`, in-context (preceded by a space) ->
+`[17370, 22661]`) -- the two are simply different token SEQUENCES, not a
+comparison bug to patch. Fixed at the root: when a span is located
+verbatim in `text` and `--teacher_targets` is set, its ids/mask are now
+built DIRECTLY from the in-context slice (`_resolve_span`) instead of a
+separate standalone tokenization -- this is also arguably more faithful to
+generation (a real continuation right after the prompt, not an
+artificially isolated re-tokenization with a spurious leading BOS).
+Standalone `_tokenize_padded` remains the fallback exactly as before when
+teacher_targets is unset, or when the span isn't found verbatim (e.g.
+ReasoningPromptDataset's canonical `answer` vs the generated paraphrase --
+a genuinely different failure mode, unaffected by this fix).
 """
 import json
 
@@ -106,16 +125,12 @@ class PromptResponseTeacherTargets:
     row index, not a post-filtering position, see ReasoningPromptDataset's
     doc_id bookkeeping).
 
-    Unlike train_real_text.py's TeacherTargets (fixed window position,
-    alignment is free), a response span here is tokenized STANDALONE by
-    _tokenize_padded, not sliced out of a `text` tokenization -- BPE boundary
-    effects (e.g. leading-space merges) mean the standalone tokenization is
-    not guaranteed to match the full-text tokenization token-for-token even
-    when the underlying string is identical. slice_span verifies this
-    explicitly (exact id match, not just length) and falls back to an
-    all-False mask (pure CE for that example) rather than risk a silently
-    misaligned KD target.
-    """
+    slice_span expects (tok_start, n) from _resolve_span -- the span's own
+    ids/mask are BY CONSTRUCTION the in-context tokenization's `[tok_start,
+    tok_start+n)` slice (see _resolve_span), so no separate identity check
+    is needed here (an earlier version re-tokenized the span standalone and
+    checked for agreement -- always failed on real data, see this module's
+    top docstring)."""
 
     def __init__(self, npz_path: str):
         npz = np.load(npz_path)
@@ -125,17 +140,14 @@ class PromptResponseTeacherTargets:
         self.offsets = npz["offsets"]
         self.k = int(npz["k"])
 
-    def slice_span(self, doc_id: int, tok_start: int, ids_slice, span_ids: torch.Tensor, t_max: int):
+    def slice_span(self, doc_id: int, tok_start: int, n: int, t_max: int):
         idx = torch.zeros(t_max, self.k, dtype=torch.long)
         val = torch.zeros(t_max, self.k, dtype=torch.float32)
         res = torch.zeros(t_max, dtype=torch.float32)
         mask = torch.zeros(t_max, dtype=torch.bool)
-        n = min(len(ids_slice), int(span_ids.shape[0]), t_max)
-        if n == 0 or list(ids_slice[:n]) != span_ids[:n].tolist():
-            return idx, val, res, mask
         doc_start, doc_end = int(self.offsets[doc_id]), int(self.offsets[doc_id + 1])
         n_doc = doc_end - doc_start
-        for t in range(n):
+        for t in range(min(n, t_max)):
             q = tok_start + t - 1  # Teacher row q predicts token q+1 -- same convention as train_real_text.py's TeacherTargets
             if 0 <= q < n_doc:
                 idx[t] = torch.from_numpy(self.indices[doc_start + q].astype(np.int64))
@@ -145,18 +157,41 @@ class PromptResponseTeacherTargets:
         return idx, val, res, mask
 
 
-def _kd_targets_for_span(teacher, tokenizer, text, span_text, search_start, max_length, doc_id, span_ids, t_max):
-    idx = torch.zeros(t_max, teacher.k, dtype=torch.long)
-    val = torch.zeros(t_max, teacher.k, dtype=torch.float32)
-    res = torch.zeros(t_max, dtype=torch.float32)
-    mask = torch.zeros(t_max, dtype=torch.bool)
-    if not text or not span_text:
-        return idx, val, res, mask
-    located = _locate_token_span(tokenizer, text, span_text, search_start, max_length)
-    if located is None:
-        return idx, val, res, mask
-    tok_start, ids_slice = located
-    return teacher.slice_span(doc_id, tok_start, ids_slice, span_ids, t_max)
+def _empty_kd(t_max: int, k: int):
+    return (torch.zeros(t_max, k, dtype=torch.long), torch.zeros(t_max, k, dtype=torch.float32),
+            torch.zeros(t_max, dtype=torch.float32), torch.zeros(t_max, dtype=torch.bool))
+
+
+def _resolve_span(tokenizer, text, span_text, search_start, max_length, max_len, pad_id, teacher):
+    """Returns (ids, mask, kd_info): ids/mask are the span's teacher-forcing
+    tokens (padded/truncated to max_len), kd_info is (tok_start, n) if they
+    came from `text`'s own in-context tokenization (KD-alignable against
+    `teacher`) or None if this fell back to standalone tokenization
+    (teacher is None, or span_text isn't found verbatim in text -- e.g.
+    ReasoningPromptDataset's paraphrased canonical answer, see this
+    module's top docstring)."""
+    if teacher is not None and text and span_text:
+        located = _locate_token_span(tokenizer, text, span_text, search_start, max_length)
+        if located is not None:
+            tok_start, ids_slice = located
+            n = min(len(ids_slice), max_len)
+            ids = torch.full((max_len,), pad_id, dtype=torch.long)
+            mask = torch.zeros(max_len, dtype=torch.bool)
+            if n > 0:
+                ids[:n] = torch.tensor(ids_slice[:n], dtype=torch.long)
+                mask[:n] = True
+            return ids, mask, (tok_start, n)
+    ids, mask = _tokenize_padded(tokenizer, span_text, max_len, pad_id)
+    return ids, mask, None
+
+
+def _kd_targets(teacher, kd_info, doc_id, t_max):
+    if teacher is None:
+        return None
+    if kd_info is None:
+        return _empty_kd(t_max, teacher.k)
+    tok_start, n = kd_info
+    return teacher.slice_span(doc_id, tok_start, n, t_max)
 
 
 class ReasoningPromptDataset(Dataset):
@@ -209,8 +244,19 @@ class ReasoningPromptDataset(Dataset):
         kb_tokens, kb_leaf_mask = _tokenize_padded(self.tokenizer, ex["problem"], self.n_ctx, self.pad_id)
         kb_source_ids = torch.zeros(self.n_ctx, dtype=torch.long)  # prompt = local/recency, spec §6.2
 
-        think_ids, think_mask = _tokenize_padded(self.tokenizer, ex["thinking"], self.max_thinking_len, self.pad_id)
-        ans_ids, ans_mask = _tokenize_padded(self.tokenizer, ex["answer"], self.max_answer_len, self.pad_id)
+        assistant_pos = (ex["text"] or "").find(ASSISTANT_MARKER)
+        search_start = assistant_pos + len(ASSISTANT_MARKER) if assistant_pos != -1 else 0
+        think_ids, think_mask, think_kd_info = _resolve_span(
+            self.tokenizer, ex["text"], ex["thinking"], search_start, self.teacher_max_length,
+            self.max_thinking_len, self.pad_id, self.teacher)
+        # answer's search window starts after the thinking span if one was found (plain string
+        # search, cheap -- avoids the short canonical answer string spuriously matching inside
+        # the (much longer) trace); falls back to the assistant-marker start otherwise.
+        think_char_start = (ex["text"] or "").find(ex["thinking"], search_start)
+        ans_search_start = think_char_start + len(ex["thinking"]) if think_char_start != -1 else search_start
+        ans_ids, ans_mask, ans_kd_info = _resolve_span(
+            self.tokenizer, ex["text"], ex["answer"], ans_search_start, self.teacher_max_length,
+            self.max_answer_len, self.pad_id, self.teacher)
         think_input, think_labels = _teacher_forced_target(think_ids, think_mask, self.pad_id)
         ans_input, ans_labels = _teacher_forced_target(ans_ids, ans_mask, self.pad_id)
 
@@ -219,20 +265,11 @@ class ReasoningPromptDataset(Dataset):
             "thinking_target_input": think_input, "thinking_labels": think_labels,
             "answer_target_input": ans_input, "answer_labels": ans_labels,
         }
-        if self.teacher is not None:
-            assistant_pos = (ex["text"] or "").find(ASSISTANT_MARKER)
-            search_start = assistant_pos + len(ASSISTANT_MARKER) if assistant_pos != -1 else 0
-            think_idx, think_val, think_res, think_kmask = _kd_targets_for_span(
-                self.teacher, self.tokenizer, ex["text"], ex["thinking"], search_start,
-                self.teacher_max_length, ex["doc_id"], think_ids, self.max_thinking_len)
-            # answer's search window starts after the thinking span if one was found (plain string
-            # search, cheap -- avoids the short canonical answer string spuriously matching inside
-            # the (much longer) trace); falls back to the assistant-marker start otherwise.
-            think_char_start = (ex["text"] or "").find(ex["thinking"], search_start)
-            ans_search_start = think_char_start + len(ex["thinking"]) if think_char_start != -1 else search_start
-            ans_idx, ans_val, ans_res, ans_kmask = _kd_targets_for_span(
-                self.teacher, self.tokenizer, ex["text"], ex["answer"], ans_search_start,
-                self.teacher_max_length, ex["doc_id"], ans_ids, self.max_answer_len)
+        think_kd = _kd_targets(self.teacher, think_kd_info, ex["doc_id"], self.max_thinking_len)
+        ans_kd = _kd_targets(self.teacher, ans_kd_info, ex["doc_id"], self.max_answer_len)
+        if think_kd is not None:
+            think_idx, think_val, think_res, think_kmask = think_kd
+            ans_idx, ans_val, ans_res, ans_kmask = ans_kd
             out.update({
                 "thinking_kd_indices": think_idx, "thinking_kd_values": think_val,
                 "thinking_kd_residual": think_res, "thinking_kd_mask": think_kmask,
@@ -342,22 +379,25 @@ class RetrievalPromptDataset(Dataset):
         kb_leaf_mask[q_start:q_start + n_q] = True
         kb_source_ids[q_start:q_start + self.block_size] = 0  # question block = local
 
-        ans_ids, ans_mask = _tokenize_padded(self.tokenizer, ex["answer"], self.max_answer_len, self.pad_id)
+        # RetrievalPromptDataset's answer, unlike ReasoningPromptDataset's, is substituted
+        # verbatim into `text` by CHATML_TEMPLATE (prepare_retrieval_data.py) -- so _resolve_span's
+        # in-context path is expected to succeed far more often here (no paraphrase-vs-canonical
+        # mismatch); real-data confirmation and the standalone-tokenization bug this fixed are in
+        # this module's top docstring.
+        assistant_pos = (ex["text"] or "").find(ASSISTANT_MARKER)
+        search_start = assistant_pos + len(ASSISTANT_MARKER) if assistant_pos != -1 else 0
+        ans_ids, ans_mask, ans_kd_info = _resolve_span(
+            self.tokenizer, ex["text"], ex["answer"], search_start, self.teacher_max_length,
+            self.max_answer_len, self.pad_id, self.teacher)
         ans_input, ans_labels = _teacher_forced_target(ans_ids, ans_mask, self.pad_id)
 
         out = {
             "kb_tokens": kb_tokens, "kb_source_ids": kb_source_ids, "kb_leaf_mask": kb_leaf_mask,
             "answer_target_input": ans_input, "answer_labels": ans_labels,
         }
-        if self.teacher is not None:
-            # RetrievalPromptDataset's answer, unlike ReasoningPromptDataset's, is substituted
-            # verbatim into `text` by CHATML_TEMPLATE (prepare_retrieval_data.py) -- so this span
-            # is expected to align cleanly far more often (no paraphrase-vs-canonical mismatch).
-            assistant_pos = (ex["text"] or "").find(ASSISTANT_MARKER)
-            search_start = assistant_pos + len(ASSISTANT_MARKER) if assistant_pos != -1 else 0
-            ans_idx, ans_val, ans_res, ans_kmask = _kd_targets_for_span(
-                self.teacher, self.tokenizer, ex["text"], ex["answer"], search_start,
-                self.teacher_max_length, ex["doc_id"], ans_ids, self.max_answer_len)
+        ans_kd = _kd_targets(self.teacher, ans_kd_info, ex["doc_id"], self.max_answer_len)
+        if ans_kd is not None:
+            ans_idx, ans_val, ans_res, ans_kmask = ans_kd
             out.update({
                 "answer_kd_indices": ans_idx, "answer_kd_values": ans_val,
                 "answer_kd_residual": ans_res, "answer_kd_mask": ans_kmask,
