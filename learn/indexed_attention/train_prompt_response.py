@@ -325,6 +325,16 @@ def main() -> None:
                     help="run the forward pass (model + loss) under torch.autocast(dtype=bfloat16) -- ~1.68x "
                          "measured elsewhere on this project (train_sft.py's 500M-core sweep). Master weights/"
                          "optimizer state stay fp32; no GradScaler needed for bf16.")
+    p.add_argument("--num_workers", type=int, default=0,
+                    help="DataLoader worker processes -- 0 (default, unchanged behavior) does loading in the "
+                         "main process. Only worth raising if the GPU sits idle waiting on data (unlikely at "
+                         "this model's size, but free to check).")
+    p.add_argument("--compile", action="store_true",
+                    help="torch.compile(model) before training -- typically 1.3-2x on recent GPUs, effectively "
+                         "free when it works. Opt-in: the model's dict-shaped target_input/stream_outputs and "
+                         "--ingest_kb's per-document Python loop are dynamic-control-flow-heavy, which can make "
+                         "compilation slow/fragile -- verify with a short smoke test before trusting it on a "
+                         "long run, don't assume it just works.")
     p.add_argument("--max_steps", type=int, default=100000)
     p.add_argument("--max_time_minutes", type=float, default=15.0)
     p.add_argument("--log_every", type=int, default=20)
@@ -362,13 +372,16 @@ def main() -> None:
     if train_ds.teacher is not None:
         print(f"loaded Teacher targets from {args.teacher_targets}: K={train_ds.teacher.k} -- "
               f"KD enabled, kd_alpha={args.kd_alpha}", flush=True)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+    pin_memory = device.type == "cuda"
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                               num_workers=args.num_workers, pin_memory=pin_memory)
 
     val_loader = None
     if args.val_data:
         val_ds = build_dataset(args.dataset_type, args.val_data, tok, args, teacher_targets=args.val_teacher_targets)
         print(f"loaded held-out val: {len(val_ds)} examples from {args.val_data}", flush=True)
-        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                                 num_workers=args.num_workers, pin_memory=pin_memory)
 
     if args.dataset_type == "reasoning":
         stream_dims = {"thinking": vocab_size, "answer": vocab_size}
@@ -393,6 +406,13 @@ def main() -> None:
     print(f"dataset_type={args.dataset_type} d_model={args.d_model} n_step={args.n_step} "
           f"params={n_params/1e6:.2f}M device={device}", flush=True)
 
+    raw_model = model  # unwrapped module -- state_dict() below always saves/loads THIS, so checkpoints stay
+                        # compatible with eval_val_loss.py/etc. regardless of --compile (an OptimizedModule's
+                        # own state_dict() has carried an "_orig_mod." key prefix on some torch versions).
+    if args.compile:
+        model = torch.compile(model)
+        print("torch.compile enabled -- first steps will be slower (compilation), watch for graph breaks", flush=True)
+
     lr_warmup_init = args.lr_warmup_init if args.lr_warmup_init is not None else args.lr / 10
 
     def lr_at(step: int) -> float:
@@ -400,7 +420,8 @@ def main() -> None:
             return args.lr
         return lr_warmup_init + (args.lr - lr_warmup_init) * (step / args.lr_warmup_steps)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr_at(0), weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr_at(0), weight_decay=1e-2,
+                                   fused=(device.type == "cuda"))
     model.train()
 
     step, loss_hist = 0, []
@@ -486,7 +507,7 @@ def main() -> None:
                     cur_val = val_losses["answer"]
                     if best_val_answer is None or cur_val < best_val_answer:
                         best_val_answer = cur_val
-                        torch.save(model.state_dict(), args.save_best_checkpoint_path)
+                        torch.save(raw_model.state_dict(), args.save_best_checkpoint_path)
                         print(f"  new best val_answer={cur_val:.4f} -> checkpoint saved to "
                               f"{args.save_best_checkpoint_path}", flush=True)
 
@@ -502,7 +523,7 @@ def main() -> None:
         if ckpt_path.endswith("/") or os.path.isdir(ckpt_path):
             os.makedirs(ckpt_path, exist_ok=True)
             ckpt_path = os.path.join(ckpt_path, f"{args.run_id or 'adhoc'}.pt")
-        torch.save(model.state_dict(), ckpt_path)
+        torch.save(raw_model.state_dict(), ckpt_path)
         print(f"checkpoint saved to {ckpt_path}", flush=True)
 
     extrapolation_results = {}
