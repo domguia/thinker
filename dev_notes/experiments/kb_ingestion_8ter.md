@@ -43,3 +43,14 @@ Baseline fait ~10x plus de pas dans le même budget mural et atteint une loss ne
 | `--ingest_kb --ingest_n_step 3` | 3000 | 481s (6.20 pas/s) | 5.013 | **5.641** |
 
 **Lecture** : à nombre de pas identique, les deux variantes convergent à une loss train quasi identique (5.006 vs 5.013, écart négligeable). En val, `--ingest_kb` est légèrement moins bon (5.641 vs 5.529, +0.11), pas d'avantage de généralisation à ce budget. Coût par pas ~2x plus élevé (481s vs 247s) sur GPU pour ce résultat comparable-à-légèrement-pire. **Conclusion provisoire** : sur cette config (`d_model=256`, `hotpotqa`, 3000 pas), l'ingestion dynamique de la KB via le pass récurrent du modèle n'apporte pas de gain de généralisation mesurable par rapport à la projection statique k_proj/v_proj, à un coût ~2x supérieur. Ne pas généraliser au-delà de cette taille de modèle/config sans re-tester -- possible que l'avantage attendu de l'ingestion dynamique (mémoire associative vs simple projection) se manifeste à plus grande échelle ou sur des tâches nécessitant plus de raisonnement inter-documents que du lookup HotpotQA à faible profondeur. Relayé à `long-term-memory-builder` et `ff2attn`.
+
+## 2026-09-20 — Test à plus grande échelle lancé (réservation dédiée H100, abacus27-1)
+
+Suite à la demande de `long-term-memory-builder` (l'hypothèse que le mécanisme d'ingestion récurrent a besoin de plus de capacité pour rivaliser avec une projection directe) : nouvelle réservation besteffort dédiée `oarsub -n ingest8ter-scale -l gpu=1,walltime=6:00:00 -t besteffort -t idempotent -p "cluster='abacus21' OR cluster='abacus26' OR cluster='abacus27'"` (job `4122747`) plutôt que d'attendre la libération des nœuds déjà utilisés -- démarrage immédiat sur `abacus27-1` (H100 NVL 100GB, 0 MiB utilisé).
+
+Lancé (baseline §8 vs `--ingest_kb --ingest_n_step 3`), config passée à l'échelle sur les deux axes demandés :
+- `d_model=256` → **`d_model=512, n_head=8`** (capacité du modèle).
+- `block_size=64, n_docs_max=10` → **`block_size=128, n_docs_max=20`** (documents plus riches/plus nombreux).
+- Budget identique : `--max_steps 3000 --max_time_minutes 480`, `--val_data` inclus, `seed=0` identique aux deux runs.
+
+Logs : `logs/ingest8ter_scale_baseline.log`, `logs/ingest8ter_scale_ingest.log` sur `abacus27-1`. Confirmés actifs sur GPU (`nvidia-smi` avant lancement : H100 à 0 MiB, code/données déjà présents via NFS Rennes partagé). Résultat à suivre.
