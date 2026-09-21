@@ -14,6 +14,16 @@
 
 **Why:** the final hidden layer is the most broadly reusable embedding — usable for repr-KD, downstream probing, or anything else — almost regardless of what the model was trained for. A hardcoded index (e.g. `16`) is only "the last layer" by coincidence for a Teacher with exactly that many layers (this happened once, undetected: LFM2-1.2B has `num_hidden_layers=16`, so `--hidden_layers 16` WAS already the last layer, but would silently stop being so for any other Teacher depth). Which intermediate layer(s) to add alongside it is a judgment call (see the project's own prior discussion of what different depths tend to encode) — but the last layer itself is not optional.
 
+## Multi-family KD needs a same-family Teacher
+
+The project's Top-K KD (`topk_kd_loss`) indexes the student's logits at the same vocabulary indices as the Teacher's Top-K — this only makes sense when Student and Teacher share the exact same tokenizer/vocab. A mismatch doesn't crash, it silently misaligns indices (already hit twice: `qwen`/`Qwen3.8-27B-FP8` on 2026-09-20, and the in-context-vs-standalone tokenization bug in `eval_causal_control.py` on 2026-09-21). **Before pairing any student tokenizer family (LFM2/OLMo/Qwen) with a Teacher, or adding a new family, consult the `model-families` skill** (`.claude/skills/model-families/SKILL.md`) — it has the current alias↔Teacher compatibility table and known mismatches. Each family needs its own matching Teacher; there is no cross-family shortcut with the current implementation.
+
+## Check the project's own notes before external research
+
+This project tracks model selection, architecture decisions, and known pitfalls locally (`dev_notes/*.md`, `.claude/skills/*/SKILL.md`) — often in more detail and more current than a fresh web search would surface (e.g. exact vocab sizes verified directly against a model's own `config.json`, or project-specific compatibility findings that don't exist anywhere online). **Check these local sources first** for anything about model families, architecture comparisons, or past experimental decisions, before reaching for a web search.
+
 ## Model design references
 
+- `.claude/skills/model-families/SKILL.md` — Student/Teacher tokenizer-vocab compatibility registry (which `--tokenizer` alias pairs with which Teacher for KD, vocab sizes, known mismatches). Consult before any new Student/Teacher pairing.
+- `dev_notes/model_selection_small_vocab_reasoning.md` — full reasoning behind the LFM2/OLMo/Qwen family choices (vocab-size filtering, reasoning-benchmark filtering, size-ladder filtering) and the retained experimentation order.
 - `dev_notes/reference_big_llm_architecture_comparison.md` — full text of Sebastian Raschka's "The Big LLM Architecture Comparison" (source: https://magazine.sebastianraschka.com/p/the-big-llm-architecture-comparison). Covers architectural details (attention variants, MoE, normalization placement, positional encoding, vocab size trade-offs, etc.) for DeepSeek V3/R1, OLMo 2, Gemma 3/4, Mistral Small 3.1/3, Llama 4, Qwen3, SmolLM3, Kimi K2, GPT-OSS, GLM-4.5/5, Qwen3-Next, MiniMax-M2, Kimi Linear, Olmo 3, Nemotron 3 Nano/Super, and more. Consult it when choosing or comparing base model architectures for experiments.
