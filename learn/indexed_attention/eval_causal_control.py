@@ -142,6 +142,13 @@ def main() -> None:
     p.add_argument("--n_batches", type=int, default=None, help="cap eval batches; default = whole val set")
     p.add_argument("--fine_grained", action="store_true",
                    help="also run supporting-only and distractor-only corruption (needs is_supporting in data)")
+    p.add_argument("--teacher_targets", default=None,
+                   help="MUST be set to the same file used at training time if the checkpoint was trained "
+                   "with --teacher_targets: PromptResponseTeacherTargets._resolve_span tokenizes the answer "
+                   "span differently depending on whether a teacher is attached (in-context re-tokenization "
+                   "of the whole `text` vs standalone tokenization of the answer alone) -- leaving this unset "
+                   "for a KD-trained checkpoint silently evaluates it against a mismatched target sequence "
+                   "(found 2026-09-21: val_answer=9.76 on real docs vs training's own val=1.85-2.40).")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -149,11 +156,13 @@ def main() -> None:
     torch.manual_seed(args.seed)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(resolve_model_name(args.tokenizer))
+    if tok.pad_token_id is None:
+        tok.pad_token = tok.eos_token
     vocab_size = len(tok)
 
     val_ds = RetrievalPromptDataset(args.val_data, tok, block_size=args.block_size,
                                      n_docs_max=args.n_docs_max, max_answer_len=args.max_answer_len,
-                                     pad_id=tok.pad_token_id)
+                                     pad_id=tok.pad_token_id, teacher_targets=args.teacher_targets)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
     print(f"loaded {len(val_ds)} val examples from {args.val_data}", flush=True)
 
