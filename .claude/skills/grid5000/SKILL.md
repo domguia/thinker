@@ -67,6 +67,28 @@ Check availability before reserving: `https://<site>.grid5000.fr/drawgantt-svg/`
 
 **Anti-pattern to avoid**: never conclude a site/cluster is saturated from aggregate free/busy counts alone. A site-wide `busy` reading can be a maintenance placeholder job, not real usage (hit this exact trap at Rennes once) — always sample a few nodes' `.reservations[].types` for `maintenance` before reporting saturation as real.
 
+**Prefer a capability filter over pinning a single cluster name for besteffort jobs**: `oarsub -p "cluster='abacus27'"` can schedule far in the future (observed: 3.5h delay for `abacus27`/H100, despite a static GPU inventory snapshot showing it "free") — a hardware inventory query is a point-in-time snapshot, not real-time availability, and pinning to one cluster forces OAR to wait for that exact cluster even when equally-good alternatives are idle. Filter by capability instead and let OAR pick whatever compatible node is actually free right now:
+```bash
+oarsub -l gpu=1,walltime=<T> -p "gpu_compute_capability >= '7.5'" -t besteffort -t idempotent ...
+```
+This consistently got `Running` immediately in practice (2026-09-21), vs. hours of `Waiting` for a pinned cluster. Only pin a specific cluster when the experiment genuinely needs that exact hardware (e.g. one very large-VRAM run) — not as a default habit.
+
+### Estimate duration from measured throughput before dispatching
+
+**Never assume a newly-assigned node has good throughput — measure the first 2-3 minutes and compare to a known-fast baseline before committing a task to it, especially if the task blocks downstream experiments.** A capability filter (CC≥7.5) only guarantees *compatibility*, not *speed* — concrete contrast measured 2026-09-21 on the identical precompute workload: Nancy's `graffiti` cluster (RTX 2080 Ti, 12GB, CC7.5) ran at ~1.85-1.86 ex/s, vs. ~27-42 ex/s on various Rennes GPUs (A100/A40/L40S/RTX A5000) — a ~15x slowdown, costing ~84 real minutes of extra wall-clock on a task that was blocking a downstream matched-reference run.
+
+How to apply: after launching any new task on a node not already benchmarked this session, check `[progress] ... rate=X ex/s` (or equivalent) after ~2-3 minutes; if it's far below the throughput already seen on comparable hardware, and the task is on the critical path for other experiments, kill it and relaunch on a faster free node (`oarsub` with the capability filter above) rather than letting it run to completion in place. Report the estimated time cost (slow-node ETA vs fast-node ETA) so the tradeoff is explicit rather than silently absorbed.
+
+**Nancy's `graffiti` cluster (RTX 2080 Ti) specifically: avoid for any non-trivial GPU compute, last resort only.** If a precompute or training run ends up there (e.g. because it was the only free node at dispatch time), migrate the output/checkpoint to a fast site (typically Rennes) as soon as it's usable rather than continuing to compute there — see "Direct frontend-to-frontend transfers" below.
+
+### Direct frontend-to-frontend transfers — never relay through the local machine
+
+**Never route a Grid5000 inter-site data transfer (e.g. Nancy → Rennes) through the user's local PC.** Confirmed working pattern: SSH directly from one site's frontend into another site's frontend by bare hostname and run `rsync` there:
+```bash
+ssh rennes.grid5000.fr.g5k 'rsync -avz nancy.grid5000.fr:~/thinker/path/to/file ~/thinker/path/to/file'
+```
+This was tested and works (2026-09-21, 1.3GB in ~10s, direct inter-site network, no local hop). Transient "Connection timed out during banner exchange... port 65535" errors on the bastion or a frontend-to-frontend hop happen occasionally and self-resolve on a bare retry — this is ordinary network flakiness, not a structural block; retry once with a verbose (`-vvv`) SSH diagnostic before concluding a real connectivity problem exists, and investigate the actual cause rather than falling back to a local relay as a workaround.
+
 ### Staged workflow: CPU data-prep → GPU compute
 
 For distillation work specifically, don't download/prepare datasets on a GPU reservation — it wastes fair-use priority on a scarce resource while the GPU sits idle.
@@ -90,6 +112,8 @@ oarsub -I -n "distill-gpu" -l gpu=1,walltime=8:00:00 -p "gpu_model = 'A100'"
 ## Pitfalls to remember
 
 - Walltime expires → `SIGTERM` then a quick `SIGKILL`, `/tmp` wiped: save regularly, not just at the very end.
+- Launching `python -m ...` or a project script from `~/thinker` via `oarsh`/SSH needs `PYTHONPATH=.` explicitly (no implicit package install) — `ModuleNotFoundError: No module named 'core'` otherwise. Also, a plain `micromamba` on `$PATH` can be missing in a non-interactive `oarsh`/`bash -lc` shell — use the full path (`~/micromamba/micromamba run -p ~/micromamba/envs/<env> ...`) if `which micromamba` fails.
+- `setsid nohup ... & disown -a` launched over `oarsh`/`ssh` routinely makes the launching command itself hit its own `timeout`/backgrounding — this is EXPECTED, not a failure: the detached process still starts correctly. Wait a few seconds and check the log file directly rather than treating the timeout as an error.
 - Reserving a scarce GPU (A100/H100) without actively using it hurts fair-use priority — release with `oardel` as soon as done.
 - Strictly personal access (never share the key/account); forbidden computations: mining, network scans, attacks, undeclared public web services.
 - Account tied to the `wide` group with annual revalidation — watch for emails.
