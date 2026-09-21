@@ -31,6 +31,13 @@ MODEL_FAMILIES = {
         # comme lfm2/lfm2-thinking. C'est le Teacher deja utilise pour la distillation Qwen de ce
         # projet (§13.1 de la spec) ; tout script KD visant ce Teacher doit passer explicitement
         # "--tokenizer qwen_big", jamais l'alias "qwen" par defaut.
+    "qwen35": "Qwen/Qwen3.5-0.8B",  # 2026-09-21 (model-design): PETIT modele de la MEME famille de
+        # vocab que "qwen_big" -- Qwen 3.5 garde vocab_size=248,320 constant de 0.8B a 397B-A17B
+        # (verifie sur 0.8B et 9B, dev_notes/model_selection_small_vocab_reasoning.md:26), qui
+        # coincide avec le vocab reel de "qwen_big" (248,077/248,320, meme checkpoint Qwen3.5
+        # utilise en mode texte). Resout le mismatch qwen/qwen_big SANS telecharger un nouveau
+        # Teacher : utiliser "--tokenizer qwen35" cote etudiant pour rester aligne sur "qwen_big"
+        # cote Teacher, exactement comme lfm2/lfm2-thinking ou olmo le sont deja en interne.
 }
 
 
