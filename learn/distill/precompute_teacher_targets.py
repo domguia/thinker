@@ -143,7 +143,10 @@ def save_shard_async(path, arrays):
     a crash mid-write never leaves a corrupt shard that find_resume_point
     would trust."""
     def _write():
-        tmp = path + ".tmp"
+        # np.savez_compressed silently appends ".npz" when the given name
+        # doesn't already end with it -- the tmp name must end in ".npz" too,
+        # or the file actually written won't match what os.replace expects.
+        tmp = path[:-4] + ".tmp.npz" if path.endswith(".npz") else path + ".tmp.npz"
         np.savez_compressed(tmp, **arrays)
         os.replace(tmp, path)
 
