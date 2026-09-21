@@ -172,8 +172,9 @@ def merge_shards(topk_dir, hidden_dir, out_file, hidden_out_file, k, hidden_laye
     at most one shard's worth of hidden states is ever resident in RAM.
     """
     shards = sorted(
-        (int(SHARD_RE.search(p).group(1)), p)
+        (int(m.group(1)), p)
         for p in glob.glob(os.path.join(topk_dir, "shard_*.npz"))
+        for m in [SHARD_RE.search(p)] if m  # skip leftover *.tmp.npz or other stray matches
     )
     all_indices, all_values, all_residual, offsets = [], [], [], [0]
     token_total = 0
