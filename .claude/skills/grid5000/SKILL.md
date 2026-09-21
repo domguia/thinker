@@ -113,6 +113,15 @@ oarsub -I -n "distill-gpu" -l gpu=1,walltime=8:00:00 -p "gpu_model = 'A100'"
   - **`killerdroid@storage3.rennes.grid5000.fr`** (confirmed access, `jdomguia` added to group `sto-killerdroid` until 2026-12-31): mounted at `/srv/storage/killerdroid@storage3.rennes.grid5000.fr/`. **This is another project's storage** (Android malware research — `androzoo`, `MalDroid-2020`, etc., owned by other users), not dedicated Thinker space — our files live under a project-specific subfolder, `thinker-distill/`, created for this purpose (holds the downloaded Teacher checkpoint, e.g. `.../thinker-distill/Qwen3.8-27B-FP8`). Already 90% full site-wide (3.5 TB free of 35 TB) — plenty for our needs, but be mindful it's shared with an unrelated team.
   - **Home quota discipline**: the Rennes home quickly exceeded the 25 GB soft limit once large downloads (Teacher checkpoint) and multiple Python environments (venvs, `micromamba`) accumulated — got an actual quota-exceeded email at 59.38 GB. Move large one-off artifacts (model checkpoints) to Group Storage rather than home, and delete superseded environments (e.g. an old venv after switching to a `micromamba` env) instead of leaving them around "just in case".
 
+## Monitoring long-running jobs without wasting tokens
+
+**Don't use a `Monitor` that emits on every progress-log line** — a `[progress]` line every ~20-40s over a multi-hour run generates one chat notification per line, burning tokens on pure noise with nothing actionable in almost every one. Prefer, in order of preference:
+1. **Notify only on terminal state** (completion marker like `Wrote...`/`Budget reached`, or an anomaly signature like `Traceback|Error|OutOfMemory`) — the monitor script polls internally (`sleep 60-90`) but only echoes (and thus only notifies) on those lines. This is the default for any run expected to take longer than a few minutes.
+2. If intermediate visibility is genuinely useful (e.g. deciding whether to migrate a slow node), throttle to sparse milestones (every 1000 examples / every 10% / every N minutes) rather than every log line — still far fewer notifications than raw tail -f.
+3. Wrap the SSH monitor command in an outer retry loop (`while true; do ssh ... ; rc=$?; [ $rc -eq 0 ] && break; sleep 10; done`) — a bare `ssh` inside a `Monitor` can itself die from the transient bastion/network flakiness documented above, which kills the whole monitor (`exit 255`) with no further updates. Don't rely on a single unretried SSH staying up for a multi-hour watch.
+
+When actively deciding whether to migrate a node (comparing throughput against a baseline, early in a run), it's fine to check `tail`/`nvidia-smi` directly a few times in the first 2-3 minutes rather than setting up a Monitor at all — reserve `Monitor` for the "let it run, tell me when it's done or breaks" phase once the node choice is validated.
+
 ## Pitfalls to remember
 
 - Walltime expires → `SIGTERM` then a quick `SIGKILL`, `/tmp` wiped: save regularly, not just at the very end.
