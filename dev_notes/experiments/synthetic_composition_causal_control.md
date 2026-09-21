@@ -55,4 +55,18 @@ Pour la décomposition par groupe, split `val_composition.jsonl`/`val_control.js
 **Groupe CONTRÔLE (num_hops=1, n=195)** : **mean=0.2626, std=0.2354, se=0.0169, t=15.580**
 (degradation supporting-real=0.2486 vs distracteur_apparié-real=-0.0147)
 
-**Lecture** : signal ENCORE plus fort et net que le run CE (t=13-19 contre t=7-10 précédemment) -- la version KD (protocole correct, comparable au flagship) confirme et renforce la conclusion : récupération ciblée réelle et massive dans les deux groupes dès que la nécessité documentaire est absolue. Reste à répliquer sur 2-3 seeds supplémentaires (demande model-design) avant traitement comme résultat définitif pour le papier -- seeds 1/2 en cours.
+**Lecture** : signal ENCORE plus fort et net que le run CE (t=13-19 contre t=7-10 précédemment) -- la version KD (protocole correct, comparable au flagship) confirme et renforce la conclusion : récupération ciblée réelle et massive dans les deux groupes dès que la nécessité documentaire est absolue.
+
+## 2026-09-21 — Réplication 3 seeds (KD) : signal robuste, t poolé=33.47
+
+Seeds 1 et 2 (même config KD exacte, seul `--seed` change), même protocole (`--teacher_targets` sur eval, comptage égalisé) :
+
+| seed | val_answer (réel) | diff appariée (supporting - distracteur_apparié) | se | t |
+|---|---|---|---|---|
+| 0 | 1.8454 | 0.2623 | 0.0134 | 19.510 |
+| 1 | 1.8451 | 0.3654 | 0.0188 | 19.481 |
+| 2 | 1.8189 | 0.4818 | 0.0232 | 20.776 |
+
+**Test poolé (pondération inverse-variance, n=1200)** : **mean=0.3305, se=0.0099, t=33.471**.
+
+**Lecture finale** : signe et ordre de grandeur cohérents sur les 3 seeds indépendantes (val_answer réel quasi identique 1.82-1.85 malgré seeds différentes -- convergence stable), magnitude de l'effet variable (0.26 à 0.48) mais toujours net et jamais proche de zéro -- pas le piège "signal significatif sur 1 seed qui ne réplique pas" déjà rencontré 2 fois sur ce projet (kb_ingestion 8ter, contrôle HotpotQA pré-comptage-égalisé). **Résultat considéré robuste et prêt pour le papier** : le modèle fait de la récupération ciblée réelle quand la nécessité documentaire est absolue par construction, contrastant avec l'absence totale de signal sur HotpotQA (nécessité seulement statistique). Relayé à `model-design`.
