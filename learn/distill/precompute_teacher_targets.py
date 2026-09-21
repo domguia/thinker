@@ -158,13 +158,24 @@ def save_shard_async(path, arrays):
 def merge_shards(topk_dir, hidden_dir, out_file, hidden_out_file, k, hidden_layer_indices):
     """Concatenate all shards into the final two .npz files and fix up the
     per-example token offsets, which are shard-relative (each shard starts
-    its own offsets at 0) and need a running token total added back in."""
+    its own offsets at 0) and need a running token total added back in.
+
+    2026-09-21 (OOM fix): the hidden-states array (last layer, every token)
+    can be tens of GB -- building it as a Python list of shard arrays then
+    np.concatenate'ing doubles peak RAM (list + concatenated copy) and was
+    observed to silently OOM-kill the process mid-merge on a node with
+    otherwise plenty of GPU VRAM but limited host RAM (no traceback, since
+    the OOM killer sends SIGKILL -- looked identical to the other silent
+    deaths tonight until diagnosed). Top-K arrays stay small (K=32) so a
+    plain concatenate is fine for those; the hidden array is written
+    directly into a disk-backed memmap sized up front, shard by shard, so
+    at most one shard's worth of hidden states is ever resident in RAM.
+    """
     shards = sorted(
         (int(SHARD_RE.search(p).group(1)), p)
         for p in glob.glob(os.path.join(topk_dir, "shard_*.npz"))
     )
     all_indices, all_values, all_residual, offsets = [], [], [], [0]
-    hidden_accum = {layer: [] for layer in hidden_layer_indices}
     token_total = 0
     for _, path in shards:
         d = np.load(path)
@@ -173,10 +184,6 @@ def merge_shards(topk_dir, hidden_dir, out_file, hidden_out_file, k, hidden_laye
         all_residual.append(d["residual"])
         offsets.extend((d["offsets"][1:] + token_total).tolist())
         token_total += int(d["offsets"][-1])
-        if hidden_layer_indices:
-            hd = np.load(os.path.join(hidden_dir, os.path.basename(path)))
-            for layer in hidden_layer_indices:
-                hidden_accum[layer].append(hd[f"hidden_{layer}"])
 
     indices = np.concatenate(all_indices, axis=0)
     values = np.concatenate(all_values, axis=0)
@@ -184,12 +191,59 @@ def merge_shards(topk_dir, hidden_dir, out_file, hidden_out_file, k, hidden_laye
     offsets = np.array(offsets, dtype=np.int64)
 
     np.savez_compressed(out_file, indices=indices, values=values, residual=residual, offsets=offsets, k=k)
+
     hidden_arrays = {}
     if hidden_layer_indices:
-        hidden_arrays = {layer: np.concatenate(arrs, axis=0) for layer, arrs in hidden_accum.items()}
-        save_kwargs = {f"hidden_{layer}": arr for layer, arr in hidden_arrays.items()}
-        save_kwargs["offsets"] = offsets
-        np.savez_compressed(hidden_out_file, **save_kwargs)
+        # Pass 1 (cheap, headers only): total tokens + per-layer dtype/dim.
+        shapes = {}
+        for layer in hidden_layer_indices:
+            total = 0
+            dim = dtype = None
+            for _, path in shards:
+                hd = np.load(os.path.join(hidden_dir, os.path.basename(path)))
+                arr = hd[f"hidden_{layer}"]
+                total += arr.shape[0]
+                dim, dtype = arr.shape[1], arr.dtype
+            shapes[layer] = (total, dim, dtype)
+
+        hidden_npy_dir = hidden_out_file[:-4] if hidden_out_file.endswith(".npz") else hidden_out_file
+        hidden_npy_dir += ".memmap_tmp"
+        os.makedirs(hidden_npy_dir, exist_ok=True)
+        memmaps = {}
+        for layer, (total, dim, dtype) in shapes.items():
+            mmap_path = os.path.join(hidden_npy_dir, f"hidden_{layer}.npy")
+            memmaps[layer] = np.lib.format.open_memmap(mmap_path, mode="w+", dtype=dtype, shape=(total, dim))
+
+        # Pass 2: copy each shard directly into its slice of the memmap.
+        cursor = {layer: 0 for layer in hidden_layer_indices}
+        for _, path in shards:
+            hd = np.load(os.path.join(hidden_dir, os.path.basename(path)))
+            for layer in hidden_layer_indices:
+                arr = hd[f"hidden_{layer}"]
+                n = arr.shape[0]
+                memmaps[layer][cursor[layer]:cursor[layer] + n] = arr
+                cursor[layer] += n
+
+        for m in memmaps.values():
+            m.flush()
+        hidden_arrays = memmaps  # memmap arrays, not loaded fully in RAM
+        # np.savez can't stream from memmaps without loading them, and the
+        # whole point here is to never hold the full array in RAM -- so the
+        # final hidden-states artifact IS the memmap directory (one .npy per
+        # layer) rather than a single .npz. Ship an offsets.npy alongside so
+        # a loader can still resolve token boundaries.
+        np.save(os.path.join(hidden_npy_dir, "offsets.npy"), offsets)
+        if os.path.isdir(hidden_out_file):
+            pass  # already a dir from a prior partial run
+        elif os.path.exists(hidden_out_file):
+            os.remove(hidden_out_file)
+        final_dir = hidden_out_file[:-4] if hidden_out_file.endswith(".npz") else hidden_out_file
+        if os.path.isdir(final_dir):
+            import shutil
+            shutil.rmtree(final_dir)
+        os.rename(hidden_npy_dir, final_dir)
+        print(f"Hidden states written as memmap directory (not .npz, too large to hold in RAM): {final_dir}", flush=True)
+
     return indices, values, residual, offsets, hidden_arrays
 
 
@@ -347,15 +401,20 @@ def main():
             topk_dir, hidden_dir, args.shard_size, resume_at,
         )
     else:
-        # nothing left to run, but still need num_layers to know which hidden
-        # shards to expect at merge time -- reparse without loading the model
-        hidden_layer_indices = parse_hidden_layers(args.hidden_layers, 0) if args.hidden_layers in ("none",) else None
-        if hidden_layer_indices is None:
-            raise RuntimeError("Cannot resume-skip model load while --hidden_layers != none without knowing num_layers; delete shard dirs to force a clean rerun, or keep the model load path.")
+        # Nothing left to run (e.g. re-launched purely to retry a merge that
+        # OOM'd) -- no need to reload the Teacher just to resolve "last" into
+        # a layer number: the shards already have it baked into their key
+        # names (hidden_<N>), so read it straight off an existing shard.
+        print("Skipping model load (nothing left to process) -- reading hidden-layer indices off existing shards.", flush=True)
+        any_hidden_shard = next(iter(glob.glob(os.path.join(hidden_dir, "shard_*.npz"))), None)
+        if any_hidden_shard:
+            d = np.load(any_hidden_shard)
+            hidden_layer_indices = sorted(int(k.split("_", 1)[1]) for k in d.files if k.startswith("hidden_"))
+        else:
+            hidden_layer_indices = []
 
     indices, values, residual, offsets, hidden_arrays = merge_shards(
-        topk_dir, hidden_dir, args.out_file, hidden_out_file, args.top_k,
-        hidden_layer_indices if resume_at < len(examples) else [],
+        topk_dir, hidden_dir, args.out_file, hidden_out_file, args.top_k, hidden_layer_indices,
     )
 
     total_tokens = offsets[-1]
