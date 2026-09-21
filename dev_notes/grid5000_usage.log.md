@@ -377,3 +377,47 @@ Job 4121144 (the original 7-GPU reservation, `abacus11/17/18`) flipped to `Error
 - **Leçon retenue** : ne jamais utiliser `stat -c%s` pour mesurer la progression d'un fichier memmap pré-alloué en sparse -- toujours `du -sh` (ou `du --apparent-size` pour comparer explicitement) pour obtenir les octets réellement écrits. Voir mise à jour SKILL.md.
 - **Découverte en parallèle** : les noeuds `ecotaxe-1`/`ecotaxe-2` (Nantes) ont chacun **3 GPU A100 80GB** (pas 1) -- confirmé via `oarnodes -J` (gpudevice 0/1/2 distincts) et l'API hardware. Nos jobs ne réservaient que `gpu=1` chacun ; capacité supplémentaire exploitable si les autres GPU se libèrent (actuellement pris par un job `tgroussa` à durée courte).
 - **Cause racine ecotaxe-2 "suspect" (résolue)** : ce n'était pas un problème du noeud lui-même -- `~/.cache/mamba/proc/<pid>.json` (suivi de process de micromamba) est sur le home NFS partagé entre noeuds/sites, et un `micromamba run` concurrent sur un autre noeud peut y laisser un fichier vide pendant son écriture, faisant planter silencieusement tout `micromamba run` sur n'importe quel autre noeud qui scanne ce répertoire au même moment (aucune sortie, aucun traceback visible côté script cible). Fix : supprimer le(s) fichier(s) `.json` vides dans `~/.cache/mamba/proc/` avant de relancer.
+
+- **Inefficacité latente identifiée dans `merge_shards` (2026-09-21, non corrigée en urgence, à corriger plus tard)** : le commentaire "Pass 1 (cheap, headers only)" est incorrect pour des shards `.npz` compressés (`np.savez_compressed`) -- `np.load(...)[...]` doit décompresser l'intégralité du tableau dès l'accès à `.shape`, donc chaque shard hidden est décompressé deux fois (once pour les tailles, once pour la copie réelle dans le memmap). Sur des shards de 5-7GB chacun, ça peut ajouter plusieurs dizaines de minutes de CPU pur sans aucune écriture visible en sortie -- observé sur le merge final de retrieval1_ecotaxe_a (top_k=64, 4998 exemples), `du` sur le dossier memmap cible restant à 4.0K (vide) pendant >15 min avec le process à 190%+ CPU. Fix propre à faire : soit stocker les shapes dans un petit fichier JSON séparé au moment de l'écriture du shard (évite toute relecture), soit lire uniquement `d.files` + un accès `.shape` via `zipfile` sans décompression complète si possible. Pas critique (juste lent), donc pas corrigé en urgence cette nuit -- le run en cours a été laissé terminer tel quel.
+
+## HANDOFF 2026-09-21 19h40 -- reliquat retrieval1 (ecotaxe, Nantes) a completer des qu'un GPU CC>=7.5 est libre
+
+**Contexte resume** : dataset retrieval1 (10000 ex.) split en deux moities `ec_a` (4998 ex.) et `ec_b` (5002 ex.), precompute Teacher (Qwen3.8-27B-FP8, top_k=64 pour A / top_k=32 pour B, hidden_layers=last=64) sur cluster `ecotaxe` (Nantes, A100 80GB). Plusieurs incidents cette nuit (quota disque NFS Nantes plein, eviction besteffort par job de production `melkhadiri/mosaic_2node_n` a 18h55, panne reseau) -- tout est documente plus haut dans ce fichier. **Rien n'est perdu**, tout ce qui manque est un seul petit lot.
+
+**Etat actuel (fusion CPU en cours sur `econome-15.nantes.grid5000.fr`, job `338499`, sans GPU)** :
+- `train_repr10k_ec_b.npz` (top-K complet, 5002 ex.) : **fait**, ne pas toucher.
+- `train_repr10k_ec_b._hidden` (hidden states de B) : **a recombiner** -- deux morceaux existent : (1) memmap original 0-3500 sauvegarde sur `/srv/storage/killerdroid@storage3.rennes.grid5000.fr/thinker-distill/retrieval1_backup/train_repr10k_ec_b._hidden.memmap_tmp/hidden_64.npy` (33GB, examples 0-3500), (2) `train_repr10k_ec_b_tail` (1502 ex., 3500-5002) dont la fusion a ete interrompue par l'eviction 18h55 -- ses shards bruts sont intacts sur `~/thinker/data/distill/hotpotqa_full/train_repr10k_ec_b_tail.{topk,hidden}_shards/`. **A faire** : relancer `precompute_teacher_targets.py --input_file .../train_repr10k_ec_b_tail.jsonl --top_k 32 --hidden_layers last --out_file .../train_repr10k_ec_b_tail.npz` (resume automatique, shards deja la, juste besoin d'un GPU pour finir la fusion -- ou refaire en CPU-only via `merge_partial.py`, voir ci-dessous), puis concatener son memmap hidden avec le morceau 0-3500 (deux `np.load(mmap_mode='r')` + copie sequentielle dans un memmap final de taille 5002).
+- `train_repr10k_ec_a.npz` + `train_repr10k_ec_a._hidden` (A, **4498/4998** ex.) : fusion partielle en cours via le nouveau script `learn/distill/merge_partial.py` (reutilise `merge_shards()` sans GPU, met de cote les shards orphelins plutot que de planter). **Manque encore 500 exemples (indices 3000-3499 0-based)** : shard top-K deja complet (`train_repr10k_ec_a.topk_shards.pending_hidden/shard_0003000_0003500.npz`, mis de cote par le script, NE PAS SUPPRIMER), mais le shard hidden correspondant est manquant. Sous-ensemble jsonl deja extrait : `data/distill/hotpotqa_full/train_repr10k_ec_a_gap.jsonl` (500 lignes = jsonl lines 3001-3500 de `train_repr10k_ec_a.jsonl`). **Commande a relancer des qu'un GPU CC>=7.5 (A100/H100/L40S/RTX2080Ti Turing+, PAS de P100/Quadro Pascal -- notre env torch n'a pas de kernel pour CC<7.5) est libre** :
+  ```bash
+  cd ~/thinker && PYTHONPATH=. ~/bin/micromamba run -p ~/micromamba/envs/teacher311 python learn/distill/precompute_teacher_targets.py \
+    --input_file data/distill/hotpotqa_full/train_repr10k_ec_a_gap.jsonl \
+    --model_dir /srv/storage/killerdroid@storage3.rennes.grid5000.fr/thinker-distill/Qwen3.8-27B-FP8 \
+    --top_k 64 --hidden_layers last --max_length 4096 --shard_size 500 \
+    --out_file data/distill/hotpotqa_full/train_repr10k_ec_a_gap.npz
+  ```
+  Une fois termine, remettre le shard top-K mis de cote a sa place (`mv train_repr10k_ec_a.topk_shards.pending_hidden/shard_0003000_0003500.npz train_repr10k_ec_a.topk_shards/`), copier le shard hidden de `train_repr10k_ec_a_gap.hidden_shards/shard_0000000_0000500.npz` vers `train_repr10k_ec_a.hidden_shards/shard_0003000_0003500.npz`, puis relancer `merge_partial.py` (maintenant `Covered ranges` devrait couvrir 0-4998 sans trou).
+
+**Script CPU-only reutilisable** (`learn/distill/merge_partial.py`, commite) -- pour fusionner sans GPU des que des shards complets existent, avec manifeste de couverture (`--manifest_out`) qui signale precisement les trous restants plutot que de planter :
+```bash
+cd ~/thinker/learn/distill && PYTHONPATH=. ~/bin/micromamba run -p ~/micromamba/envs/teacher311 python merge_partial.py \
+  --topk_dir ../../data/distill/hotpotqa_full/<prefix>.topk_shards \
+  --hidden_dir ../../data/distill/hotpotqa_full/<prefix>.hidden_shards \
+  --out_file ../../data/distill/hotpotqa_full/<prefix>.npz \
+  --hidden_out_file ../../data/distill/hotpotqa_full/<prefix>._hidden.npz \
+  --k <32 ou 64> --hidden_layer 64 --total_examples <N> \
+  --manifest_out ../../data/distill/hotpotqa_full/<prefix>.manifest.json
+```
+
+**GPU libres actuellement (2026-09-21 19h40, verifie via API status.json) si besoin de finir le lot de 500** :
+- `graffiti` (Nancy) -- 4x RTX 2080 Ti 11GB, CC 7.5, **compatible avec notre env torch**, libre maintenant.
+- `abacus2`/`drac` (Rennes/Grenoble) -- P100, CC 6.0, **incompatible**, ne pas utiliser.
+- Cluster `ecotaxe` (Nantes, A100) : pris par job de production jusqu'a demain ~09h.
+- Reservations standing deja posees (besteffort, en attente) : Sophia `musa` job `3128405` (demarrage prevu ~08h20 demain), Lille `chuc` jobs `2209547`/`2209548` (~08h54), Rennes `abacus27` job `4124644` (~18h50 demain), Nantes `ecotaxe` jobs `338491`/`338492` (~09h).
+
+**Prochaine etape apres completion des deux fusions** : lancer le training repr-KD (comparaison au pas contre `retrieval1-ref`, val_answer=8.3761 @ step 750) une fois les deux `.npz`/`._hidden` complets et sans trou.
+
+**ADDENDUM -- si un autre agent utilise le noeud `hydra` (Lyon, Grace-Hopper ARM64) deja securise** :
+Notre micromamba env `~/micromamba/envs/teacher311` est compile pour **x86_64** -- il ne fonctionnera PAS tel quel sur `hydra` (architecture ARM64/aarch64). Piege deja documente dans `.claude/skills/grid5000/SKILL.md` : un `pip install torch` nu sur `hydra` donne `torch.cuda.is_available() == False` meme avec un GPU correctement detecte par `nvidia-smi` (bug PyTorch connu sur les wheels aarch64+CUDA, https://github.com/pytorch/pytorch/issues/123835), et l'OS deploye par defaut sur `hydra` n'a pas le support GPU. Deux options pour que l'agent sur `hydra` puisse executer la commande de rattrapage du lot de 500 exemples ci-dessus :
+1. Deployer l'environnement `ubuntugh2404-arm64-big` via `kadeploy3` puis reconstruire un micromamba env ARM64 natif (long, refaire tous les packages).
+2. **Plus rapide** : lancer un conteneur Nvidia NGC PyTorch pour ARM64 via `apptainer run --nv <image>.sif` (voir SKILL.md section hydra) -- installer transformers/numpy dans ce conteneur, puis executer `precompute_teacher_targets.py` dedans avec les memes chemins (le jsonl et le dossier de sortie sont sur NFS home, accessibles depuis n'importe quel noeud/site apres montage -- verifier que le home Lyon voit bien `~/thinker`, sinon transferer `train_repr10k_ec_a_gap.jsonl` (26MB, petit) frontend-a-frontend Nantes->Lyon).
+Si aucune des deux options n'est rapide a mettre en place, il est plus simple d'attendre un des creneaux x86_64 deja lances en besteffort (Nancy `graffiti` disponible immediatement, RTX2080Ti, CC7.5, compatible sans rien changer) plutot que de se battre avec ARM64 pour un lot de seulement 500 exemples.
