@@ -36,3 +36,23 @@ diff appariée (comptage égalisé) : **mean=0.2054, std=0.4047, se=0.0290, t=7.
 **Lecture** : contraste total avec HotpotQA (t=0.315 poolé, aucun signal) -- ici, **signal de récupération ciblée massif et net dans les DEUX groupes** (t=7.09 à t=7.36, bien au-delà du seuil de bruit), avec un comptage de documents corrompus rigoureusement égalisé. Corrompre le(s) document(s) réellement nécessaire(s) dégrade fortement la réponse (+0.21 à +0.23), corrompre un nombre égal de distracteurs n'a quasiment aucun effet (-0.005 à +0.004, indistinguable de zéro). **Confirme que le modèle EST capable de récupération ciblée réelle lorsque la nécessité documentaire est absolue et sans ambiguïté** -- l'absence de signal sur HotpotQA s'explique donc bien par la nécessité seulement statistique de ce dataset (les distracteurs y contiennent souvent des indices partiels ou une structure similaire, diluant le signal), pas par une incapacité structurelle de l'architecture. Cohérent avec le diagnostic synthétique positif (I4) déjà noté par `model-design`. **Résultat obtenu sur le run CE pur (secondaire) -- à confirmer/renforcer par le run KD (config flagship) en cours.**
 
 Relayé à `model-design`.
+
+## 2026-09-21 — Run KD (seed=0, protocole flagship correct) : bug de harnais trouvé et corrigé, signal ENCORE plus fort
+
+Run KD (`d_model=256, n_head=4, n_step=4, use_ff, kd_alpha=0.5, bf16, compile, max_steps=6000, seed=0`, `--teacher_targets`/`--val_teacher_targets` = precompute combiné top_k32+hidden_layers16 sur train/val synth-composition) -- meilleur checkpoint (`checkpoints/synth_composition_kd_best.pt`) : **val_answer=1.8472 à step 900** (surapprentissage ensuite, val=2.40 à step 6000).
+
+**Bug de harnais trouvé et corrigé (`data/prompt_response_dataset.py:165`, `_resolve_span`)** : quand `--teacher_targets` est actif, la réponse est tokenisée EN CONTEXTE (`_locate_token_span`) ; sans teacher, tokenisation AUTONOME (`_tokenize_padded`). `eval_causal_control.py` ne passait jamais `--teacher_targets`, donc réévaluait tout checkpoint KD avec des labels legèrement décalés par rapport à l'entraînement -- premier essai (sans le flag) donnait `val_answer(réel)=9.7564`, très éloigné du 1.8472 rapporté par le training. Patché en parallèle par model-design (commit `5435a40`, ajout du flag `--teacher_targets` à `eval_causal_control.py`) -- avec le flag et le `val_topk32_hidden.npz` correspondant, `val_answer(réel)=1.8454`, cohérent avec le training (diff de 0.002, bruit numérique normal). **Vérification faite en parallèle par model-design : le contrôle causal historique HotpotQA (t=0.315 poolé, "aucun signal") portait sur des checkpoints CE purs des deux côtés (train ET eval) -- pas de désalignement possible, ce résultat reste valide tel quel, pas besoin de le refaire.**
+
+Pour la décomposition par groupe, split `val_composition.jsonl`/`val_control.jsonl` nécessite son PROPRE precompute (doc_id = position dans le fichier source, même piège que le bug d'alignement repr-KD déjà rencontré sur retrieval#1 -- rappel appliqué directement plutôt que redécouvert) : `val_composition_topk32_hidden.npz` (205 ex) et `val_control_topk32_hidden.npz` (195 ex) précomputés séparément.
+
+### Contrôle causal fin corrigé (comptage égalisé)
+
+**Ensemble (n=400)** : diff appariée (supporting - distracteur_apparié) = **mean=0.2623, std=0.2689, se=0.0134, t=19.510**
+
+**Groupe COMPOSITION (num_hops=2, n=205)** : **mean=0.2597, std=0.2836, se=0.0198, t=13.109**
+(degradation supporting-real=0.2627 vs distracteur_apparié-real=0.0030)
+
+**Groupe CONTRÔLE (num_hops=1, n=195)** : **mean=0.2626, std=0.2354, se=0.0169, t=15.580**
+(degradation supporting-real=0.2486 vs distracteur_apparié-real=-0.0147)
+
+**Lecture** : signal ENCORE plus fort et net que le run CE (t=13-19 contre t=7-10 précédemment) -- la version KD (protocole correct, comparable au flagship) confirme et renforce la conclusion : récupération ciblée réelle et massive dans les deux groupes dès que la nécessité documentaire est absolue. Reste à répliquer sur 2-3 seeds supplémentaires (demande model-design) avant traitement comme résultat définitif pour le papier -- seeds 1/2 en cours.
