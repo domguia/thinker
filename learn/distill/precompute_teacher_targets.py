@@ -64,16 +64,29 @@ def topk_with_residual(logits, k):
 
 
 def parse_hidden_layers(spec, num_layers):
-    """"none" -> [], "last" -> [num_layers], "all" -> [0..num_layers],
-    or an explicit comma-separated list of hidden_states indices (0 is the
-    embedding output, num_layers is the final layer's output)."""
+    """"none" -> [], "last" -> [num_layers], "all" -> [0..num_layers], or a
+    comma-separated list where each entry is either an explicit hidden_states
+    index (0 is the embedding output, num_layers is the final layer's output)
+    or the literal "last" -- e.g. "last,8" always gets the final layer plus
+    layer 8, regardless of how many layers this particular Teacher has.
+
+    2026-09-21 (model-design): the last layer is the default-useful one for
+    almost any downstream reuse of these embeddings, so it should be captured
+    on every repr-KD precompute, not just picked as a middle-ish-looking
+    integer that happens to coincide with "last" for a 16-layer model (as
+    happened here, undetected, for the first repr-KD run: LFM2-1.2B has
+    num_hidden_layers=16, so "--hidden_layers 16" WAS already "last" -- but
+    that only held because this particular Teacher has 16 layers, not by
+    design). Use the "last" keyword explicitly (alone or combined with an
+    intermediate index) instead of a hardcoded number, so the same flag stays
+    correct across Teachers of different depths (LFM2/OLMo/Qwen)."""
     if spec == "none":
         return []
     if spec == "last":
         return [num_layers]
     if spec == "all":
         return list(range(num_layers + 1))
-    return sorted(int(x) for x in spec.split(","))
+    return sorted({num_layers if x == "last" else int(x) for x in spec.split(",")})
 
 
 def process_file(model, tokenizer, examples, k, max_length, hidden_layer_indices):
@@ -133,7 +146,9 @@ def main():
     parser.add_argument(
         "--hidden_layers", default="none",
         help="'none' (default), 'last', 'all', or a comma-separated list of hidden_states "
-             "indices (0=embedding output, num_layers=final layer). Only use on small samples "
+             "indices (0=embedding output, num_layers=final layer) or the literal 'last' mixed "
+             "in, e.g. 'last,8' -- always capture the last layer plus an intermediate one of your "
+             "choice, correct regardless of this Teacher's actual depth. Only use on small samples "
              "-- one full hidden_dim vector per token per layer is much heavier than Top-K logits.",
     )
     parser.add_argument("--max_length", type=int, default=4096)
