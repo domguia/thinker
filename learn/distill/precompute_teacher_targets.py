@@ -16,10 +16,24 @@ field), runs each example through the Teacher, and stores per-token targets:
   the exact use in training is still open, this just makes the extraction
   available to experiment with later.
 
-Output is a single compressed .npz per input file with flat (total_tokens, ...)
-arrays plus an `offsets` array marking example boundaries (offsets[i] :
-offsets[i+1] are the token rows for example i) -- a ragged-array-friendly
-layout instead of one array per example.
+Output is TWO compressed .npz files -- top-K logits and hidden states are
+kept separate so training code that only needs top-K (the common case) never
+pays the cost of loading the much heavier embedding arrays:
+    <out_file>            top-K logits: indices/values/residual/offsets/k
+    <out_file>._hidden.npz  hidden states: hidden_<layer>/offsets (only
+                             written when --hidden_layers != none)
+
+2026-09-21 (critical fix, "on a perdu les 90%"): this script used to hold
+everything in memory and call np.savez_compressed exactly once, at the very
+end. Any interruption before completion (besteffort eviction, network
+outage, crash -- all routine on this project's infra) lost 100% of the work
+already done, twice in the same evening at ~90% completion. It now flushes
+a shard to a persistent directory every --shard_size examples, in a
+background thread so the GPU loop is not stalled by disk I/O, and resumes
+automatically from the last complete shard if relaunched with the same
+--out_file after being interrupted. Apply this same pattern to any other
+precompute-style script in this project that runs for more than a few
+minutes per example.
 
 Needs a GPU with enough VRAM for the Teacher (see bench_teacher.py first to
 confirm the checkpoint loads and measure real throughput before committing
@@ -41,13 +55,19 @@ Examples:
       --out_file /tmp/distill_data/reasoning/sample_targets.npz
 """
 import argparse
+import glob
 import json
+import os
+import re
+import threading
 import time
 
 import numpy as np
 import torch
 
 from bench_teacher import describe_gpus, load_model_and_tokenizer
+
+SHARD_RE = re.compile(r"shard_(\d+)_(\d+)\.npz$")
 
 
 def topk_with_residual(logits, k):
@@ -89,45 +109,145 @@ def parse_hidden_layers(spec, num_layers):
     return sorted({num_layers if x == "last" else int(x) for x in spec.split(",")})
 
 
-def process_file(model, tokenizer, examples, k, max_length, hidden_layer_indices):
+def shard_dir(out_file, suffix):
+    base = out_file[:-4] if out_file.endswith(".npz") else out_file
+    d = f"{base}.{suffix}_shards"
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def find_resume_point(topk_dir):
+    """Scan for complete contiguous shards starting at 0; return the example
+    index to resume from (0 if none found, or a gap/corruption is detected)."""
+    shards = []
+    for path in glob.glob(os.path.join(topk_dir, "shard_*.npz")):
+        m = SHARD_RE.search(path)
+        if m:
+            shards.append((int(m.group(1)), int(m.group(2)), path))
+    shards.sort()
+    resume_at = 0
+    for start, end, path in shards:
+        if start != resume_at:
+            break  # gap: stop trusting shards from here on
+        try:
+            np.load(path)  # cheap integrity check (raises on truncated file)
+        except Exception:
+            break
+        resume_at = end
+    return resume_at
+
+
+def save_shard_async(path, arrays):
+    """Write a shard in a background thread (numpy I/O releases the GIL) so
+    the GPU loop is never stalled waiting for disk, with an atomic rename so
+    a crash mid-write never leaves a corrupt shard that find_resume_point
+    would trust."""
+    def _write():
+        tmp = path + ".tmp"
+        np.savez_compressed(tmp, **arrays)
+        os.replace(tmp, path)
+
+    t = threading.Thread(target=_write, daemon=False)
+    t.start()
+    return t
+
+
+def merge_shards(topk_dir, hidden_dir, out_file, hidden_out_file, k, hidden_layer_indices):
+    """Concatenate all shards into the final two .npz files and fix up the
+    per-example token offsets, which are shard-relative (each shard starts
+    its own offsets at 0) and need a running token total added back in."""
+    shards = sorted(
+        (int(SHARD_RE.search(p).group(1)), p)
+        for p in glob.glob(os.path.join(topk_dir, "shard_*.npz"))
+    )
     all_indices, all_values, all_residual, offsets = [], [], [], [0]
-    all_hidden = {layer: [] for layer in hidden_layer_indices}
-    want_hidden = bool(hidden_layer_indices)
+    hidden_accum = {layer: [] for layer in hidden_layer_indices}
+    token_total = 0
+    for _, path in shards:
+        d = np.load(path)
+        all_indices.append(d["indices"])
+        all_values.append(d["values"])
+        all_residual.append(d["residual"])
+        offsets.extend((d["offsets"][1:] + token_total).tolist())
+        token_total += int(d["offsets"][-1])
+        if hidden_layer_indices:
+            hd = np.load(os.path.join(hidden_dir, os.path.basename(path)))
+            for layer in hidden_layer_indices:
+                hidden_accum[layer].append(hd[f"hidden_{layer}"])
+
+    indices = np.concatenate(all_indices, axis=0)
+    values = np.concatenate(all_values, axis=0)
+    residual = np.concatenate(all_residual, axis=0)
+    offsets = np.array(offsets, dtype=np.int64)
+
+    np.savez_compressed(out_file, indices=indices, values=values, residual=residual, offsets=offsets, k=k)
+    hidden_arrays = {}
+    if hidden_layer_indices:
+        hidden_arrays = {layer: np.concatenate(arrs, axis=0) for layer, arrs in hidden_accum.items()}
+        save_kwargs = {f"hidden_{layer}": arr for layer, arr in hidden_arrays.items()}
+        save_kwargs["offsets"] = offsets
+        np.savez_compressed(hidden_out_file, **save_kwargs)
+    return indices, values, residual, offsets, hidden_arrays
+
+
+def process_file(model, tokenizer, examples, k, max_length, hidden_layer_indices,
+                  topk_dir, hidden_dir, shard_size, resume_at):
+    pending_threads = []
+    idx_buf, val_buf, res_buf, off_buf = [], [], [], [0]
+    hidden_buf = {layer: [] for layer in hidden_layer_indices}
+    shard_start = resume_at
     start_time = time.time()
     progress_every = max(1, len(examples) // 100)
 
-    for i, ex in enumerate(examples, 1):
+    def flush(end_ex):
+        nonlocal idx_buf, val_buf, res_buf, off_buf, hidden_buf, shard_start
+        if end_ex == shard_start:
+            return
+        tag = f"shard_{shard_start:07d}_{end_ex:07d}.npz"
+        topk_arrays = {
+            "indices": np.concatenate(idx_buf, axis=0),
+            "values": np.concatenate(val_buf, axis=0),
+            "residual": np.concatenate(res_buf, axis=0),
+            "offsets": np.array(off_buf, dtype=np.int64),
+        }
+        pending_threads.append(save_shard_async(os.path.join(topk_dir, tag), topk_arrays))
+        if hidden_layer_indices:
+            hidden_arrays = {f"hidden_{layer}": np.concatenate(arrs, axis=0) for layer, arrs in hidden_buf.items()}
+            pending_threads.append(save_shard_async(os.path.join(hidden_dir, tag), hidden_arrays))
+        idx_buf, val_buf, res_buf, off_buf = [], [], [], [0]
+        hidden_buf = {layer: [] for layer in hidden_layer_indices}
+        shard_start = end_ex
+
+    for i, ex in enumerate(examples[resume_at:], resume_at + 1):
         inputs = tokenizer(ex["text"], truncation=True, max_length=max_length, return_tensors="pt").to(model.device)
         with torch.no_grad():
-            out = model(**inputs, output_hidden_states=want_hidden)
+            out = model(**inputs, output_hidden_states=bool(hidden_layer_indices))
         logits = out.logits[0]  # (seq_len, vocab)
 
         indices, values, residual = topk_with_residual(logits, k)
-        all_indices.append(indices.to(torch.int32).cpu().numpy())
-        all_values.append(values.to(torch.float16).cpu().numpy())
-        all_residual.append(residual.to(torch.float16).cpu().numpy())
-        offsets.append(offsets[-1] + logits.shape[0])
+        idx_buf.append(indices.to(torch.int32).cpu().numpy())
+        val_buf.append(values.to(torch.float16).cpu().numpy())
+        res_buf.append(residual.to(torch.float16).cpu().numpy())
+        off_buf.append(off_buf[-1] + logits.shape[0])
 
         for layer in hidden_layer_indices:
-            all_hidden[layer].append(out.hidden_states[layer][0].to(torch.float16).cpu().numpy())
+            hidden_buf[layer].append(out.hidden_states[layer][0].to(torch.float16).cpu().numpy())
+
+        if i % shard_size == 0 or i == len(examples):
+            flush(i)
 
         if i % progress_every == 0 or i == len(examples):
             elapsed = time.time() - start_time
-            rate = i / elapsed if elapsed > 0 else 0
+            done = i - resume_at
+            rate = done / elapsed if elapsed > 0 else 0
             print(
-                f"[progress] processed={i}/{len(examples)} tokens={offsets[-1]} "
+                f"[progress] processed={i}/{len(examples)} tokens_this_run={off_buf[-1] if off_buf[-1] else ''} "
                 f"elapsed={elapsed:.1f}s rate={rate:.2f} ex/s",
                 flush=True,
             )
 
-    hidden_arrays = {layer: np.concatenate(arrs, axis=0) for layer, arrs in all_hidden.items()}
-    return (
-        np.concatenate(all_indices, axis=0),
-        np.concatenate(all_values, axis=0),
-        np.concatenate(all_residual, axis=0),
-        np.array(offsets, dtype=np.int64),
-        hidden_arrays,
-    )
+    for t in pending_threads:
+        t.join()
 
 
 def main():
@@ -149,9 +269,15 @@ def main():
              "indices (0=embedding output, num_layers=final layer) or the literal 'last' mixed "
              "in, e.g. 'last,8' -- always capture the last layer plus an intermediate one of your "
              "choice, correct regardless of this Teacher's actual depth. Only use on small samples "
-             "-- one full hidden_dim vector per token per layer is much heavier than Top-K logits.",
+             "-- one full hidden_dim vector per token per layer is much heavier than Top-K logits. "
+             "Written to a SEPARATE .npz file from the top-K logits (see module docstring).",
     )
     parser.add_argument("--max_length", type=int, default=4096)
+    parser.add_argument(
+        "--shard_size", type=int, default=1000,
+        help="flush a persistent shard to disk every N examples (async, non-blocking) -- also the "
+             "resume granularity if this run gets interrupted and relaunched with the same --out_file",
+    )
     parser.add_argument(
         "--num_gpus", type=int, default=None,
         help="limit to the first N visible GPUs for device_map=\"auto\" sharding "
@@ -167,12 +293,20 @@ def main():
              "use with a bf16 repo (vendor or Unsloth), not with the already-quantized "
              "FP8 checkpoint -- see qwen3.8-27b-notes.md",
     )
-    parser.add_argument("--out_file", required=True)
+    parser.add_argument("--out_file", required=True, help="top-K logits output (.npz); hidden states go to <out_file minus .npz>._hidden.npz")
     args = parser.parse_args()
 
     with open(args.input_file) as f:
         examples = [json.loads(line) for line in f]
     print(f"Loaded {len(examples)} examples from {args.input_file}", flush=True)
+
+    topk_dir = shard_dir(args.out_file, "topk")
+    hidden_dir = shard_dir(args.out_file, "hidden")
+    resume_at = find_resume_point(topk_dir)
+    if resume_at:
+        print(f"Resuming from example {resume_at}/{len(examples)} (found complete shards up to there)", flush=True)
+    if resume_at >= len(examples):
+        print("All examples already covered by existing shards, skipping straight to merge.", flush=True)
 
     if args.dtype == "auto":
         if args.quantization != "none":
@@ -180,35 +314,46 @@ def main():
         dtype = "auto"
     else:
         dtype = getattr(torch, args.dtype)
-    print("Detected GPU(s):", flush=True)
-    describe_gpus()
-    print(f"Loading Teacher {args.model_dir} in {args.dtype} ...", flush=True)
-    print("  (shard-loading progress is printed by transformers itself below)", flush=True)
-    t0 = time.time()
-    model, tokenizer = load_model_and_tokenizer(
-        args.model_dir, dtype, num_gpus=args.num_gpus, attn_implementation=args.attn_implementation,
-        quantization=args.quantization,
+
+    hidden_out_file = (args.out_file[:-4] if args.out_file.endswith(".npz") else args.out_file) + "._hidden.npz"
+
+    if resume_at < len(examples):
+        print("Detected GPU(s):", flush=True)
+        describe_gpus()
+        print(f"Loading Teacher {args.model_dir} in {args.dtype} ...", flush=True)
+        print("  (shard-loading progress is printed by transformers itself below)", flush=True)
+        t0 = time.time()
+        model, tokenizer = load_model_and_tokenizer(
+            args.model_dir, dtype, num_gpus=args.num_gpus, attn_implementation=args.attn_implementation,
+            quantization=args.quantization,
+        )
+        print(f"Loaded in {time.time() - t0:.1f}s", flush=True)
+
+        # VLM wrapper configs (e.g. Qwen3_5Config) nest the LM's own config under
+        # text_config -- num_hidden_layers lives there, not on the top-level config.
+        text_config = getattr(model.config, "text_config", model.config)
+        hidden_layer_indices = parse_hidden_layers(args.hidden_layers, text_config.num_hidden_layers)
+        if hidden_layer_indices:
+            print(f"Also extracting hidden states for layers: {hidden_layer_indices}", flush=True)
+
+        # One forward pass per example (no batching): simplest correct version
+        # first, per the project's staged-workflow habit -- batch later only if
+        # bench_teacher.py's throughput numbers show it's actually the bottleneck.
+        process_file(
+            model, tokenizer, examples, args.top_k, args.max_length, hidden_layer_indices,
+            topk_dir, hidden_dir, args.shard_size, resume_at,
+        )
+    else:
+        # nothing left to run, but still need num_layers to know which hidden
+        # shards to expect at merge time -- reparse without loading the model
+        hidden_layer_indices = parse_hidden_layers(args.hidden_layers, 0) if args.hidden_layers in ("none",) else None
+        if hidden_layer_indices is None:
+            raise RuntimeError("Cannot resume-skip model load while --hidden_layers != none without knowing num_layers; delete shard dirs to force a clean rerun, or keep the model load path.")
+
+    indices, values, residual, offsets, hidden_arrays = merge_shards(
+        topk_dir, hidden_dir, args.out_file, hidden_out_file, args.top_k,
+        hidden_layer_indices if resume_at < len(examples) else [],
     )
-    print(f"Loaded in {time.time() - t0:.1f}s", flush=True)
-
-    # VLM wrapper configs (e.g. Qwen3_5Config) nest the LM's own config under
-    # text_config -- num_hidden_layers lives there, not on the top-level config.
-    text_config = getattr(model.config, "text_config", model.config)
-    hidden_layer_indices = parse_hidden_layers(args.hidden_layers, text_config.num_hidden_layers)
-    if hidden_layer_indices:
-        print(f"Also extracting hidden states for layers: {hidden_layer_indices}", flush=True)
-
-    # One forward pass per example (no batching): simplest correct version
-    # first, per the project's staged-workflow habit -- batch later only if
-    # bench_teacher.py's throughput numbers show it's actually the bottleneck.
-    indices, values, residual, offsets, hidden_arrays = process_file(
-        model, tokenizer, examples, args.top_k, args.max_length, hidden_layer_indices
-    )
-
-    save_kwargs = {"indices": indices, "values": values, "residual": residual, "offsets": offsets, "k": args.top_k}
-    for layer, arr in hidden_arrays.items():
-        save_kwargs[f"hidden_{layer}"] = arr
-    np.savez_compressed(args.out_file, **save_kwargs)
 
     total_tokens = offsets[-1]
     measured_bytes_per_token = (indices.nbytes + values.nbytes + residual.nbytes) / total_tokens if total_tokens else float("nan")
@@ -219,7 +364,7 @@ def main():
         flush=True,
     )
     for layer, arr in hidden_arrays.items():
-        print(f"Hidden layer {layer}: shape={arr.shape} ({arr.nbytes / total_tokens:.1f} bytes/token)", flush=True)
+        print(f"Hidden layer {layer}: shape={arr.shape} ({arr.nbytes / total_tokens:.1f} bytes/token) -> {hidden_out_file}", flush=True)
 
 
 if __name__ == "__main__":
