@@ -35,9 +35,16 @@ from learn.indexed_attention.generate_qualitative_compare import _sample_next
 
 @torch.no_grad()
 def generate_stream(model, kb_tokens, kb_source_ids, kb_leaf_mask, query_tokens, device,
-                     n_step: int, max_len: int, stream_name: str, pad_id: int, eos_id,
+                     n_step: int, max_len: int, stream_name: str, other_len: int, pad_id: int, eos_id,
                      tokenizer, temperature: float, top_p: float, seed: int) -> list[str]:
+    """Thinker.forward() requires a target_input entry for EVERY sequence_mode stream
+    (core/indexed_thinker_model.py's stream_query_input), even though thinking/answer
+    are otherwise decoded independently (both only cross-attend to the same sm_k/sm_v,
+    no self-attention between positions or across streams) -- a pad-filled placeholder
+    for the stream we're not currently decoding has no effect on the one we care about."""
     B = kb_tokens.shape[0]
+    other_name = "answer" if stream_name == "thinking" else "thinking"
+    other_placeholder = torch.full((B, other_len), pad_id, dtype=torch.long, device=device)
     target_input = torch.full((B, max_len), pad_id, dtype=torch.long, device=device)
     generated = torch.full((B, max_len), pad_id, dtype=torch.long, device=device)
     done = torch.zeros(B, dtype=torch.bool, device=device)
@@ -46,7 +53,7 @@ def generate_stream(model, kb_tokens, kb_source_ids, kb_leaf_mask, query_tokens,
     for t in range(max_len):
         _, stream_outputs = model(kb_tokens=kb_tokens, kb_source_ids=kb_source_ids,
                                    query_tokens=query_tokens, n_step=n_step, kb_leaf_mask=kb_leaf_mask,
-                                   target_input={stream_name: target_input})
+                                   target_input={stream_name: target_input, other_name: other_placeholder})
         logits_t = stream_outputs[stream_name][:, t, :]
         next_token = _sample_next(logits_t, temperature, top_p)
         next_token = torch.where(done, torch.full_like(next_token, pad_id), next_token)
@@ -82,7 +89,12 @@ def main() -> None:
                      help="Thinker's own constructor block_size -- NOT the same as --n_ctx (dataset "
                           "prompt length); train_prompt_response.py always passes --block_size here "
                           "regardless of dataset_type, default 16, must match the checkpoint's training run")
-    ap.add_argument("--max_thinking_len", type=int, default=1024)
+    ap.add_argument("--max_thinking_len", type=int, default=1024,
+                     help="the checkpoint's own training max_thinking_len (for model construction)")
+    ap.add_argument("--gen_thinking_len", type=int, default=200,
+                     help="cap on how many 'thinking' tokens to actually GENERATE (each token is a "
+                          "full forward pass, no KV cache -- 1024 sequential steps would be slow for "
+                          "a qualitative check; 200 is enough to see whether the stream collapses)")
     ap.add_argument("--max_answer_len", type=int, default=64)
     ap.add_argument("--n_register", type=int, default=8)
     ap.add_argument("--thinking_n_layers", type=int, default=1)
@@ -124,11 +136,11 @@ def main() -> None:
     query_tokens = kb_tokens  # reasoning: whole prompt seeds the register (query_tokens_for in train_prompt_response.py)
 
     thinking_answers = generate_stream(model, kb_tokens, kb_source_ids, kb_leaf_mask, query_tokens, device,
-                                        args.n_step, args.max_thinking_len, "thinking", ds.pad_id,
-                                        tok.eos_token_id, tok, args.temperature, args.top_p, args.seed)
+                                        args.n_step, args.gen_thinking_len, "thinking", args.max_answer_len,
+                                        ds.pad_id, tok.eos_token_id, tok, args.temperature, args.top_p, args.seed)
     answer_answers = generate_stream(model, kb_tokens, kb_source_ids, kb_leaf_mask, query_tokens, device,
-                                      args.n_step, args.max_answer_len, "answer", ds.pad_id,
-                                      tok.eos_token_id, tok, args.temperature, args.top_p, args.seed)
+                                      args.n_step, args.max_answer_len, "answer", args.max_thinking_len,
+                                      ds.pad_id, tok.eos_token_id, tok, args.temperature, args.top_p, args.seed)
 
     lines = [
         f"# Qualitative eval (reasoning) -- {args.checkpoint}",
