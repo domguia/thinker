@@ -38,6 +38,7 @@ the alignment scheme and its CE-only fallback for unaligned spans.
 from __future__ import annotations
 
 import argparse
+import math
 import time
 
 import numpy as np
@@ -61,6 +62,7 @@ def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets
                                        max_thinking_len=args.max_thinking_len,
                                        max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id,
                                        teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length,
+                                       teacher_name=args.teacher_name,
                                        **repr_kwargs)
     if dataset_type == "retrieval":
         # block_size/n_docs_max, NOT n_ctx/t_local (2026-09-20 redesign, user
@@ -73,6 +75,7 @@ def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets
         return RetrievalPromptDataset(path, tokenizer, block_size=args.block_size, n_docs_max=args.n_docs_max,
                                        max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id,
                                        teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length,
+                                       teacher_name=args.teacher_name,
                                        **repr_kwargs)
     raise ValueError(f"unknown --dataset_type {dataset_type!r} (expected 'reasoning' or 'retrieval' -- "
                       f"'general' stays on train_real_text.py's sliding-window pipeline, not this script)")
@@ -273,6 +276,13 @@ def main() -> None:
     p.add_argument("--n_step", type=int, default=6)
     p.add_argument("--pool_n_head", type=int, default=1)
     p.add_argument("--k_dim", type=int, default=None)
+    p.add_argument("--level_dropout_p", type=float, default=0.0,
+                    help="HierarchicalMemory's stochastic level dropout (train-time only, core/"
+                         "indexed_memory.py's attend()) -- randomly drops whole compressed hierarchy "
+                         "levels (never level 0/leaves), probability scaled by depth. Already implemented "
+                         "but never wired to a CLI flag before; the one architecture-native regularizer "
+                         "available for this model (no dropout anywhere else in it). Default 0.0 keeps "
+                         "every existing run's behavior unchanged.")
     p.add_argument("--disable_kb", action="store_true")
     p.add_argument("--ingest_kb", action="store_true",
                     help="spec §8ter, retrieval only: build the KB by running each document through "
@@ -317,6 +327,11 @@ def main() -> None:
                          "scheme and its per-example CE-only fallback. Requires --kd_alpha > 0 to have any effect.")
     p.add_argument("--val_teacher_targets", default=None,
                     help="same as --teacher_targets, computed on --val_data instead, for held-out KD reporting.")
+    p.add_argument("--teacher_name", default=None,
+                    help="which Teacher's data to read (e.g. qwen_big, lfm2_1_2b) -- only needed when "
+                         "--teacher_targets/--repr_teacher_hidden point at a new-format storage-tree directory "
+                         "(topk/<split>/ or embedding/<split>/layer_<L>/, has a manifest.json); ignored for an "
+                         "old single-.npz/.npz-memmap-dir path, see data/prompt_response_dataset.py.")
     p.add_argument("--teacher_max_length", type=int, default=4096,
                     help="MUST match the --max_length used for the precompute_teacher_targets.py run "
                          "(alignment re-tokenizes 'text' with the same truncation to land on the same rows).")
@@ -361,6 +376,32 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--lr_warmup_steps", type=int, default=0)
     p.add_argument("--lr_warmup_init", type=float, default=None)
+    p.add_argument("--lr_decay_to", type=float, default=None,
+                    help="if set, enables a Warmup-Stable-Decay schedule (arxiv 2410.05192): lr stays "
+                         "flat at --lr from the end of warmup through --lr_stable_frac of --max_steps, "
+                         "then cosine-decays down to this floor over the remaining steps. Unset (default) "
+                         "keeps lr flat after warmup for the whole run, unchanged from before this flag existed. "
+                         "Prefer this over smearing the decay across the full horizon when the val optimum "
+                         "appears early (observed here: step ~750/6000) -- WSD only pays the decay cost near "
+                         "the end, not throughout training.")
+    p.add_argument("--lr_stable_frac", type=float, default=0.7,
+                    help="fraction of --max_steps (after warmup) to hold lr flat at --lr before WSD's decay "
+                         "phase begins -- only used when --lr_decay_to is set")
+    p.add_argument("--lr_decay_steps", type=int, default=None,
+                    help="fixed length (in steps) of the WSD decay phase, starting right after the stable "
+                         "phase -- if unset (default), decay spans everything from the end of the stable "
+                         "phase to --max_steps (can be very slow if the optimum is much earlier than "
+                         "max_steps, e.g. an early-stopping run cut short before a slow decay has any real "
+                         "effect). Set this explicitly to a short window (e.g. a few hundred/thousand steps) "
+                         "when combining WSD with --patience, so the anneal actually completes before "
+                         "patience would otherwise stop training. lr stays at --lr_decay_to for any step "
+                         "past the end of this window.")
+    p.add_argument("--patience", type=int, default=None,
+                    help="early-stopping patience in number of --val_every evals without a new best "
+                         "val_answer -- if set, training stops as soon as patience is exhausted instead of "
+                         "always running to --max_steps. Complements the LR schedule rather than replacing "
+                         "it (a schedule alone does not reliably stop the overfitting-after-the-optimum "
+                         "pattern seen on this task).")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--bf16", action="store_true",
                     help="run the forward pass (model + loss) under torch.autocast(dtype=bfloat16) -- ~1.68x "
@@ -447,6 +488,7 @@ def main() -> None:
         vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
         disable_kb=args.disable_kb, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
+        level_dropout_p=args.level_dropout_p,
         use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims=stream_dims, stream_sequence=stream_sequence, max_target_len=max_target_len,
         stream_n_layers=stream_n_layers, use_ingest_token=args.ingest_kb,
@@ -492,9 +534,18 @@ def main() -> None:
     lr_warmup_init = args.lr_warmup_init if args.lr_warmup_init is not None else args.lr / 10
 
     def lr_at(step: int) -> float:
-        if args.lr_warmup_steps <= 0 or step >= args.lr_warmup_steps:
+        if args.lr_warmup_steps > 0 and step < args.lr_warmup_steps:
+            return lr_warmup_init + (args.lr - lr_warmup_init) * (step / args.lr_warmup_steps)
+        if args.lr_decay_to is None:
             return args.lr
-        return lr_warmup_init + (args.lr - lr_warmup_init) * (step / args.lr_warmup_steps)
+        post_warmup_span = max(args.max_steps - args.lr_warmup_steps, 1)
+        stable_steps = args.lr_warmup_steps + int(post_warmup_span * args.lr_stable_frac)
+        if step < stable_steps:
+            return args.lr
+        decay_span = args.lr_decay_steps if args.lr_decay_steps is not None else max(args.max_steps - stable_steps, 1)
+        progress = min(max(step - stable_steps, 0) / decay_span, 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return args.lr_decay_to + (args.lr - args.lr_decay_to) * cosine
 
     opt_params = list(model.parameters())
     if repr_proj is not None:
@@ -505,6 +556,7 @@ def main() -> None:
 
     step, loss_hist = 0, []
     best_val_answer = None
+    evals_since_best = 0
     start_time = time.time()
     done = False
     while not done:
@@ -512,6 +564,11 @@ def main() -> None:
             elapsed = time.time() - start_time
             if elapsed > args.max_time_minutes * 60 or step >= args.max_steps:
                 print(f"Budget reached at step {step}. Stopping.", flush=True)
+                done = True
+                break
+            if args.patience is not None and evals_since_best >= args.patience:
+                print(f"Early stopping at step {step}: no new best val_answer in "
+                      f"{args.patience} evals.", flush=True)
                 done = True
                 break
 
@@ -651,13 +708,16 @@ def main() -> None:
                                        ingest_n_step_max=args.ingest_n_step_max)
                 print(f"step={step:6d} VAL {val_losses}", flush=True)
                 logger.progress(step, **{f"val_{k}": v for k, v in val_losses.items()})
-                if args.save_best_checkpoint_path is not None:
-                    cur_val = val_losses["answer"]
-                    if best_val_answer is None or cur_val < best_val_answer:
-                        best_val_answer = cur_val
+                cur_val = val_losses["answer"]
+                if best_val_answer is None or cur_val < best_val_answer:
+                    best_val_answer = cur_val
+                    evals_since_best = 0
+                    if args.save_best_checkpoint_path is not None:
                         torch.save(raw_model.state_dict(), args.save_best_checkpoint_path)
                         print(f"  new best val_answer={cur_val:.4f} -> checkpoint saved to "
                               f"{args.save_best_checkpoint_path}", flush=True)
+                else:
+                    evals_since_best += 1
 
     elapsed = time.time() - start_time
     print("---", flush=True)
