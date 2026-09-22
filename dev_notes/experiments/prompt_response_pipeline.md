@@ -428,3 +428,68 @@ Comptage `source` transmis à `model-design` avant de démarrer (demande annexe,
 Leçons ajoutées au skill `grid5000` (utilisation VRAM réelle du precompute combiné, chemin FP8 natif vs déquantifié, ne pas migrer de nœud si déjà compute-bound à 99%).
 
 **Skill `grid5000` mis à jour** avec les leçons de cette session : filtre `gpu_compute_capability` plutôt que `cluster=` nommé pour éviter les délais de plusieurs heures d'une réservation pointue sur un cluster précis ; mesurer le débit réel (ex/s) des 2-3 premières minutes avant de committer une tâche bloquante à un nœud, Nancy/`graffiti` (RTX 2080 Ti) en dernier recours seulement (~15x plus lent que Rennes sur le même travail) ; transfert direct frontend-à-frontend, jamais de relais par la machine locale ; `PYTHONPATH=.` et chemin complet vers `micromamba` nécessaires en lancement non-interactif via `oarsh`/`ssh` ; timeout du `setsid nohup ... & disown -a` sur la commande de lancement elle-même est normal, pas une erreur.
+
+## 2026-09-21 (fin de nuit) — Repr-KD sur dataset combiné retrieval1 AB (9500 ex., propre) : pas d'amélioration vs top-K seul
+
+**Contexte** : dataset retrieval1 finalisé après incident hydra (500 exemples corrompus exclus, cf. `dev_notes/grid5000_usage.log.md` 2026-09-21 suite 5/6) -- combiné final `train_repr10k_ab.{jsonl,npz}` + `._hidden` : 9500 exemples (4498 de `ec_a` + 5002 de `ec_b`), 13673917 tokens, K=32 (A tronqué de 64->32 pour matcher B, top-K trié décroissant donc sans perte). Vérifié offset-par-offset cohérent npz/hidden après un bug off-by-one dans `filter_examples.py` (corrigé, offsets hidden dupliquaient une frontière -- même classe de bug que celui déjà corrigé côté npz).
+
+**Run** : `train_prompt_response.py --dataset_type retrieval`, config identique à `retrieval1-ref` pour comparaison équitable (`d_model=256 n_head=4 n_step=4 use_ff batch_size=128 bf16 compile lr=3e-4 seed=0 --max_steps 6000 --val_every 750`, même `val.jsonl`/`val_topk32.npz` partagé), plus repr-KD (`--repr_teacher_hidden train_repr10k_ab._hidden --repr_teacher_layer 64 --repr_kd_weight 0.1 --repr_kd_warmup_steps 100`) et `--num_workers 4` (optimisation pure, cf. journal grid5000 -- sans effet sur les résultats, seulement la vitesse : 26.48min pour les 6000 steps, ~1.9 steps/s stable).
+
+**Résultat (première comparaison, imparfaite)** : comparé initialement à `retrieval1-ref` (val_answer=8.3761 @ step 750) -- mais ce dernier a été entraîné sur un **dataset différent** (`train_repr10k.jsonl`, precompute séparé avec `hidden_layers=16`, affecté par le bug d'alignement doc_id documenté plus haut), pas littéralement le même échantillon que le nouveau AB (9500 ex. propres). Comparaison biaisée, corrigée ci-dessous.
+
+**Comparaison appariée refaite** (top-K seul relancé sur le MÊME `train_repr10k_ab.{jsonl,npz,._hidden}`, même config exacte hormis `--repr_teacher_hidden`/`--repr_kd_weight` absents, `checkpoints/retrieval1_ab_topkonly_best.pt`) :
+
+| | step 750 (best) | step 6000 (final) |
+|---|---|---|
+| Top-K seul (AB 9500 ex., même run que repr-KD) | val_answer=8.5210 | val_answer=11.430 |
+| repr-KD (weight=0.1, dernière couche, AB 9500 ex.) | val_answer=8.4063 | val_answer=11.418 |
+
+**Conclusion (comparaison appariée, fiable)** : le repr-KD est **légèrement meilleur aux deux points de mesure** (-0.115 à step 750, -0.012 au final) -- petit mais cohérent dans le même sens aux deux checkpoints, signal positif quoique modeste à cette échelle (9500 ex.). Les deux runs surapprennent sévèrement après step 750 (pattern récurrent du projet, cf. flagship/noctx). Checkpoints : `checkpoints/retrieval1_reprkd_ab_best.pt` et `checkpoints/retrieval1_ab_topkonly_best.pt` (tous deux step 750).
+
+**Prochaines expériences identifiées (pas encore lancées)** :
+1. Retester le levier 2 (`embed_teacher_target`/`embed_kd_weight`) à poids=0.1 -- dégradait la convergence à poids=0.01 (petite échelle synthétique), jamais retesté à poids plus fort comme prévu.
+2. Sweep de `repr_kd_weight` sur le dataset AB complet (seul weight=0.1 testé ici) -- vu le gain modeste mais réel, un autre poids pourrait donner un signal plus net.
+3. Tester une couche hidden différente de la dernière pour le repr-KD (choix pas encore exploré systématiquement à cette échelle).
+
+## 2026-09-22 — Sweep `repr_kd_weight` (0.05/0.2/0.3) terminé, baselines LLM de référence, LR/WSD + early-stopping, découverte d'un biais de comparaison `val_batches`
+
+**Sweep `repr_kd_weight` élargi (job 4126114, H100 `abacus27-1`, `sweep_repr_kd_weight.sh`)** : mêmes 9500 ex. AB, même config que ci-dessus, poids 0.05/0.2/0.3 (au lieu du seul 0.1 précédent). Résultat (`val_answer` final à step 6000, `--val_batches` par défaut = 2560 ex., voir biais de comparaison plus bas) :
+
+| repr_kd_weight | val_answer final (step 6000) |
+|---|---|
+| 0.05 | 11.2205 (meilleur) |
+| 0.2 | 11.2609 |
+| 0.3 | 11.4902 |
+
+Tendance monotone : plus le poids repr-KD est fort, plus le surapprentissage tardif est sévère -- cohérent avec un signal repr-KD utile tôt (régularisation) mais qui, à poids trop élevé, contraint le student plus que nécessaire une fois le point optimal dépassé.
+
+**Baselines LLM de référence (inférence seule, pas de fine-tuning)** sur `data/distill/hotpotqa_full/val.jsonl` (nouveau script `learn/indexed_attention/eval_llm_baseline_retrieval.py`, mirror exact de la métrique `val_answer` de `train_prompt_response.py` -- CE teacher-forcée sur la réponse, contexte tronqué identique `block_size=16 n_docs_max=10`) :
+
+| Modèle | answer_ce (val complet, 9000 ex.) |
+|---|---|
+| LFM2-350M | 13.7143 |
+| LFM2-700M | (lancé, résultat à rapporter) |
+| LFM2-1.2B | 12.5059 |
+| LFM2-2.6B | (lancé, résultat à rapporter) |
+| OLMo-2-1B | 11.3164 |
+| OLMo-2-7B | 11.0141 |
+| OLMo-2-13B | (téléchargé, pas encore évalué) |
+| OLMo-2-32B | (téléchargé, pas encore évalué) |
+| Qwen3.5-0.8B | 10.7846 |
+| Qwen3.8-27B (bf16) | (lancé, résultat à rapporter) |
+
+**⚠️ Biais de comparaison découvert (pas encore corrigé)** : `train_prompt_response.py --val_batches` (défaut 20) limite l'évaluation `val_answer` pendant l'entraînement aux 2560 premiers exemples de `val.jsonl` (20×batch_size=128, `shuffle=False`) -- confirmé par `answer_hops_ge2_n=2560` sur toutes les lignes VAL de ce fichier. Les baselines LLM ci-dessus tournent sur les **9000 exemples complets** (pas de limite dans `eval_llm_baseline_retrieval.py`). Les deux séries de chiffres ne sont donc **pas directement comparables** telles quelles. Correction nécessaire avant toute conclusion Thinker-vs-LLM définitive : évaluer le meilleur checkpoint Thinker sur les 9000 exemples complets (pas de script existant pour ça -- `eval_checkpoint.py` est pour le dataset `real_text`/`depth`, pas `retrieval`) plutôt que de tronquer les baselines LLM au sous-ensemble de 2560, pour avoir le chiffre le plus rigoureux des deux côtés.
+
+**LR schedule : cosine plein-horizon insuffisant, WSD (Warmup-Stable-Decay) + early-stopping efficaces.** Diagnostic : à `lr` fixe (1e-4 à 3e-4), `val_answer` touche son minimum vers step 500-750/6000 (~12% du budget) puis explose x1.5-2x d'ici step 4000-6000, quel que soit le LR testé (`lr=1e-4` seul : min=7.8620@750, mais **final=15.1257@6000**, pire que `lr=3e-4`'s 11.49). Un cosine decay étalé sur tout `max_steps` (implémenté d'abord, `--lr_decay_to`) est resté trop lent pour avoir un effet avant que la patience n'arrête l'entraînement (LR encore à 9.7e-05 à step 1500 avec `lr_stable_frac=0.15`/decay jusqu'à `max_steps=6000`).
+
+**Fix retenu** : `--lr_decay_steps` (nouveau flag, décorrèle la durée de la décroissance de `max_steps`) pour une vraie fenêtre WSD courte calée sur l'optimum observé (`--lr_stable_frac 0.125` = stable jusqu'à step 750, `--lr_decay_steps 750` = decay complète à step 1500, `--lr_decay_to 1e-5`) + `--patience 6` (early-stopping après 6 évals sans nouveau meilleur `val_answer`, `--val_every 250`). Résultat : `val_answer` **plateau à 7.93-8.06 sur steps 1000-2250** au lieu d'exploser vers 13-15, arrêt anticipé propre à step 2250/6000 (62.5% de compute économisé), meilleur toujours à step 750 (7.8617, cohérent avec les runs précédents). Confirme que le LR schedule seul (peu importe la valeur fixe) n'aurait jamais réglé le problème -- il fallait décrocher tôt ET savoir s'arrêter.
+
+**`level_dropout_p` (HierarchicalMemory, déjà implémenté mais jamais câblé en CLI) exposé via `--level_dropout_p`** (défaut 0.0, aucun changement de comportement par défaut). Décision explicite de ne PAS activer de dropout générique (attention/FFN) pour cette architecture : les poids sont réutilisés à travers les `n_step` itérations de la boucle récurrente -- un dropout par-unité avec masque ré-échantillonné à chaque étape accumulerait du bruit à travers la récurrence au lieu de simplement casser la co-adaptation (même piège que le dropout naïf sur RNN, cf. Gal & Ghahramani 2016) -- et le modèle est de toute façon trop petit pour bénéficier du mécanisme classique (peu de redondance à casser). `level_dropout_p` (drop de niveaux entiers de hiérarchie, grain grossier façon "stochastic depth") reste une piste plus défendable si besoin, non activée pour l'instant.
+
+**Recherche externe menée (2 fork de recherche web)** : (1) LR schedule pour KD/petites données -- pas de recette spécifique à la KD dans la littérature (DistilBERT/TinyBERT/MiniLM utilisent le warmup+decay standard), WSD (arxiv 2410.05192) mieux adapté qu'un cosine plein-horizon quand l'optimum apparaît tôt. (2) Bonnes pratiques KD générales -- priorité dropout > température de distillation (T≈3-4, manquante actuellement, nécessite compensation ×T² sur la perte KD) > sweep alpha (0.5 est raisonnable, pas prioritaire) > top-K (K=32 sur vocab 248k est cohérent avec la littérature, pas le levier à activer). Alpha et K jugés non-responsables du pattern de surapprentissage observé.
+
+**Prochaines étapes (en cours/à faire)** :
+1. Corriger le biais `val_batches` (évaluer Thinker sur les 9000 ex. complets pour une comparaison honnête avec les baselines LLM).
+2. Basculer `--teacher_targets`/`--repr_teacher_hidden` vers le nouveau format storage-tree de data-prep (`data/distill/hotpotqa/topk/<split>/`, `embedding/<split>/layer_64/`, `--teacher_name qwen_big`) une fois les runs en cours stabilisés, puis supprimer les chemins legacy.
+3. Refaire le sweep `repr_kd_weight` avec WSD+patience (le classement 0.05/0.2/0.3 ci-dessus a été établi à `lr=3e-4` fixe, potentiellement obsolète).
+4. Run flagship sur les 81k exemples complets (au lieu du sous-échantillon 9500) avec WSD+patience+meilleur `repr_kd_weight`.
