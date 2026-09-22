@@ -536,7 +536,14 @@ Le chiffre full-val (7.8643) est quasi identique au chiffre sous-échantillonné
 **Plan d'expériences élargi (validé avec l'utilisateur), ordonné par valeur d'information / coût** :
 1. **CE-only vs KD, contrôle sur retrieval** (même recette WSD) -- en cours (job 4126972). Gate la décision d'investir ou non dans le précompute KD pour les phases suivantes.
 2. **Sweep taille de KB sur retrieval** (`n_docs_max` ∈ {5,10,20}, KD) -- en cours (job 4126973), axe architecture indépendant de 1.
-3. Math (`openr1_math`, 18k/2k, famille LFM2, Teacher déjà précalculé) CE vs KD, puis conditionnellement `openr1_math_full` (35k/3.9k, "5%", plus coûteux -- l'utilisateur a explicitement anticipé qu'il pourrait s'avérer trop gros pour une première expérience). **KD arm terminé** : budget complet 6000/6000 pas (pas d'early-stopping), best val_answer=4.4199. CE-only en cours.
+3. Math (`openr1_math`, 18k/2k, famille LFM2, Teacher déjà précalculé) CE vs KD, puis conditionnellement `openr1_math_full` (35k/3.9k, "5%", plus coûteux). **Les deux bras terminés (budget complet 6000/6000 pas, pas d'early-stopping) :**
+
+| Variante | val_answer (math, 2000 ex.) |
+|---|---|
+| **CE-only** | **3.4949** |
+| KD top-K (`kd_alpha=0.5`) | 4.4199 |
+
+**CE-only bat KD de 0.93 sur math -- écart encore plus marqué que sur retrieval (0.23).** Cohérent avec le caveat déjà noté : le stream `answer` de math a un fallback CE partiel connu (span pas toujours verbatim), donc le signal KD y était déjà dégradé avant même de considérer la contamination `<think>` (qui, elle, ne touche pas math -- vérifié). Renforce la conclusion générale : ne pas assumer KD bénéfique par défaut pour ce pipeline, à cette échelle.
 4bis. **Sweep taille de KB** : `n_docs_max=5` -> 7.8406, `n_docs_max=10` (ré-entraîné avec cette recette, batch_size=32) -> 7.8552, `n_docs_max=20` en cours. Tendance légère mais pas encore concluante (peu de docs semble marginalement aider) -- attendre `n_docs_max=20` avant conclusion.
 4. Wiki+TinyStory (`wikitext_sample5k`+`tinystories_sample5k` ou `general_sample10k_staging` fusionné, 9k ex., précompute top-K à faire -- `general_realtext`, plus petit, 2.7k ex., a déjà son top-K et sert de premier passage rapide) CE vs KD.
 5. Dataset combiné (retrieval + math + wiki/tinystory mélangés), KD, une fois chaque domaine caractérisé isolément.
