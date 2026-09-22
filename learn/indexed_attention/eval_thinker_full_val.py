@@ -47,6 +47,7 @@ def main() -> None:
     ap.add_argument("--tokenizer", default="qwen35")
     ap.add_argument("--block_size", type=int, default=16)
     ap.add_argument("--n_docs_max", type=int, default=10)
+    ap.add_argument("--n_ctx", type=int, default=256, help="reasoning only: prompt length (flat, depth=0)")
     ap.add_argument("--max_answer_len", type=int, default=64)
     ap.add_argument("--max_thinking_len", type=int, default=1024)
     ap.add_argument("--n_register", type=int, default=8)

@@ -538,12 +538,12 @@ Le chiffre full-val (7.8643) est quasi identique au chiffre sous-échantillonné
 2. **Sweep taille de KB sur retrieval** (`n_docs_max` ∈ {5,10,20}, KD) -- en cours (job 4126973), axe architecture indépendant de 1.
 3. Math (`openr1_math`, 18k/2k, famille LFM2, Teacher déjà précalculé) CE vs KD, puis conditionnellement `openr1_math_full` (35k/3.9k, "5%", plus coûteux). **Les deux bras terminés (budget complet 6000/6000 pas, pas d'early-stopping) :**
 
-| Variante | val_answer (math, 2000 ex.) |
-|---|---|
-| **CE-only** | **3.4949** |
-| KD top-K (`kd_alpha=0.5`) | 4.4199 |
+| Variante | val_answer training-time (160/2000 ex., sous-échantillon) | answer_ce full-val (2000/2000 ex.) |
+|---|---|---|
+| **CE-only** | 3.4949 | **3.3045** |
+| KD top-K (`kd_alpha=0.5`) | 4.4199 | **4.1117** |
 
-**CE-only bat KD de 0.93 sur math -- écart encore plus marqué que sur retrieval (0.23).** Cohérent avec le caveat déjà noté : le stream `answer` de math a un fallback CE partiel connu (span pas toujours verbatim), donc le signal KD y était déjà dégradé avant même de considérer la contamination `<think>` (qui, elle, ne touche pas math -- vérifié). Renforce la conclusion générale : ne pas assumer KD bénéfique par défaut pour ce pipeline, à cette échelle.
+**Vérification de rigueur demandée par analyst-agent (parité budget/LR confirmée -- seule différence entre les deux commandes : `--teacher_targets`/`--val_teacher_targets`/`--kd_alpha`, seed=0 identique, 6000/6000 pas complets des deux côtés, pas d'early-stopping) + re-mesure sur le VAL COMPLET (le chiffre initial n'était que le sous-échantillon training-time à 160/2000 ex., `--val_batches` par défaut) : le résultat tient, écart légèrement réduit mais toujours net (0.81 sur val complet vs 0.93 sur le sous-échantillon).** `eval_thinker_full_val.py` avait un bug bloquant sur `--dataset_type reasoning` (attribut `--n_ctx` manquant), corrigé au passage. **CE-only bat KD de 0.81 sur math, écart encore plus marqué que sur retrieval (0.23 sur val complet).** Cohérent avec le caveat déjà noté : le stream `answer` de math a un fallback CE partiel connu (span pas toujours verbatim), donc le signal KD y était déjà dégradé avant même de considérer la contamination `<think>` (qui, elle, ne touche pas math -- vérifié sur 100/100). Renforce la conclusion générale : ne pas assumer KD bénéfique par défaut pour ce pipeline, à cette échelle.
 4bis. **Sweep taille de KB terminé** (retrieval, WSD+patience, budget commun) :
 
 | `n_docs_max` | answer_ce (val complet) |
