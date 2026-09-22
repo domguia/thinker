@@ -488,8 +488,31 @@ Tendance monotone : plus le poids repr-KD est fort, plus le surapprentissage tar
 
 **Recherche externe menée (2 fork de recherche web)** : (1) LR schedule pour KD/petites données -- pas de recette spécifique à la KD dans la littérature (DistilBERT/TinyBERT/MiniLM utilisent le warmup+decay standard), WSD (arxiv 2410.05192) mieux adapté qu'un cosine plein-horizon quand l'optimum apparaît tôt. (2) Bonnes pratiques KD générales -- priorité dropout > température de distillation (T≈3-4, manquante actuellement, nécessite compensation ×T² sur la perte KD) > sweep alpha (0.5 est raisonnable, pas prioritaire) > top-K (K=32 sur vocab 248k est cohérent avec la littérature, pas le levier à activer). Alpha et K jugés non-responsables du pattern de surapprentissage observé.
 
+**Correction du biais `val_batches` : Thinker bat TOUS les LLM de référence sur le val complet.** Nouveau script `learn/indexed_attention/eval_thinker_full_val.py` (réutilise `evaluate()`/`build_dataset()`/`Thinker` de `train_prompt_response.py` par import, aucune duplication de la définition de métrique) -- charge un checkpoint sauvegardé et évalue sur l'intégralité de `--val_data` (`n_batches=len(val_loader)`, pas de cap). **Attention batch_size** : le vocab `qwen35` (248k) fait exploser la mémoire des logits `cross_entropy` -- `batch_size=128` (valeur d'entraînement) OOM sur une A5000 24GB, `batch_size=32` fonctionne.
+
+Résultat (`checkpoints/retrieval1_reprkd_wsd2_best.pt`, meilleur checkpoint WSD+patience, sur les 9000 exemples complets de `val.jsonl`) :
+
+| Modèle | answer_ce (val complet, 9000 ex.) |
+|---|---|
+| **Thinker (128.80M params, WSD2)** | **7.8643** |
+| Qwen3.5-0.8B | 10.7846 |
+| OLMo-2-7B | 11.0141 |
+| Qwen3.8-27B (bf16) | 11.1337 |
+| OLMo-2-1B | 11.3164 |
+| OLMo-2-13B | 11.4018 |
+| LFM2-1.2B | 12.5059 |
+| LFM2-700M | 12.8995 |
+| LFM2-2.6B | 13.0644 |
+| LFM2-350M | 13.7143 |
+
+Le chiffre full-val (7.8643) est quasi identique au chiffre sous-échantillonné (7.8617 sur 2560 ex.) -- le biais n'a donc pas faussé les CONCLUSIONS relatives obtenues jusqu'ici, mais rend la comparaison Thinker-vs-LLM désormais rigoureuse. **Thinker (200x plus petit que le Teacher, from scratch sur 9500 exemples) surpasse largement tous les LLM pré-entraînés testés, y compris Qwen3.8-27B.** OLMo-2-32B téléchargé mais pas encore évalué (nécessite >46GB VRAM, pas testé faute de GPU assez gros au moment de l'écriture).
+
+**`--val_batches` change de défaut (None = val complet)** dans `train_prompt_response.py` -- l'ancien défaut (20 batches) faisait que TOUT `val_answer` rapporté par ce script pendant l'entraînement portait silencieusement sur un sous-ensemble fixe (2560/9000 ex. ici), jamais comparable tel quel à un chiffre externe sans le savoir. Val complète par défaut désormais ; `--val_batches N` reste disponible pour accélérer un sweep rapide au prix de cette limitation, en connaissance de cause.
+
 **Prochaines étapes (en cours/à faire)** :
-1. Corriger le biais `val_batches` (évaluer Thinker sur les 9000 ex. complets pour une comparaison honnête avec les baselines LLM).
-2. Basculer `--teacher_targets`/`--repr_teacher_hidden` vers le nouveau format storage-tree de data-prep (`data/distill/hotpotqa/topk/<split>/`, `embedding/<split>/layer_64/`, `--teacher_name qwen_big`) une fois les runs en cours stabilisés, puis supprimer les chemins legacy.
-3. Refaire le sweep `repr_kd_weight` avec WSD+patience (le classement 0.05/0.2/0.3 ci-dessus a été établi à `lr=3e-4` fixe, potentiellement obsolète).
-4. Run flagship sur les 81k exemples complets (au lieu du sous-échantillon 9500) avec WSD+patience+meilleur `repr_kd_weight`.
+1. Évaluer OLMo-2-32B (GPU >46GB nécessaire) pour compléter la cartographie.
+2. Tester l'extrapolation `n_step` (`--extrapolate_n_steps`, déjà implémenté dans `train_prompt_response.py`) sur le checkpoint WSD2 -- pertinent car l'architecture réutilise les mêmes poids à travers les itérations récurrentes ; voir si le modèle généralise à un nombre d'itérations différent de celui de l'entraînement (`n_step=4`).
+3. Comparaison KD avec embedding (`--embed_teacher_target`/`--embed_kd_weight`) vs sans, sur val complet.
+4. Basculer `--teacher_targets`/`--repr_teacher_hidden` vers le nouveau format storage-tree de data-prep (`data/distill/hotpotqa/topk/<split>/`, `embedding/<split>/layer_64/`, `--teacher_name qwen_big`) une fois les runs en cours stabilisés, puis supprimer les chemins legacy.
+5. Refaire le sweep `repr_kd_weight` avec WSD+patience (le classement 0.05/0.2/0.3 ci-dessus a été établi à `lr=3e-4` fixe, potentiellement obsolète).
+6. Run flagship sur les 81k exemples complets (au lieu du sous-échantillon 9500) avec WSD+patience+meilleur `repr_kd_weight`.

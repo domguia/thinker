@@ -185,7 +185,7 @@ def query_tokens_for(dataset_type: str, batch, block_size: int):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: int, n_batches: int = 20,
+def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: int, n_batches: int = None,
              teacher_enabled: bool = False, ingest_kb: bool = False, n_docs_max: int = 0,
              ingest_n_step: int = 3, ingest_checkpoint: bool = False, ingest_step_size: int = None,
              ingest_n_step_min: int = 1, ingest_n_step_max: int = None):
@@ -202,7 +202,7 @@ def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: 
     hop_loss_sum = {"ge2": 0.0, "le1": 0.0}
     hop_loss_count = {"ge2": 0, "le1": 0}
     for i, batch in enumerate(loader):
-        if i >= n_batches:
+        if n_batches is not None and i >= n_batches:
             break
         batch = {k: v.to(device) for k, v in batch.items()}
         query_tokens = query_tokens_for(dataset_type, batch, block_size)
@@ -421,7 +421,15 @@ def main() -> None:
     p.add_argument("--max_time_minutes", type=float, default=15.0)
     p.add_argument("--log_every", type=int, default=20)
     p.add_argument("--val_every", type=int, default=200)
-    p.add_argument("--val_batches", type=int, default=20)
+    p.add_argument("--val_batches", type=int, default=None,
+                    help="cap the training-time val_answer to this many batches instead of the full "
+                         "--val_data set -- unset (default) evaluates every held-out example, so val_answer "
+                         "is directly comparable to any other full-val-set number (e.g. eval_llm_baseline_"
+                         "retrieval.py's reference-LLM baselines). Set explicitly (e.g. 20) only to speed up "
+                         "a quick sweep at the cost of evaluating on a smaller, fixed (shuffle=False) subset "
+                         "of --val_data -- was silently the default (20) before this flag existed, which made "
+                         "every val_answer reported by this script incomparable to a full-val-set number "
+                         "without noticing (see dev_notes/experiments/prompt_response_pipeline.md 2026-09-22).")
     p.add_argument("--extrapolate_n_steps", default=None,
                    help="comma-separated n_step_test values, probed on held-out --val_data after training "
                         "-- does 'thinking longer' at inference help solve reasoning/retrieval examples "
