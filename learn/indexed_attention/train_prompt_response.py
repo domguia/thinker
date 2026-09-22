@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 import time
 
 import numpy as np
@@ -353,7 +354,22 @@ def main() -> None:
     p.add_argument("--d_model", type=int, default=128)
     p.add_argument("--n_head", type=int, default=2)
     p.add_argument("--n_slots", type=int, default=1)
-    p.add_argument("--n_step", type=int, default=6)
+    p.add_argument("--n_step", type=int, default=6,
+                    help="training/eval n_step. If --n_step_train_max is also set, this becomes only "
+                         "the eval/val n_step (training draws a random n_step per batch instead, see "
+                         "--n_step_train_max).")
+    p.add_argument("--n_step_train_max", type=int, default=None,
+                    help="2026-09-22, dev_notes/indexed_attention_experiment_plan.md's extrapolation "
+                         "section (Universal Transformers/PonderNet/Looped Transformers literature): "
+                         "training at a FIXED n_step calibrates the model to that exact iteration count "
+                         "with no generalization guarantee -- confirmed empirically here (n_step "
+                         "extrapolation probe on 2 checkpoints trained at fixed n_step=4 shows a smooth "
+                         "U-shaped degradation centered exactly on 4, not a plateau/improvement beyond "
+                         "it). When set, each TRAINING batch draws n_step ~ Uniform(1, this value) "
+                         "instead of using the fixed --n_step (which then only controls eval/val n_step "
+                         "and checkpoint-selection consistency) -- since the recurrent core's weights "
+                         "are shared identically across every iteration regardless of count, a single "
+                         "model can in principle be trained across the whole range in one run.")
     p.add_argument("--pool_n_head", type=int, default=1)
     p.add_argument("--k_dim", type=int, default=None)
     p.add_argument("--answer_head_init", default=None,
@@ -771,13 +787,18 @@ def main() -> None:
             if args.char_answer_stream:
                 target_input["answer_chars"] = batch["answer_chars_target_input"]
 
+            # random n_step per batch (2026-09-22, dev_notes/indexed_attention_experiment_plan.md's
+            # extrapolation recommendation): --n_step stays the fixed eval/val n_step below regardless.
+            train_n_step = (random.randint(1, args.n_step_train_max) if args.n_step_train_max
+                             else args.n_step)
+
             if args.scheduled_sampling_p > 0:
                 ss_p = args.scheduled_sampling_p * min(1.0, step / max(args.scheduled_sampling_warmup_steps, 1))
                 if ss_p > 0:
                     with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16,
                                                            enabled=args.bf16 and device.type == "cuda"):
                         _, preview_streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens,
-                                                    args.n_step, kb_leaf_mask=batch["kb_leaf_mask"],
+                                                    train_n_step, kb_leaf_mask=batch["kb_leaf_mask"],
                                                     target_input=target_input)
                     for name, gold_input in target_input.items():
                         own_pred = preview_streams[name].argmax(dim=-1)  # (B, T): own_pred[t] predicts labels[t]
@@ -796,10 +817,10 @@ def main() -> None:
                     ingest_documents(model, batch, args.n_docs_max, args.block_size, args.ingest_n_step,
                                       use_checkpoint=args.ingest_checkpoint, step_size=args.ingest_step_size,
                                       n_step_min=args.ingest_n_step_min, n_step_max=args.ingest_n_step_max)
-                    _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
+                    _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, train_n_step,
                                        target_input=target_input, kb_prebuilt=True, return_hidden=want_hidden)
                 else:
-                    _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, args.n_step,
+                    _, streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens, train_n_step,
                                        kb_leaf_mask=batch["kb_leaf_mask"], target_input=target_input, return_hidden=want_hidden)
                 # `streams` holds pre-head hidden states (B,T,d_model) when want_hidden, else logits
                 # (B,T,vocab) exactly as before -- hidden_streams is kept around for the repr-KD term
