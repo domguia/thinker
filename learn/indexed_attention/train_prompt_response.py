@@ -901,11 +901,23 @@ def main() -> None:
                 lines.append(f"## {label}")
                 for i, a in zip(indices, answers):
                     lines.append(f"- example {i}: {a!r}")
-                    # cheap degenerate-output heuristic (analyst-agent, 2026-09-22): a very short
-                    # unique-token-count relative to length flags repetition loops or single-token
-                    # collapse (e.g. the '<think>' KD-contamination case) without blocking training.
+                    # cheap degenerate-output heuristic (analyst-agent, 2026-09-22; revised same day
+                    # after a false negative on the 81k CE-only run -- word-uniqueness alone missed
+                    # run-on numeric loops with no whitespace at all, e.g. '19720199819898989899719999
+                    # 97,97971971998997993199819720197200199', a single "word" word-uniqueness can't
+                    # see; n-gram-diversity and zlib-compression-ratio variants were tried and didn't
+                    # cleanly separate real degenerate examples from ordinary English at this length
+                    # -- settled on two independent, deliberately simple signals instead of one
+                    # "universal" detector): (a) low word-uniqueness (threshold loosened 0.3->0.5
+                    # after checking it doesn't false-positive on coherent sentences, which score
+                    # 0.8-1.0 here) catches repeated-word loops ("the the the", "yesyesno..."), (b)
+                    # high digit-ratio on a longish string catches run-on numeric loops. Best-effort,
+                    # not exhaustive -- a completely different failure mode could still slip through.
                     toks = a.split()
-                    if len(toks) >= 4 and len(set(toks)) / len(toks) < 0.3:
+                    word_degenerate = len(toks) >= 4 and len(set(toks)) / len(toks) < 0.5
+                    digit_ratio = sum(c.isdigit() for c in a) / max(len(a), 1)
+                    digit_degenerate = len(a) >= 15 and digit_ratio > 0.5
+                    if word_degenerate or digit_degenerate:
                         n_degenerate += 1
                 lines.append("")
             frac = n_degenerate / (2 * n) if n else 0.0
