@@ -48,6 +48,10 @@ def main() -> None:
     ap.add_argument("--block_size", type=int, default=16)
     ap.add_argument("--n_docs_max", type=int, default=10)
     ap.add_argument("--n_ctx", type=int, default=256, help="reasoning only: prompt length (flat, depth=0)")
+    ap.add_argument("--answer_head_lora_rank", type=int, default=0,
+                     help="must match the value the checkpoint was trained with (train_prompt_response.py's "
+                          "--answer_head_lora_rank) -- wraps the answer head in a LoRAHead before loading "
+                          "the state_dict, since its keys differ from a plain nn.Linear head")
     ap.add_argument("--max_answer_len", type=int, default=64)
     ap.add_argument("--max_thinking_len", type=int, default=1024)
     ap.add_argument("--n_register", type=int, default=8)
@@ -109,6 +113,9 @@ def main() -> None:
         stream_dims=stream_dims, stream_sequence=stream_sequence, max_target_len=max_target_len,
         stream_n_layers=stream_n_layers,
     ).to(device)
+    if args.answer_head_lora_rank > 0:
+        from learn.indexed_attention.train_prompt_response import LoRAHead
+        model.streams["answer"].head = LoRAHead(model.streams["answer"].head, args.answer_head_lora_rank).to(device)
     state_dict = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
