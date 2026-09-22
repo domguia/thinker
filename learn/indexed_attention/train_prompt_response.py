@@ -506,6 +506,17 @@ def main() -> None:
                    help="comma-separated n_step_test values, probed on held-out --val_data after training "
                         "-- does 'thinking longer' at inference help solve reasoning/retrieval examples "
                         "it was never trained with that many steps on?")
+    p.add_argument("--qualitative_eval_at_end", action="store_true",
+                   help="after training (--dataset_type retrieval only for now), greedily generate "
+                        "(plus one temperature=0.8/top_p=0.9 sample) on the first --qualitative_eval_n_samples "
+                        "rows of --val_data (fixed, deterministic -- same convention as "
+                        "generate_qualitative_compare.py) and write the transcript next to the checkpoint. "
+                        "2026-09-22: a checkpoint with excellent teacher-forced val_answer (e.g. 7.8643, beating "
+                        "every reference LLM) turned out to collapse to a degenerate single token under free-"
+                        "running generation -- CE/KD loss alone does not surface this, so this check should be "
+                        "on for any flagship/reported run, not requested after the fact. Cheap (~30 short "
+                        "forward passes), safe to leave on.")
+    p.add_argument("--qualitative_eval_n_samples", type=int, default=30)
     p.add_argument("--init_from_checkpoint", default=None,
                     help="warm-start: load model.state_dict() from this .pt before training -- weights only, "
                          "fresh optimizer/LR schedule/step counter (no real resume mechanism yet).")
@@ -868,6 +879,42 @@ def main() -> None:
             ckpt_path = os.path.join(ckpt_path, f"{args.run_id or 'adhoc'}.pt")
         torch.save(raw_model.state_dict(), ckpt_path)
         print(f"checkpoint saved to {ckpt_path}", flush=True)
+
+    if args.qualitative_eval_at_end:
+        if args.dataset_type != "retrieval":
+            print("qualitative_eval_at_end: skipped (only --dataset_type retrieval is wired so far)", flush=True)
+        elif val_loader is None:
+            print("qualitative_eval_at_end: skipped (no --val_data)", flush=True)
+        else:
+            from learn.indexed_attention.generate_qualitative_compare import generate_thinker
+            n = min(args.qualitative_eval_n_samples, len(val_ds))
+            indices = list(range(n))
+            out_path = (args.save_best_checkpoint_path or args.save_checkpoint_path
+                        or f"logs/qualitative_eval_{args.run_id or 'adhoc'}.md")
+            out_path = out_path.rsplit(".", 1)[0] + "_qualitative.md"
+            lines = [f"# Auto qualitative eval -- {args.run_id or 'adhoc'}",
+                     f"- Sample: first {n} rows of {args.val_data} (fixed, deterministic)", ""]
+            n_degenerate = 0
+            for label, temperature in [("greedy", 0.0), ("sampled (t=0.8, top_p=0.9)", 0.8)]:
+                answers, _ = generate_thinker(raw_model, val_ds, indices, device, args.n_step, args.block_size,
+                                               args.max_answer_len, tok, temperature=temperature, top_p=0.9, seed=0)
+                lines.append(f"## {label}")
+                for i, a in zip(indices, answers):
+                    lines.append(f"- example {i}: {a!r}")
+                    # cheap degenerate-output heuristic (analyst-agent, 2026-09-22): a very short
+                    # unique-token-count relative to length flags repetition loops or single-token
+                    # collapse (e.g. the '<think>' KD-contamination case) without blocking training.
+                    toks = a.split()
+                    if len(toks) >= 4 and len(set(toks)) / len(toks) < 0.3:
+                        n_degenerate += 1
+                lines.append("")
+            frac = n_degenerate / (2 * n) if n else 0.0
+            flag = f"\n**WARNING: {n_degenerate}/{2 * n} generations look degenerate (low token diversity) -- inspect before reporting this checkpoint.**\n" if frac > 0.3 else ""
+            lines.append(flag)
+            with open(out_path, "w") as f:
+                f.write("\n".join(lines))
+            print(f"qualitative_eval_at_end: wrote {out_path}"
+                  + (f" -- {flag.strip()}" if flag else " -- no degenerate-output warning"), flush=True)
 
     extrapolation_results = {}
     if args.extrapolate_n_steps and val_loader is not None:
