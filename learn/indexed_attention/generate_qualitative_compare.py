@@ -130,6 +130,10 @@ def generate_reference(model, tokenizer, prompts: list[str], device, max_new_tok
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--checkpoint2", default=None,
+                     help="optional second Thinker checkpoint -- if given, compares checkpoint vs "
+                          "checkpoint2 (same architecture flags applied to both) INSTEAD OF checkpoint "
+                          "vs --ref_model. Same decoding (--temperature/--top_p) applied to both.")
     ap.add_argument("--val_data", required=True)
     ap.add_argument("--n_samples", type=int, default=30,
                      help="fixed sample size -- always the FIRST n_samples rows of --val_data "
@@ -183,43 +187,51 @@ def main() -> None:
             rows.append(json.loads(line))
     rows = [rows[i] for i in indices]
 
-    print(f"loading Thinker checkpoint {args.checkpoint} ...", flush=True)
-    model = Thinker(
-        vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
-        block_size=args.block_size, depth=0, n_slots=1, n_head=args.n_head,
-        use_ff=args.use_ff, stream_dims={"answer": vocab_size},
-        stream_sequence={"answer": True}, max_target_len=args.max_answer_len,
-        stream_n_layers={"answer": args.answer_n_layers},
-    ).to(device)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    model.eval()
-    thinker_answers, first_step_diag = generate_thinker(
-        model, ds, indices, device, args.n_step, args.block_size, args.max_answer_len, tok,
-        temperature=args.temperature, top_p=args.top_p, seed=args.seed,
-        log_first_step_topk=args.log_first_step_topk)
-    del model
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    def load_and_generate(checkpoint_path: str):
+        print(f"loading Thinker checkpoint {checkpoint_path} ...", flush=True)
+        m = Thinker(
+            vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
+            block_size=args.block_size, depth=0, n_slots=1, n_head=args.n_head,
+            use_ff=args.use_ff, stream_dims={"answer": vocab_size},
+            stream_sequence={"answer": True}, max_target_len=args.max_answer_len,
+            stream_n_layers={"answer": args.answer_n_layers},
+        ).to(device)
+        m.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        m.eval()
+        answers, diag = generate_thinker(
+            m, ds, indices, device, args.n_step, args.block_size, args.max_answer_len, tok,
+            temperature=args.temperature, top_p=args.top_p, seed=args.seed,
+            log_first_step_topk=args.log_first_step_topk)
+        del m
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        return answers, diag
 
-    ref_name = resolve_model_name(args.ref_model)
-    print(f"loading reference LLM {ref_name} ...", flush=True)
-    ref_tok = AutoTokenizer.from_pretrained(ref_name)
-    ref_model = AutoModelForCausalLM.from_pretrained(ref_name, torch_dtype=dtype).to(device).eval()
-    prompts = []
-    for row in rows:
-        text = row.get("text") or ""
-        pos = text.find(ASSISTANT_MARKER)
-        prompts.append(text[:pos + len(ASSISTANT_MARKER)] if pos != -1 else text)
-    ref_answers = generate_reference(ref_model, ref_tok, prompts, device, args.max_answer_len)
-    del ref_model
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    thinker_answers, first_step_diag = load_and_generate(args.checkpoint)
+
+    if args.checkpoint2:
+        other_answers, _ = load_and_generate(args.checkpoint2)
+        other_name = args.checkpoint2
+    else:
+        other_name = resolve_model_name(args.ref_model)
+        print(f"loading reference LLM {other_name} ...", flush=True)
+        ref_tok = AutoTokenizer.from_pretrained(other_name)
+        ref_model = AutoModelForCausalLM.from_pretrained(other_name, torch_dtype=dtype).to(device).eval()
+        prompts = []
+        for row in rows:
+            text = row.get("text") or ""
+            pos = text.find(ASSISTANT_MARKER)
+            prompts.append(text[:pos + len(ASSISTANT_MARKER)] if pos != -1 else text)
+        other_answers = generate_reference(ref_model, ref_tok, prompts, device, args.max_answer_len)
+        del ref_model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     lines = [
-        f"# Qualitative comparison: Thinker vs {ref_name}",
+        f"# Qualitative comparison: Thinker vs {other_name}",
         "",
         f"- Thinker checkpoint: `{args.checkpoint}`",
-        f"- Reference model: `{ref_name}`",
+        f"- {'Second Thinker checkpoint' if args.checkpoint2 else 'Reference model'}: `{other_name}`",
         f"- Sample: first {len(indices)} rows of `{args.val_data}` (fixed, deterministic)",
         f"- Decoding: {'greedy' if args.temperature <= 0 else f'temperature={args.temperature}, top_p={args.top_p}, seed={args.seed}'}",
         "",
@@ -229,13 +241,13 @@ def main() -> None:
         for d in first_step_diag:
             lines.append(f"- example {d['example']}: {d['top_tokens']}")
         lines.append("")
-    for i, (row, t_ans, r_ans) in enumerate(zip(rows, thinker_answers, ref_answers)):
+    for i, (row, t_ans, r_ans) in enumerate(zip(rows, thinker_answers, other_answers)):
         lines += [
             f"## Example {i} (num_hops={row.get('num_hops')})",
             f"**Question**: {row['question']}",
             f"**Gold answer**: {row['answer']}",
-            f"**Thinker**: {t_ans!r}",
-            f"**{ref_name}**: {r_ans!r}",
+            f"**Thinker ({args.checkpoint})**: {t_ans!r}",
+            f"**{other_name}**: {r_ans!r}",
             "",
         ]
     with open(args.out, "w") as f:
