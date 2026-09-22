@@ -544,7 +544,15 @@ Le chiffre full-val (7.8643) est quasi identique au chiffre sous-échantillonné
 | KD top-K (`kd_alpha=0.5`) | 4.4199 |
 
 **CE-only bat KD de 0.93 sur math -- écart encore plus marqué que sur retrieval (0.23).** Cohérent avec le caveat déjà noté : le stream `answer` de math a un fallback CE partiel connu (span pas toujours verbatim), donc le signal KD y était déjà dégradé avant même de considérer la contamination `<think>` (qui, elle, ne touche pas math -- vérifié). Renforce la conclusion générale : ne pas assumer KD bénéfique par défaut pour ce pipeline, à cette échelle.
-4bis. **Sweep taille de KB** : `n_docs_max=5` -> 7.8406, `n_docs_max=10` (ré-entraîné avec cette recette, batch_size=32) -> 7.8552, `n_docs_max=20` en cours. Tendance légère mais pas encore concluante (peu de docs semble marginalement aider) -- attendre `n_docs_max=20` avant conclusion.
+4bis. **Sweep taille de KB terminé** (retrieval, WSD+patience, budget commun) :
+
+| `n_docs_max` | answer_ce (val complet) |
+|---|---|
+| 5 | 7.8406 |
+| 10 (défaut) | 7.8552 |
+| 20 | 7.8546 |
+
+**Pas d'effet net de la taille de KB dans cette plage** -- les 3 valeurs sont à ~0.015 CE les unes des autres (bruit d'entraînement probable, pas une tendance monotone claire : 5 < 20 < 10). Conclusion : `n_docs_max=10` (défaut actuel) reste un choix raisonnable, pas de gain clair à changer dans cette plage 5-20.
 4. Wiki+TinyStory (`wikitext_sample5k`+`tinystories_sample5k` ou `general_sample10k_staging` fusionné, 9k ex., précompute top-K à faire -- `general_realtext`, plus petit, 2.7k ex., a déjà son top-K et sert de premier passage rapide) CE vs KD.
 5. Dataset combiné (retrieval + math + wiki/tinystory mélangés), KD, une fois chaque domaine caractérisé isolément.
 6. Éval qualitative continue : génération de texte (Thinker vs petits LLM de référence) sur **un échantillon fixe et petit, réutilisé à l'identique à chaque checkpoint** (pas de ré-échantillonnage) pour rendre les comparaisons comparables dans le temps -- `learn/indexed_attention/generate_qualitative_compare.py` (nouveau, commit `d53e85e`), lancé sur `retrieval1_reprkd_wsd2_best.pt` vs Qwen3.5-0.8B, 30 premiers exemples de val. Alimente aussi une demande similaire reçue d'une session sœur (analyst-agent).
