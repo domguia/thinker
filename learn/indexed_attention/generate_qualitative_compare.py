@@ -42,9 +42,32 @@ from core.model_families import resolve_model_name
 from data.prompt_response_dataset import ASSISTANT_MARKER, RetrievalPromptDataset
 
 
+def _sample_next(logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
+    """logits: (B, vocab). temperature<=0 -> greedy argmax (default). Otherwise
+    temperature-scaled softmax with optional nucleus (top-p) filtering before
+    sampling -- requested (analyst-agent, 2026-09-22) to check whether the
+    greedy '<think>'-collapse is a pure argmax artifact or persists under
+    sampling (see dev_notes/experiments/prompt_response_pipeline.md)."""
+    if temperature <= 0:
+        return logits.argmax(dim=-1)
+    scaled = logits / temperature
+    probs = torch.softmax(scaled, dim=-1)
+    if top_p < 1.0:
+        sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
+        cum = sorted_probs.cumsum(dim=-1)
+        cutoff = (cum - sorted_probs) > top_p  # keep first token that crosses top_p
+        sorted_probs = sorted_probs.masked_fill(cutoff, 0.0)
+        sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+        sampled_rank = torch.multinomial(sorted_probs, 1).squeeze(-1)
+        return sorted_idx.gather(1, sampled_rank.unsqueeze(-1)).squeeze(-1)
+    return torch.multinomial(probs, 1).squeeze(-1)
+
+
 @torch.no_grad()
 def generate_thinker(model, ds: RetrievalPromptDataset, indices: list[int], device,
-                      n_step: int, block_size: int, max_answer_len: int, tokenizer) -> list[str]:
+                      n_step: int, block_size: int, max_answer_len: int, tokenizer,
+                      temperature: float = 0.0, top_p: float = 1.0, seed: int = 0,
+                      log_first_step_topk: int = 0) -> tuple[list[str], list[dict]]:
     items = [ds[i] for i in indices]
     kb_tokens = torch.stack([it["kb_tokens"] for it in items]).to(device)
     kb_source_ids = torch.stack([it["kb_source_ids"] for it in items]).to(device)
@@ -57,12 +80,23 @@ def generate_thinker(model, ds: RetrievalPromptDataset, indices: list[int], devi
     target_input = torch.full((B, max_answer_len), pad_id, dtype=torch.long, device=device)
     generated = torch.full((B, max_answer_len), pad_id, dtype=torch.long, device=device)
     done = torch.zeros(B, dtype=torch.bool, device=device)
+    if temperature > 0:
+        torch.manual_seed(seed)
 
+    first_step_diag = []
     for t in range(max_answer_len):
         _, stream_outputs = model(kb_tokens=kb_tokens, kb_source_ids=kb_source_ids,
                                    query_tokens=query_tokens, n_step=n_step,
                                    kb_leaf_mask=kb_leaf_mask, target_input={"answer": target_input})
-        next_token = stream_outputs["answer"][:, t, :].argmax(dim=-1)
+        logits_t = stream_outputs["answer"][:, t, :]
+        if t == 0 and log_first_step_topk > 0:
+            probs0 = torch.softmax(logits_t.float(), dim=-1)
+            topk = probs0.topk(log_first_step_topk, dim=-1)
+            for b in range(B):
+                toks = [tokenizer.decode([tid]) for tid in topk.indices[b].tolist()]
+                first_step_diag.append({"example": b,
+                                         "top_tokens": list(zip(toks, [round(v, 4) for v in topk.values[b].tolist()]))})
+        next_token = _sample_next(logits_t, temperature, top_p)
         next_token = torch.where(done, torch.full_like(next_token, pad_id), next_token)
         generated[:, t] = next_token
         if eos_id is not None:
@@ -78,7 +112,7 @@ def generate_thinker(model, ds: RetrievalPromptDataset, indices: list[int], devi
         if eos_id is not None and eos_id in ids:
             ids = ids[:ids.index(eos_id)]
         texts.append(tokenizer.decode(ids, skip_special_tokens=True).strip())
-    return texts
+    return texts, first_step_diag
 
 
 @torch.no_grad()
@@ -116,6 +150,16 @@ def main() -> None:
     ap.add_argument("--n_register", type=int, default=8)
     ap.add_argument("--answer_n_layers", type=int, default=1)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--temperature", type=float, default=0.0,
+                     help="0 (default) = greedy argmax. >0 = temperature-scaled sampling "
+                          "(e.g. 0.7-1.0), combine with --top_p for nucleus sampling.")
+    ap.add_argument("--top_p", type=float, default=1.0)
+    ap.add_argument("--seed", type=int, default=0, help="sampling seed, ignored if --temperature=0")
+    ap.add_argument("--log_first_step_topk", type=int, default=0,
+                     help="if >0, print the top-K (token, prob) pairs at generation position 0 "
+                          "for every example -- diagnostic for whether a degenerate output is "
+                          "the model being confidently wrong or just flat/undecided (analyst-agent, "
+                          "2026-09-22)")
     ap.add_argument("--out", required=True, help="markdown report path")
     args = ap.parse_args()
 
@@ -149,8 +193,10 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.eval()
-    thinker_answers = generate_thinker(model, ds, indices, device, args.n_step, args.block_size,
-                                        args.max_answer_len, tok)
+    thinker_answers, first_step_diag = generate_thinker(
+        model, ds, indices, device, args.n_step, args.block_size, args.max_answer_len, tok,
+        temperature=args.temperature, top_p=args.top_p, seed=args.seed,
+        log_first_step_topk=args.log_first_step_topk)
     del model
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -175,8 +221,14 @@ def main() -> None:
         f"- Thinker checkpoint: `{args.checkpoint}`",
         f"- Reference model: `{ref_name}`",
         f"- Sample: first {len(indices)} rows of `{args.val_data}` (fixed, deterministic)",
+        f"- Decoding: {'greedy' if args.temperature <= 0 else f'temperature={args.temperature}, top_p={args.top_p}, seed={args.seed}'}",
         "",
     ]
+    if first_step_diag:
+        lines += ["## First-step top-K logits (position 0, before any generated token)", ""]
+        for d in first_step_diag:
+            lines.append(f"- example {d['example']}: {d['top_tokens']}")
+        lines.append("")
     for i, (row, t_ans, r_ans) in enumerate(zip(rows, thinker_answers, ref_answers)):
         lines += [
             f"## Example {i} (num_hops={row.get('num_hops')})",
