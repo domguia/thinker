@@ -771,6 +771,27 @@ Motif dominant : boucles de chiffres/répétitions ("`the 1999999999998999989998
 
 Fichiers : `tmp_scripts_local/qualitative_eval_wikitext_manual.py`, log complet sur Nancy (`~/thinker/tmp_scripts/qualitative_eval_wikitext_manual.log`, non rapatrié localement).
 
+## 2026-09-23 (suite 11, experiment-manager) — Collapse confirmé universel sur retrieval aussi ; convergence structurelle (agent2)
+
+**Confirmation supplémentaire** : l'éval qualitative auto de phase19 (retrieval, CE-only, n_step fixe=4, palier top-K 57%, post-fix `<think>`) montre le MÊME motif de collapse (boucles de chiffres type années : `"1972000019720198585970195200197201974193333520192019720197200001"`, `"1985, 2000000198989970019960000000000000000000001962000197200001"`) que math et wikitext -- confirme que ce n'est PAS spécifique à un dataset donné.
+
+**Diagnostic clé d'`agent2`** (leur périmètre d'investigation, résumé ici pour contexte) : sous teacher-forcing avec le VRAI préfixe (pas de génération libre), l'argmax du modèle est déjà faux dans ~99.6% des positions, convergeant vers un tout petit ensemble récurrent de tokens génériques (`"`, `1`, espace, ponctuation -- top tokens couvrant 80%+ des positions). **Vérifié sur mon checkpoint `retrieval_ceonly_fixed_best.pt`** (hash MD5 confirmé distinct de leur propre checkpoint) : mêmes pourcentages EXACTS que le CE-only d'agent2 (échelle de données différente : 1500 ex. vs 57% du pool 81k) -- `"` 50.2%, `1` 16.4%, etc., à la décimale près. **Deux entraînements totalement indépendants (dataset/échelle différents) convergent vers un mode de sortie dégénéré numériquement identique.**
+
+**Implication** : ce n'est pas de l'exposure bias classique (dérive en génération libre depuis une trajectoire par ailleurs correcte), c'est un problème de calibration présent DÈS le teacher-forcing idéal -- argument fort pour une cause structurelle (mécanisme récurrent du Thinker lui-même : cœur register/OutputStream) plutôt qu'un problème de données/dataset. Escaladé par agent2 à supervisor-agent comme piste prioritaire.
+
+**Conséquence pour toute comparaison CE-vs-KD en cours (phase17/18/19)** : tant que ce mode de collapse structurel n'est pas résolu, un écart de CE entre deux checkpoints (KD vs CE-only) ne prouve rien de solide sur la qualité réelle de génération -- les deux variantes du même dataset semblent atterrir dans le même bassin d'attraction dégénéré. Continuer à documenter les chiffres CE (utiles comme mesure de calibration relative) mais ne plus les présenter comme des résultats "qui gagne" sans le caveat qualitatif désormais systématique.
+
+**Phase19 terminé (retrieval, palier top-K 57%, `thinkfix_p46250`)** :
+
+| Variante | answer_ce (full val, 9000 ex.) | Qualitatif (greedy, 30 ex.) |
+|---|---|---|
+| CE-only | **7.0325** | Dégénéré (boucles "1972...", "1985...") |
+| KD top-K | 7.2077 | Dégénéré aussi (motif similaire, préfixe "Based" puis même boucle numérique) |
+
+CE-only bat KD numériquement cette fois (contrairement à wikitext) -- mais **les deux sont qualitativement cassés**, donc cet écart n'est pas interprétable comme un vrai signal KD-vs-CE. Cohérent avec le diagnostic d'agent2 (bassin d'attraction dégénéré commun, indépendant du levier testé). Pas de conclusion CE-vs-KD tirable sur aucun des 3 fronts (math/wikitext/retrieval) tant que le collapse structurel persiste -- priorité désormais entièrement sur l'investigation d'agent2.
+
+Fichiers : `checkpoints/retrieval_ceonly_fixed_best.pt`, `checkpoints/retrieval_kd_fixed_best.pt`, `logs/eval_thinker_retrieval_{ceonly,kd}_fixed_fullval.json`.
+
 ## KD-vs-CE-only isolé + LoRA + embed-KD, n_step fixe, données propres n=1500 (2026-09-22)
 
 Demande supervisor-agent : comparaison directe KD-vs-CE (n_step fixe=4, pas de n_step-variable, contrairement au run précédent qui mélangeait les deux) sur le lot top-K propre `thinkfix_n1500`, plus deux leviers KD déjà testés sur données contaminées (frozen-head+LoRA32, embed-KD combiné) rejoués sur données propres. 3 runs Nancy en parallèle (`graffiti-1/3/5`, jobs `6937311/6937306/6937313`), même recette WSD+patience, `batch_size=16` (embed-KD relancé à `batch_size=8` après OOM sur GPU 10.57GiB de graffiti-5).
@@ -838,3 +859,13 @@ Tokens dominants récurrents à travers les 4 checkpoints (mêmes candidats, poi
 **Résultat croisé, renforce fortement l'hypothèse structurelle (2026-09-23)** : même diagnostic tourné sur le checkpoint CE-only d'`experiment-agent` (`retrieval_ceonly_fixed_best.pt`, run distinct, couverture top-K 57% au lieu de n=1500, job Nancy `6937347`/`graffiti-6`) -- résultat **numériquement identique** au CE-only ci-dessus (mêmes tokens dominants, mêmes comptes exacts sur les 1600 positions scorées : `"` 804/50.2%, `1` 263/16.4%, etc.). Vérifié par hash MD5 que ce sont deux fichiers de poids réellement distincts (`e662192...` vs `6a1c6de...`), pas un doublon. **Deux entraînements CE-only séparés, à des échelles de données différentes, convergent vers EXACTEMENT le même mode de sortie dégénéré sur le même échantillon val** -- argument fort pour une cause structurelle (le cœur récurrent partagé de Thinker, potentiel point fixe/attracteur du mécanisme à `n_step` itérations) plutôt qu'un problème de quantité/qualité de données d'entraînement. Renforce la priorité de la comparaison Baseline C.
 
 Fichiers : `logs/divergence_expagent_ceonly57.json`.
+
+## Les "paris sûrs" sont-ils juste la fréquence marginale des réponses ? Partiellement (2026-09-23)
+
+Test rapide (pas de GPU nécessaire) : fréquence des tokens dans les vraies réponses du val set (2000 ex., `answer` seul, pas le document) vs les tokens "paris sûrs" trouvés ci-dessus.
+
+**Top-15 tokens des VRAIES réponses** : `1` (345), `9` (243), `0` (202), `2` (179), ` ` (179), `,` (175), `8`/`7`/`6`/`5` (~90 chacun), ` of` (80), `3`/`4` (~78), `.` (61), `The` (60).
+
+**Recoupement partiel** : `1`, les chiffres, ` `, `,`, ` of`, `.`, `The` apparaissent dans les deux listes -- cohérent avec un comportement classique de sous-apprentissage qui reproduit la fréquence marginale de la distribution des réponses (HotpotQA a beaucoup de réponses numériques/années) plutôt que la réponse conditionnée à l'exemple. Explique une bonne partie, mais pas tout.
+
+**Anomalie non expliquée** : `"` (id=1, vérifié -- c'est bien le caractère guillemet littéral, PAS un token spécial : `pad_token_id=248044`, `eos_token_id=248046`, distincts) est le token DOMINANT du modèle (41-50% de toutes les prédictions argmax) mais **n'apparaît même pas dans le top-15 des vraies réponses**. Cette partie du mode-collapse n'est donc pas expliquée par la fréquence marginale des réponses seules -- hypothèse à tester : fréquence du caractère `"` dans l'ensemble du corpus d'entraînement (prompt + documents, pas seulement les réponses -- HotpotQA cite beaucoup de titres/entités entre guillemets dans le contexte), ou artefact du mécanisme d'attention/mémoire hiérarchique de Thinker plutôt qu'un simple biais de fréquence lexicale.
