@@ -817,3 +817,20 @@ Mission supervisor-agent (décision utilisateur) : investiguer la cause du colla
 **Prochaine étape proposée (pas encore faite)** : identifier si ce "pari sûr" est un token/continuation récurrent à travers les exemples (analogue au `<think>` de contamination déjà trouvé, mais ici un artefact de calibration général et non un bug de données) -- comparer les distributions d'argmax teacher-forcé à travers plusieurs exemples pour voir s'il y a convergence vers peu de tokens dominants.
 
 Fichiers : `learn/indexed_attention/diagnose_generation_divergence.py`, `logs/divergence_{kd,ceonly,lora,embedkd}.json`.
+
+## "Paris sûrs" : l'argmax teacher-forcé converge vers ~25 tokens génériques (2026-09-22, suite)
+
+Suite demandée par supervisor-agent : l'argmax teacher-forcé (jamais correct, cf. ci-dessus) est-il diffus/spécifique à chaque exemple, ou concentré sur un petit ensemble récurrent de tokens (mode-collapse, analogue au `<think>` déjà vu) ? Ajout d'une analyse de fréquence des tokens argmax teacher-forcés sur les 1600 positions scorées (25 ex. x 64 positions max) par checkpoint.
+
+**Réponse nette : mode-collapse confirmé, pas de diffusion.**
+
+| Run | tokens uniques utilisés / 1600 positions | top-5 couvrent |
+|---|---|---|
+| KD pur | 28 | 85.2% |
+| CE-only | 26 | 84.1% |
+| LoRA32 | 24 | 88.4% |
+| embed-KD | 28 | 81.3% |
+
+Tokens dominants récurrents à travers les 4 checkpoints (mêmes candidats, poids différents) : `"` (guillemet, 9-50% selon le run), `1` (16-51%), `Based` (0-21%), `yes`/`no` (2-4% chacun), ponctuation (`,`, `.`, ` `, ` of`). Aucun de ces tokens n'a de lien évident avec le contenu de l'exemple (contrairement au `<think>` de contamination, qui était spécifique au format des données) -- ce sont des candidats génériques que le modèle place en rang 1 quasi indépendamment du contexte, cohérent avec un objectif CE qui récompense en moyenne un "pari sûr" à faible risque sur l'ensemble d'entraînement plutôt qu'une réponse engagée et spécifique par exemple.
+
+**Synthèse des 3 diagnostics (divergence position / argmax accuracy / paris sûrs) : le collapse en génération libre observé plus haut est la conséquence visible d'un problème de calibration antérieur et indépendant de la génération -- le modèle a appris une distribution de sortie dominée par ~25 tokens "sûrs" quasi invariants au contexte, uniforme sur KD/CE-only/LoRA/embed-KD.** Piste naturelle suivante (pas encore lancée, coût d'un nouveau training) : vérifier si ce mode-collapse est spécifique au mécanisme récurrent de Thinker (poids partagés à travers les `n_step` itérations, pourrait favoriser une sortie stable/moyenne) ou général à ce régime petit-modèle/peu-de-données -- comparer à Baseline C (`learn/distill/train_sft.py`, transformer dense classique) sur les mêmes données, en attente de validation supervisor-agent avant de lancer (entraînement complet, coûteux).

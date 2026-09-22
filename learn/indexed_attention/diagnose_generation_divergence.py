@@ -187,7 +187,32 @@ def main() -> None:
         examples_out.append({"example": b, "divergence_pos": divergence_pos[b] if b < len(divergence_pos) else None,
                               "ground_truth": gt_toks, "teacher_forced_argmax": tf_toks, "free_run": fr_toks})
 
+    # "safe bet" analysis (supervisor-agent request, follow-up to teacher_forced_argmax_accuracy
+    # being ~0%): does the teacher-forced argmax converge onto a SMALL recurring set of tokens
+    # across examples/positions (a calibration-driven mode-collapse, analogous to the <think>
+    # contamination artifact found earlier), or is it diffuse/example-specific (generic
+    # undercalibration, no single dominant token)?
+    flat_tf_ids = tf_argmax[valid_mask].tolist()
+    tok_counts = Counter(flat_tf_ids)
+    n_flat = len(flat_tf_ids)
+    top_tokens = tok_counts.most_common(15)
+    top5_mass = sum(c for _, c in tok_counts.most_common(5)) / n_flat if n_flat else float("nan")
+    top15_mass = sum(c for _, c in top_tokens) / n_flat if n_flat else float("nan")
+    n_unique = len(tok_counts)
+    print(f"\n--- safe-bet analysis: teacher-forced argmax token distribution across {n_flat} scored positions ---")
+    print(f"unique tokens used: {n_unique} (out of {n_flat} positions -- lower = more concentrated)")
+    print(f"top-5 tokens cover {top5_mass*100:.1f}% of all argmax predictions")
+    print(f"top-15 tokens cover {top15_mass*100:.1f}% of all argmax predictions")
+    print("top tokens (id, decoded, count, %):")
+    for tid, c in top_tokens:
+        decoded = _safe_decode([tid])
+        print(f"  {tid}\t{decoded!r}\t{c}\t{100*c/n_flat:.1f}%")
+
     result = {"checkpoint": args.checkpoint, "n_scored": n_scored,
+              "safe_bet_analysis": {"n_flat_positions": n_flat, "n_unique_tokens": n_unique,
+                                     "top5_mass_pct": top5_mass * 100, "top15_mass_pct": top15_mass * 100,
+                                     "top_tokens": [{"id": tid, "decoded": _safe_decode([tid]), "count": c,
+                                                      "pct": 100 * c / n_flat} for tid, c in top_tokens]},
               "divergence_histogram": {str(k): v for k, v in sorted(counts.items())},
               "pct_immediate_t0": 100 * n_immediate / n_scored if n_scored else None,
               "pct_within_3": 100 * n_within_3 / n_scored if n_scored else None,
