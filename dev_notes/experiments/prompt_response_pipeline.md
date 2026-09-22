@@ -731,6 +731,46 @@ Fichiers : `checkpoints/math_nsteprand_cleankd_best.pt`, `logs/eval_thinker_math
 
 Fichiers : `checkpoints/retrieval1_nsteprand_cleankd_best.pt`, `logs/eval_thinker_nsteprand_cleankd_fullval.json`.
 
+## 2026-09-22 (suite 9, experiment-manager) — phase18 : premier CE-vs-KD propre sur wikitext, KD gagne
+
+**Demande supervisor-agent** : jamais de vrai CE-vs-KD sur données généralistes (wikitext jamais touché, tinystories seulement testé en KD seul par `agent2`, sans bras CE). Couverture top-K wikitext COMPLÈTE (4497/4497 train, 503/503 val, qwen_big) -- comparaison non biaisée par une couverture partielle, contrairement aux runs math/retrieval précédents.
+
+**Reformatage** (`learn/distill/make_prompt_response_from_realtext.py`, convention d'`agent2` reprise telle quelle -- prompt=96 tokens, answer=48 tokens, `thinking=""` partout) : 4497/4497 et 503/503 exemples utilisables, aucun skip, `doc_id` préservé pour matcher le top-K existant. GPU Nancy `graffiti-4` (job `6937318`), `batch_size=8` (séquences courtes, contrairement à math -- jamais d'OOM).
+
+**Résultat (full-val, `eval_thinker_full_val.py`, `dataset_type=reasoning`)** :
+
+| Variante | answer_ce (full val, 503 ex.) |
+|---|---|
+| CE-only | 6.8462 |
+| **KD top-K (`kd_alpha=0.5`)** | **6.6285** |
+
+**KD bat CE-only (-0.22 CE, ~3.2% relatif)** -- premier résultat KD-vs-CE propre et positif sur ce pipeline (les runs math/retrieval précédents avaient une couverture KD train partielle, ~2-5%, biaisant toute comparaison). À couverture complète, la distillation aide réellement.
+
+**Limite importante découverte en cours de route** : `--qualitative_eval_at_end` n'est PAS câblé pour `--dataset_type reasoning` (message explicite dans le log : *"qualitative_eval_at_end: skipped (only --dataset_type retrieval is wired so far)"*) -- s'applique aussi à math (phase16/17). La demande explicite de supervisor-agent ("éval qualitative obligatoire") n'a donc PAS pu être honorée via ce flag pour wikitext ni math -- reste à faire manuellement ou à câbler dans le script si jugé prioritaire.
+
+**Artefact NaN connu, à nouveau confirmé bénin** : `ce_thinking`/`loss`/`thinking` (JSON) systématiquement NaN (stream "thinking" vide), `answer_ce` reste valide -- cohérent avec l'entrée `agent2` du 2026-09-22 (tinystories) et la note phase16.
+
+Fichiers : `checkpoints/wikitext_ceonly_best.pt`, `checkpoints/wikitext_kd_best.pt`, `logs/eval_thinker_wikitext_ceonly_fullval.json`, `logs/eval_thinker_wikitext_kd_fullval.json`.
+
+## 2026-09-22 (suite 10, experiment-manager) — ⚠️ Vérification qualitative wikitext : LES DEUX checkpoints sont dégénérés, résultat CE-vs-KD invalidé
+
+**Sur demande explicite de supervisor-agent** (méfiance justifiée envers un bon CE seul, précédent direct : le collapse `<think>` en retrieval était invisible au CE), vérification qualitative manuelle des deux checkpoints wikitext (`wikitext_ceonly_best.pt`, `wikitext_kd_best.pt`), génération greedy, 30 premiers exemples val (fixes, déterministes).
+
+**Câblage préalable nécessaire** : `--qualitative_eval_at_end` n'était câblé que pour `retrieval` (cf. suite 9) -- ajout de `generate_thinker_reasoning()` dans `generate_qualitative_compare.py` (même convention que `generate_thinker`, `query_tokens = kb_tokens` entier au lieu des derniers `block_size` tokens, "thinking" teacher-forcé depuis le ground-truth plutôt qu'auto-régressé -- suffisant pour juger si la génération de la réponse est dégénérée, pas pour juger la qualité du raisonnement) + branchement dans `train_prompt_response.py` (`--dataset_type reasoning` n'est plus skip). Code synchronisé sur Nancy, pas encore commité.
+
+**Résultat, sans ambiguïté : collapse sévère sur LES DEUX variantes** :
+
+| Variante | Dégénéré (répétition/boucles numériques) |
+|---|---|
+| CE-only | **25/30** |
+| KD top-K | **28/30** |
+
+Motif dominant : boucles de chiffres/répétitions ("`the 1999999999998999989998...`", "`the first . \n the first . \n the first`", "`198 @-@ 19400000000000000194 @-@ 19700000000000`") -- un collapse d'exposure-bias classique, indépendant du CE (les deux checkpoints avaient un CE full-val raisonnable et décroissant normalement pendant l'entraînement). **KD est même LÉGÈREMENT PIRE en qualitatif (28/30) que CE-only (25/30) malgré un meilleur CE (6.63 vs 6.85)** -- confirme exactement la mise en garde de supervisor-agent : le CE seul aurait fait conclure "KD gagne" alors que les deux modèles sont essentiellement cassés en génération libre.
+
+**Conclusion révisée** : **le résultat "KD bat CE-only" de la suite 9 est INVALIDÉ/à ignorer pour toute décision** -- les deux checkpoints sont dégénérés, la différence de CE (6.63 vs 6.85, ~3%) est vraisemblablement du bruit sans signification pratique tant que le mode de collapse n'est pas résolu. Cohérent avec le problème d'exposure bias général déjà documenté (`agent2`, tinystories, section wiki/tinystory ci-dessus, "31/60 dégénéré... indépendant du levier n_step") -- ce collapse ne semble PAS spécifique à un levier particulier (KD, n_step, dataset) mais être une limite structurelle actuelle du entraînement teacher-forcing pur de ce pipeline, à traiter comme un problème séparé et prioritaire avant de tirer toute conclusion CE-vs-KD sur données généralistes.
+
+Fichiers : `tmp_scripts_local/qualitative_eval_wikitext_manual.py`, log complet sur Nancy (`~/thinker/tmp_scripts/qualitative_eval_wikitext_manual.log`, non rapatrié localement).
+
 ## KD-vs-CE-only isolé + LoRA + embed-KD, n_step fixe, données propres n=1500 (2026-09-22)
 
 Demande supervisor-agent : comparaison directe KD-vs-CE (n_step fixe=4, pas de n_step-variable, contrairement au run précédent qui mélangeait les deux) sur le lot top-K propre `thinkfix_n1500`, plus deux leviers KD déjà testés sur données contaminées (frozen-head+LoRA32, embed-KD combiné) rejoués sur données propres. 3 runs Nancy en parallèle (`graffiti-1/3/5`, jobs `6937311/6937306/6937313`), même recette WSD+patience, `batch_size=16` (embed-KD relancé à `batch_size=8` après OOM sur GPU 10.57GiB de graffiti-5).
@@ -756,3 +796,24 @@ Demande supervisor-agent : comparaison directe KD-vs-CE (n_step fixe=4, pas de n
 Pattern identique aux boucles numériques déjà vues (`19720000...`) et au collapse `<think>`/tinystories documenté par agent2 le même jour (voir plus haut, entrée `wiki/tinystory`) : confirme que **le collapse en génération libre est un phénomène d'exposure bias général, indépendant de KD-vs-CE, de LoRA, ou d'embed-KD** -- aucun des 4 leviers testés ici ne le corrige, et le score CE seul (utilisé jusqu'ici comme proxy principal) ne le détecte pas. À traiter comme un problème à part (probablement scheduled sampling / n_step-variable côté génération, cf. `phase10`) plutôt que par le choix de recette KD.
 
 Fichiers : `checkpoints/retrieval1_kdvsce_{kd,ceonly}_best.pt`, `checkpoints/retrieval1_frozenhead_lora32_cleankd_best.pt`, `checkpoints/retrieval1_embedkd_cleankd_best.pt`, `checkpoints/*_qualitative.md`, `logs/eval_thinker_{kdvsce_kd,kdvsce_ceonly,frozenhead_lora32_cleankd,embedkd_cleankd}_fullval.json`.
+
+## Diagnostic de divergence de génération : où et pourquoi le collapse (2026-09-22, suite)
+
+Mission supervisor-agent (décision utilisateur) : investiguer la cause du collapse ci-dessus. Nouveau script `learn/indexed_attention/diagnose_generation_divergence.py` -- deux forward passes par exemple sur les 4 checkpoints ci-dessus (n=25 val, greedy/argmax) : (1) teacher-forcé (préfixe = vraie réponse à chaque position, comme le calcul de CE), (2) génération libre (autoregressive sur ses propres prédictions, comme `generate_thinker`). Compare position par position.
+
+**Premier chiffre (position de première divergence entre libre et teacher-forcé) trompeur, corrigé après coup** : "0% de divergence à t=0" sur les 4 checkpoints n'est PAS un signal de "pas de biais de démarrage" -- c'est un artefact : au premier token, le contexte donné aux deux branches (libre et teacher-forcé) est identique (aucune réponse encore émise des deux côtés), donc même modèle + même entrée = même sortie par construction. Ne pas réutiliser cette mesure telle quelle sans ce correctif.
+
+**Résultat central, celui-ci solide** : précision de l'argmax **teacher-forcé** vs la vraie réponse (does CE-bas == argmax-correct ?), sur les 4 checkpoints :
+
+| Run | argmax correct (tous tokens) | argmax correct (position 0 seule) |
+|---|---|---|
+| KD pur | 0.4% (6/1600) | 0.0% |
+| CE-only | 0.4% (6/1600) | 0.0% |
+| LoRA32 | 0.2% (4/1600) | 0.0% |
+| embed-KD | 0.2% (3/1600) | 0.0% |
+
+**Même avec le préfixe VRAI donné en entrée (meilleur cas possible), l'argmax du modèle ne correspond presque jamais (~0%) au bon token -- alors que le CE loss (7.0-7.3) est bien meilleur que l'aléatoire (`ln(248320)≈12.4` sur ce vocabulaire).** Ce n'est donc pas un problème d'exposure bias classique ("le modèle dérive de sa propre trajectoire correcte au fil de la génération libre") -- le mode du modèle (l'argmax) n'est JAMAIS correct, même en régime le plus favorable. Le CE bas provient d'une masse de probabilité diffuse qui couvre partiellement le bon token sans jamais le placer en rang 1 -- **problème de calibration** (le modèle "sait" statistiquement mais son mode dominant est ailleurs, probablement un "pari sûr" générique -- cf. les boucles numériques `19720000...` observées en génération libre, potentiellement CE le plus faible en moyenne sur l'ensemble d'entraînement plutôt qu'une réponse spécifique correcte pour un exemple donné), uniforme sur les 4 recettes testées (KD/CE/LoRA/embed-KD) -- confirme et affine le "collapse général indépendant de la recette" trouvé plus haut : ce n'est pas juste indépendant de la recette KD, c'est présent dès le teacher forcing, donc en amont de toute question de génération libre / exposure bias.
+
+**Prochaine étape proposée (pas encore faite)** : identifier si ce "pari sûr" est un token/continuation récurrent à travers les exemples (analogue au `<think>` de contamination déjà trouvé, mais ici un artefact de calibration général et non un bug de données) -- comparer les distributions d'argmax teacher-forcé à travers plusieurs exemples pour voir s'il y a convergence vers peu de tokens dominants.
+
+Fichiers : `learn/indexed_attention/diagnose_generation_divergence.py`, `logs/divergence_{kd,ceonly,lora,embedkd}.json`.
