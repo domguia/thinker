@@ -58,6 +58,7 @@ ReasoningPromptDataset's canonical `answer` vs the generated paraphrase --
 a genuinely different failure mode, unaffected by this fix).
 """
 import json
+import os
 
 import numpy as np
 import torch
@@ -79,6 +80,23 @@ def _tokenize_padded(tokenizer, text: str, max_len: int, pad_id: int):
     ids = tokenizer(text or "", truncation=True, max_length=max_len)["input_ids"]
     n = len(ids)
     out = torch.full((max_len,), pad_id, dtype=torch.long)
+    mask = torch.zeros(max_len, dtype=torch.bool)
+    if n > 0:
+        out[:n] = torch.tensor(ids, dtype=torch.long)
+        mask[:n] = True
+    return out, mask
+
+
+def _char_tokenize_padded(char_vocab, text: str, max_len: int):
+    """Same contract as `_tokenize_padded` (fixed-length ids + validity mask,
+    end-truncated/padded) but against a `core.char_vocab.CharVocab` instead
+    of a subword tokenizer -- used by the optional character-level
+    'answer_chars' stream (2026-09-22). No `tokenizer(...)` call at all:
+    CharVocab.encode is a plain str -> List[int] mapping, so this only needs
+    its own tiny padding wrapper rather than reusing `_tokenize_padded`."""
+    ids = char_vocab.encode(text or "", max_length=max_len)
+    n = len(ids)
+    out = torch.full((max_len,), char_vocab.pad_id, dtype=torch.long)
     mask = torch.zeros(max_len, dtype=torch.bool)
     if n > 0:
         out[:n] = torch.tensor(ids, dtype=torch.long)
@@ -157,6 +175,74 @@ class PromptResponseTeacherTargets:
         return idx, val, res, mask
 
 
+class TeacherTopKStore:
+    """New-format topk/<split>/ directory (2026-09-22 storage-tree redesign:
+    manifest.json + one or more named-subset .npz files per Teacher, see
+    learn/distill/precompute_teacher_targets.py's module docstring) --
+    merges every subset that has data for `teacher_name` into a single
+    doc_id -> (subset, local row) index. `doc_id` is the ORIGINAL row index
+    into <split>.jsonl, same convention as PromptResponseTeacherTargets.
+
+    A doc_id not covered by ANY subset for this teacher has no KD target --
+    same behavior as kd_info=None below (_empty_kd) -- since small
+    diagnostic subsets are expected to cover only a fraction of the pool;
+    only a near-full-pool subset (e.g. topk_n<pool size>) gives dense
+    training-time coverage."""
+
+    def __init__(self, topk_split_dir: str, dataset_root: str, teacher_name: str):
+        with open(os.path.join(topk_split_dir, "manifest.json")) as f:
+            manifest = json.load(f)
+        self.k = None
+        self._doc_to_loc = {}
+        self._parts = []
+        for entry in manifest.values():
+            t_cfg = entry.get("teachers", {}).get(teacher_name)
+            if t_cfg is None:
+                continue
+            doc_ids = np.load(os.path.join(dataset_root, entry["subset_file"]))
+            npz = np.load(os.path.join(topk_split_dir, t_cfg["file"]))
+            part_i = len(self._parts)
+            self._parts.append({"indices": npz["indices"], "values": npz["values"],
+                                 "residual": npz["residual"], "offsets": npz["offsets"]})
+            if self.k is None:
+                self.k = int(t_cfg.get("top_k", npz["k"]))
+            for local_pos, doc_id in enumerate(doc_ids.tolist()):
+                self._doc_to_loc[int(doc_id)] = (part_i, local_pos)
+        if self.k is None:
+            raise ValueError(f"No subset under {topk_split_dir} has teacher {teacher_name!r}")
+
+    def slice_span(self, doc_id: int, tok_start: int, n: int, t_max: int):
+        idx = torch.zeros(t_max, self.k, dtype=torch.long)
+        val = torch.zeros(t_max, self.k, dtype=torch.float32)
+        res = torch.zeros(t_max, dtype=torch.float32)
+        mask = torch.zeros(t_max, dtype=torch.bool)
+        loc = self._doc_to_loc.get(doc_id)
+        if loc is None:
+            return idx, val, res, mask  # not covered by this teacher's subsets -- same as no KD
+        part_i, local_pos = loc
+        p = self._parts[part_i]
+        doc_start, doc_end = int(p["offsets"][local_pos]), int(p["offsets"][local_pos + 1])
+        n_doc = doc_end - doc_start
+        for t in range(min(n, t_max)):
+            q = tok_start + t - 1
+            if 0 <= q < n_doc:
+                idx[t] = torch.from_numpy(p["indices"][doc_start + q].astype(np.int64))
+                val[t] = torch.from_numpy(p["values"][doc_start + q].astype(np.float32))
+                res[t] = float(p["residual"][doc_start + q])
+                mask[t] = True
+        return idx, val, res, mask
+
+
+def _make_teacher_store(path: str, teacher_name: str = None):
+    if os.path.isdir(path) and os.path.exists(os.path.join(path, "manifest.json")):
+        dataset_root = os.path.dirname(os.path.dirname(path.rstrip("/")))  # .../topk/<split> -> dataset_root
+        if teacher_name is None:
+            raise ValueError(f"{path} is a new-format store (has manifest.json) -- --teacher_name is required "
+                              "to pick which Teacher's data to read")
+        return TeacherTopKStore(path, dataset_root, teacher_name)
+    return PromptResponseTeacherTargets(path)  # old format: a single merged .npz
+
+
 def _empty_kd(t_max: int, k: int):
     return (torch.zeros(t_max, k, dtype=torch.long), torch.zeros(t_max, k, dtype=torch.float32),
             torch.zeros(t_max, dtype=torch.float32), torch.zeros(t_max, dtype=torch.bool))
@@ -213,16 +299,60 @@ class PromptResponseReprTargets:
     embed(target_token_{t-1}) to predict token t)."""
 
     def __init__(self, npz_path: str, layer: int, proj_dim: int = 64, seed: int = 0):
-        npz = np.load(npz_path)
         key = f"hidden_{layer}"
-        assert key in npz, f"{npz_path!r} has no {key!r} -- available: {list(npz.keys())}"
-        raw = torch.from_numpy(npz[key].astype(np.float32))
+        # The random projection is FIXED (seeded), so its output is deterministic for a
+        # given (npz_path, layer, proj_dim, seed) -- cache it once. Without this, every
+        # process launch re-reads the whole tens-of-GB teacher hidden-states file over the
+        # network (observed: minutes of pure I/O wait, GPU idle) just to reproduce the SAME
+        # small (proj_dim=64) projected array every time -- a real cost when iterating on
+        # batch_size/hyperparameters, since it's paid again on every relaunch.
+        cache_path = npz_path.rstrip("/") + f".projrepr_L{layer}_d{proj_dim}_s{seed}.npz"
+        if os.path.exists(cache_path):
+            print(f"[repr-KD] loading cached projection from {cache_path}", flush=True)
+            cached = np.load(cache_path)
+            self.projected = cached["projected"]
+            self.offsets = cached["offsets"]
+            self.proj_dim = proj_dim
+            return
+
+        if os.path.isdir(npz_path):
+            # precompute_teacher_targets.py --hidden_layers memmap-directory storage
+            # (hidden_<layer>.npy + offsets.npy) -- these files run tens of GB (retrieval1:
+            # 62-89GB per half), so unlike the .npz branch below, never materialize the whole
+            # raw array at fp32 in RAM (that alone would be ~2x the on-disk fp16 size). Only
+            # mmap it and project in chunks straight into the small (proj_dim=64) output.
+            raw = np.load(os.path.join(npz_path, f"{key}.npy"), mmap_mode="r")
+            offsets = np.load(os.path.join(npz_path, "offsets.npy"))
+        else:
+            npz = np.load(npz_path)
+            assert key in npz, f"{npz_path!r} has no {key!r} -- available: {list(npz.keys())}"
+            raw = npz[key]
+            offsets = npz["offsets"]
         g = torch.Generator().manual_seed(seed)
         P = torch.empty(raw.shape[1], proj_dim, dtype=torch.float32)
         torch.nn.init.orthogonal_(P, generator=g)
-        self.projected = (raw @ P).numpy().astype(np.float16)
-        self.offsets = npz["offsets"]
+        total_tokens = raw.shape[0]
+        chunk = 200_000
+        n_chunks = (total_tokens + chunk - 1) // chunk
+        projected = np.empty((total_tokens, proj_dim), dtype=np.float16)
+        print(f"[repr-KD] projecting {total_tokens} tokens from {npz_path} "
+              f"({n_chunks} chunks of {chunk}) -- no cache found, this is a one-time cost", flush=True)
+        for ci, start in enumerate(range(0, total_tokens, chunk)):
+            end = min(start + chunk, total_tokens)
+            print(f"[repr-KD] chunk {ci + 1}/{n_chunks} ({end}/{total_tokens} tokens)", flush=True)
+            block = torch.from_numpy(np.asarray(raw[start:end], dtype=np.float32))
+            projected[start:end] = (block @ P).numpy().astype(np.float16)
+        self.projected = projected
+        self.offsets = offsets
         self.proj_dim = proj_dim
+        try:
+            tmp_path = cache_path + ".tmp.npz"
+            np.savez(tmp_path, projected=projected, offsets=offsets)
+            os.replace(tmp_path, cache_path)
+            print(f"[repr-KD] cached projection to {cache_path}", flush=True)
+        except OSError as e:
+            print(f"[repr-KD] WARNING: could not write projection cache to {cache_path} ({e}) "
+                  "-- continuing without cache, next launch will re-project", flush=True)
 
     def slice_span(self, doc_id: int, tok_start: int, n: int, t_max: int):
         out = torch.zeros(t_max, self.proj_dim, dtype=torch.float32)
@@ -237,6 +367,93 @@ class PromptResponseReprTargets:
         return out, mask
 
 
+class TeacherReprStore:
+    """New-format embedding/<split>/layer_<L>/ directory equivalent of
+    PromptResponseReprTargets (2026-09-22 storage-tree redesign) -- same
+    fixed random-orthogonal-projection scheme (never fit/trained, cached to
+    disk per underlying file), but merged across every named subset that
+    has data for `teacher_name` in this layer, exactly like
+    TeacherTopKStore. The layer itself is fixed by which layer_<L>/
+    directory is passed in, not a constructor argument -- --repr_teacher_layer
+    is only meaningful for the old single-file format."""
+
+    def __init__(self, layer_dir: str, dataset_root: str, teacher_name: str, proj_dim: int = 64, seed: int = 0):
+        with open(os.path.join(layer_dir, "manifest.json")) as f:
+            manifest = json.load(f)
+        split = os.path.basename(os.path.dirname(layer_dir.rstrip("/")))  # .../embedding/<split>/layer_<L>
+        self.proj_dim = proj_dim
+        self._doc_to_loc = {}
+        self._parts = []
+        P = None
+        for entry in manifest.values():
+            t_cfg = entry.get("teachers", {}).get(teacher_name)
+            if t_cfg is None:
+                continue
+            doc_ids = np.load(os.path.join(dataset_root, "subsets", split, f"{entry['subset']}.indices.npy"))
+            raw_path = os.path.join(layer_dir, t_cfg["file"])
+            off_path = raw_path[:-4] + ".offsets.npy"
+            cache_path = raw_path + f".projrepr_d{proj_dim}_s{seed}.npz"
+            if os.path.exists(cache_path):
+                cached = np.load(cache_path)
+                projected, offsets = cached["projected"], cached["offsets"]
+            else:
+                raw = np.load(raw_path, mmap_mode="r")  # never materialize the whole raw fp16 array, see
+                offsets = np.load(off_path)              # PromptResponseReprTargets' identical OOM note
+                if P is None:
+                    g = torch.Generator().manual_seed(seed)
+                    P = torch.empty(raw.shape[1], proj_dim, dtype=torch.float32)
+                    torch.nn.init.orthogonal_(P, generator=g)
+                total_tokens = raw.shape[0]
+                chunk = 200_000
+                projected = np.empty((total_tokens, proj_dim), dtype=np.float16)
+                print(f"[repr-KD] projecting {total_tokens} tokens from {raw_path} -- no cache found, one-time cost", flush=True)
+                for start in range(0, total_tokens, chunk):
+                    end = min(start + chunk, total_tokens)
+                    block = torch.from_numpy(np.asarray(raw[start:end], dtype=np.float32))
+                    projected[start:end] = (block @ P).numpy().astype(np.float16)
+                try:
+                    tmp = cache_path + ".tmp.npz"
+                    np.savez(tmp, projected=projected, offsets=offsets)
+                    os.replace(tmp, cache_path)
+                    print(f"[repr-KD] cached projection to {cache_path}", flush=True)
+                except OSError as e:
+                    print(f"[repr-KD] WARNING: could not write projection cache to {cache_path} ({e}) "
+                          "-- continuing without cache, next launch will re-project", flush=True)
+            part_i = len(self._parts)
+            self._parts.append({"projected": projected, "offsets": offsets})
+            for local_pos, doc_id in enumerate(doc_ids.tolist()):
+                self._doc_to_loc[int(doc_id)] = (part_i, local_pos)
+        if not self._parts:
+            raise ValueError(f"No subset under {layer_dir} has teacher {teacher_name!r}")
+
+    def slice_span(self, doc_id: int, tok_start: int, n: int, t_max: int):
+        out = torch.zeros(t_max, self.proj_dim, dtype=torch.float32)
+        mask = torch.zeros(t_max, dtype=torch.bool)
+        loc = self._doc_to_loc.get(doc_id)
+        if loc is None:
+            return out, mask  # not covered by this teacher's subsets in this layer -- same as no repr target
+        part_i, local_pos = loc
+        p = self._parts[part_i]
+        doc_start, doc_end = int(p["offsets"][local_pos]), int(p["offsets"][local_pos + 1])
+        n_doc = doc_end - doc_start
+        for t in range(min(n, t_max)):
+            q = tok_start + t - 1
+            if 0 <= q < n_doc:
+                out[t] = torch.from_numpy(p["projected"][doc_start + q].astype(np.float32))
+                mask[t] = True
+        return out, mask
+
+
+def _make_repr_store(path: str, layer: int, teacher_name: str, proj_dim: int, seed: int):
+    if os.path.isdir(path) and os.path.exists(os.path.join(path, "manifest.json")):
+        dataset_root = os.path.dirname(os.path.dirname(os.path.dirname(path.rstrip("/"))))  # embedding/<split>/layer_<L> -> root
+        if teacher_name is None:
+            raise ValueError(f"{path} is a new-format store (has manifest.json) -- --teacher_name is required "
+                              "to pick which Teacher's data to read")
+        return TeacherReprStore(path, dataset_root, teacher_name, proj_dim, seed)
+    return PromptResponseReprTargets(path, layer, proj_dim, seed)  # old format: single file/memmap-dir, explicit layer
+
+
 def _repr_targets(repr_teacher, kd_info, doc_id, t_max):
     if repr_teacher is None:
         return None
@@ -248,14 +465,26 @@ def _repr_targets(repr_teacher, kd_info, doc_id, t_max):
 
 class ReasoningPromptDataset(Dataset):
     def __init__(self, path, tokenizer, n_ctx: int, max_thinking_len: int, max_answer_len: int, pad_id: int = None,
-                 teacher_targets: str = None, teacher_max_length: int = 4096,
-                 repr_teacher_hidden: str = None, repr_teacher_layer: int = None, repr_proj_dim: int = 64, repr_seed: int = 0):
+                 teacher_targets: str = None, teacher_max_length: int = 4096, teacher_name: str = None,
+                 repr_teacher_hidden: str = None, repr_teacher_layer: int = None, repr_proj_dim: int = 64, repr_seed: int = 0,
+                 char_vocab=None, max_answer_char_len: int = None):
         self.tokenizer = tokenizer
         self.n_ctx = n_ctx
         self.max_thinking_len = max_thinking_len
         self.max_answer_len = max_answer_len
         self.pad_id = pad_id if pad_id is not None else (tokenizer.pad_token_id or 0)
-        self.teacher = PromptResponseTeacherTargets(teacher_targets) if teacher_targets else None
+        # 2026-09-22, optional 'answer_chars' output stream (core/char_vocab.py):
+        # char_vocab is a core.char_vocab.CharVocab instance, independent of
+        # `tokenizer` -- the raw `ex["answer"]` string is encoded directly,
+        # no span-location/alignment needed (unlike the KD path above, this
+        # target isn't trying to line up with the Teacher's own tokenization
+        # of `text`, it's built fresh from the dataset's own canonical answer
+        # string). None (default) leaves every existing example untouched.
+        self.char_vocab = char_vocab
+        self.max_answer_char_len = max_answer_char_len
+        # teacher_name only matters for the new manifest-based store format (see
+        # _make_teacher_store/_make_repr_store) -- ignored for an old single-.npz path.
+        self.teacher = _make_teacher_store(teacher_targets, teacher_name) if teacher_targets else None
         if self.teacher is not None:
             assert tokenizer.is_fast, "--teacher_targets needs a fast tokenizer (return_offsets_mapping support)"
         self.teacher_max_length = teacher_max_length
@@ -263,7 +492,7 @@ class ReasoningPromptDataset(Dataset):
             "--repr_teacher_hidden requires --teacher_targets to also be set (reuses its span alignment)"
         )
         self.repr_teacher = (
-            PromptResponseReprTargets(repr_teacher_hidden, repr_teacher_layer, repr_proj_dim, repr_seed)
+            _make_repr_store(repr_teacher_hidden, repr_teacher_layer, teacher_name, repr_proj_dim, repr_seed)
             if repr_teacher_hidden else None
         )
         self.examples = []
@@ -345,6 +574,10 @@ class ReasoningPromptDataset(Dataset):
                 "thinking_repr_target": think_repr_target, "thinking_repr_mask": think_repr_mask,
                 "answer_repr_target": ans_repr_target, "answer_repr_mask": ans_repr_mask,
             })
+        if self.char_vocab is not None:
+            char_ids, char_mask = _char_tokenize_padded(self.char_vocab, ex["answer"], self.max_answer_char_len)
+            char_input, char_labels = _teacher_forced_target(char_ids, char_mask, self.char_vocab.pad_id)
+            out.update({"answer_chars_target_input": char_input, "answer_chars_labels": char_labels})
         return out
 
 
@@ -383,14 +616,20 @@ class RetrievalPromptDataset(Dataset):
     """
 
     def __init__(self, path, tokenizer, block_size: int, n_docs_max: int, max_answer_len: int, pad_id: int = None,
-                 teacher_targets: str = None, teacher_max_length: int = 4096,
-                 repr_teacher_hidden: str = None, repr_teacher_layer: int = None, repr_proj_dim: int = 64, repr_seed: int = 0):
+                 teacher_targets: str = None, teacher_max_length: int = 4096, teacher_name: str = None,
+                 repr_teacher_hidden: str = None, repr_teacher_layer: int = None, repr_proj_dim: int = 64, repr_seed: int = 0,
+                 char_vocab=None, max_answer_char_len: int = None):
         self.tokenizer = tokenizer
         self.block_size = block_size
         self.n_docs_max = n_docs_max
         self.max_answer_len = max_answer_len
         self.pad_id = pad_id if pad_id is not None else (tokenizer.pad_token_id or 0)
-        self.teacher = PromptResponseTeacherTargets(teacher_targets) if teacher_targets else None
+        # see ReasoningPromptDataset's identical fields for the rationale.
+        self.char_vocab = char_vocab
+        self.max_answer_char_len = max_answer_char_len
+        # teacher_name only matters for the new manifest-based store format (see
+        # _make_teacher_store/_make_repr_store) -- ignored for an old single-.npz path.
+        self.teacher = _make_teacher_store(teacher_targets, teacher_name) if teacher_targets else None
         if self.teacher is not None:
             assert tokenizer.is_fast, "--teacher_targets needs a fast tokenizer (return_offsets_mapping support)"
         self.teacher_max_length = teacher_max_length
@@ -400,7 +639,7 @@ class RetrievalPromptDataset(Dataset):
             "--repr_teacher_hidden requires --teacher_targets to also be set (reuses its span alignment)"
         )
         self.repr_teacher = (
-            PromptResponseReprTargets(repr_teacher_hidden, repr_teacher_layer, repr_proj_dim, repr_seed)
+            _make_repr_store(repr_teacher_hidden, repr_teacher_layer, teacher_name, repr_proj_dim, repr_seed)
             if repr_teacher_hidden else None
         )
         self.examples = []
@@ -499,4 +738,8 @@ class RetrievalPromptDataset(Dataset):
         if ans_repr is not None:
             ans_repr_target, ans_repr_mask = ans_repr
             out.update({"answer_repr_target": ans_repr_target, "answer_repr_mask": ans_repr_mask})
+        if self.char_vocab is not None:
+            char_ids, char_mask = _char_tokenize_padded(self.char_vocab, ex["answer"], self.max_answer_char_len)
+            char_input, char_labels = _teacher_forced_target(char_ids, char_mask, self.char_vocab.pad_id)
+            out.update({"answer_chars_target_input": char_input, "answer_chars_labels": char_labels})
         return out

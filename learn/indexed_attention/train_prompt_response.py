@@ -54,16 +54,18 @@ from learn.distill.chunked_loss import chunked_ce_kd_loss
 from learn.distill.train_sft import embedding_kd_loss, repr_cosine_loss, topk_kd_loss
 
 
-def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets: str = None, repr_teacher_hidden: str = None):
+def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets: str = None, repr_teacher_hidden: str = None,
+                   char_vocab=None):
     repr_kwargs = dict(repr_teacher_hidden=repr_teacher_hidden, repr_teacher_layer=args.repr_teacher_layer,
                         repr_proj_dim=args.repr_proj_dim, repr_seed=args.seed)
+    char_kwargs = dict(char_vocab=char_vocab, max_answer_char_len=args.max_answer_char_len) if char_vocab else {}
     if dataset_type == "reasoning":
         return ReasoningPromptDataset(path, tokenizer, n_ctx=args.n_ctx,
                                        max_thinking_len=args.max_thinking_len,
                                        max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id,
                                        teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length,
                                        teacher_name=args.teacher_name,
-                                       **repr_kwargs)
+                                       **repr_kwargs, **char_kwargs)
     if dataset_type == "retrieval":
         # block_size/n_docs_max, NOT n_ctx/t_local (2026-09-20 redesign, user
         # decision: treat HotpotQA's multiple documents as distinct indexable
@@ -76,7 +78,7 @@ def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets
                                        max_answer_len=args.max_answer_len, pad_id=tokenizer.pad_token_id,
                                        teacher_targets=teacher_targets, teacher_max_length=args.teacher_max_length,
                                        teacher_name=args.teacher_name,
-                                       **repr_kwargs)
+                                       **repr_kwargs, **char_kwargs)
     raise ValueError(f"unknown --dataset_type {dataset_type!r} (expected 'reasoning' or 'retrieval' -- "
                       f"'general' stays on train_real_text.py's sliding-window pipeline, not this script)")
 
@@ -188,9 +190,11 @@ def query_tokens_for(dataset_type: str, batch, block_size: int):
 def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: int, n_batches: int = None,
              teacher_enabled: bool = False, ingest_kb: bool = False, n_docs_max: int = 0,
              ingest_n_step: int = 3, ingest_checkpoint: bool = False, ingest_step_size: int = None,
-             ingest_n_step_min: int = 1, ingest_n_step_max: int = None):
+             ingest_n_step_min: int = 1, ingest_n_step_max: int = None, char_answer_stream: bool = False):
     model.eval()
     keys = ["answer", "thinking"] if dataset_type == "reasoning" else ["answer"]
+    if char_answer_stream:
+        keys = keys + ["answer_chars"]
     losses = {k: [] for k in keys}
     if teacher_enabled:
         losses.update({f"kd_{k}": [] for k in keys})
@@ -209,6 +213,8 @@ def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: 
         target_input = {"answer": batch["answer_target_input"]}
         if dataset_type == "reasoning":
             target_input["thinking"] = batch["thinking_target_input"]
+        if "answer_chars_target_input" in batch:
+            target_input["answer_chars"] = batch["answer_chars_target_input"]
         if ingest_kb:
             ingest_documents(model, batch, n_docs_max, block_size, ingest_n_step,
                               use_checkpoint=ingest_checkpoint, step_size=ingest_step_size,
@@ -235,6 +241,10 @@ def evaluate(model, loader, device, dataset_type: str, n_step: int, block_size: 
         if dataset_type == "reasoning":
             ce_thinking = F.cross_entropy(streams["thinking"].transpose(1, 2), batch["thinking_labels"], ignore_index=-100)
             losses["thinking"].append(ce_thinking.item())
+        if char_answer_stream:
+            ce_chars = F.cross_entropy(streams["answer_chars"].transpose(1, 2), batch["answer_chars_labels"],
+                                        ignore_index=-100)
+            losses["answer_chars"].append(ce_chars.item())
         if teacher_enabled:
             kd_answer, kd_thinking = kd_losses(streams, batch, dataset_type)
             losses["kd_answer"].append(kd_answer.item())
@@ -262,6 +272,29 @@ def main() -> None:
                         "block -- HotpotQA distractor config has ~10 (2 supporting + up to 8 distractors)")
     p.add_argument("--max_thinking_len", type=int, default=1024, help="reasoning only")
     p.add_argument("--max_answer_len", type=int, default=64)
+    p.add_argument("--char_answer_stream", action="store_true",
+                   help="adds a SECOND, independent output stream 'answer_chars' (core/char_vocab.py) "
+                        "reading out the SAME answer text at CHARACTER granularity through its own small "
+                        "fixed alphabet head, alongside the existing subword 'answer' stream (both are "
+                        "trained together, neither replaces the other) -- 2026-09-22 diagnostic: at this "
+                        "model's tiny d_model, the subword head is the single biggest parameter block by "
+                        "far (core/indexed_thinker_model.py's own docstring, spec §13), which makes it hard "
+                        "to tell whether the answer-stream CE improves because the core loop learned the "
+                        "answer's content or because the big softmax head fits vocabulary surface "
+                        "statistics. A tiny character head removes almost all of that capacity and its "
+                        "decoded string can be read directly. CE-only, no KD (see core/char_vocab.py's "
+                        "docstring for why -- explicit, stated deviation from this project's KD-by-default "
+                        "policy, not a silent one): the Teacher has no character-level output to distill "
+                        "from at all.")
+    p.add_argument("--max_answer_char_len", type=int, default=256,
+                   help="--char_answer_stream only: max characters kept per answer (truncated from the "
+                        "end like every other span in this dataset). Independent of --max_answer_len (the "
+                        "subword span length) -- answers typically run several characters per subword "
+                        "token, so this should usually be a multiple of it, not the same value.")
+    p.add_argument("--char_answer_weight", type=float, default=1.0,
+                   help="loss = ... + char_answer_weight * ce_answer_chars, added UNWEIGHTED-summed on top "
+                        "of the existing (CE/KD-mixed) loss, same convention as --embed_kd_weight/"
+                        "--repr_kd_weight -- not part of the --kd_alpha mix since this stream is never KD.")
     p.add_argument("--depth", type=int, default=0,
                    help="reasoning: 0 (flat, single prompt block, no multi-document structure to index). "
                         "retrieval: MUST be 1 -- see RetrievalPromptDataset, one summary node per document.")
@@ -276,6 +309,20 @@ def main() -> None:
     p.add_argument("--n_step", type=int, default=6)
     p.add_argument("--pool_n_head", type=int, default=1)
     p.add_argument("--k_dim", type=int, default=None)
+    p.add_argument("--answer_head_init", default=None,
+                    help="extract_teacher_embed_init.py .npz output (head_init key) -- copies the "
+                         "'answer' stream's output head (nn.Linear(d_model, vocab)) from the Teacher's own "
+                         "lm_head (projected to d_model) instead of a random nn.Linear init. Combine with "
+                         "--freeze_answer_head to test whether Thinker's gains come from the recurrent "
+                         "mechanism (embed + memory + register update) rather than the head -- embed and "
+                         "head are each ~63M params on a 248k-vocab tokenizer, versus ~1-2M for the rest of "
+                         "the model at d_model=256, so the head alone could otherwise memorize a lot without "
+                         "the core loop doing anything.")
+    p.add_argument("--freeze_answer_head", action="store_true",
+                    help="freeze the 'answer' stream's output head after --answer_head_init (or after its "
+                         "random init if --answer_head_init is unset, though that combination is unlikely "
+                         "to work well -- a random, never-adapted projection has no reason to be decodable). "
+                         "--embed stays trainable regardless -- this only isolates the head specifically.")
     p.add_argument("--level_dropout_p", type=float, default=0.0,
                     help="HierarchicalMemory's stochastic level dropout (train-time only, core/"
                          "indexed_memory.py's attend()) -- randomly drops whole compressed hierarchy "
@@ -460,8 +507,16 @@ def main() -> None:
         tok.pad_token = tok.eos_token
     vocab_size = len(tok)
 
+    char_vocab = None
+    if args.char_answer_stream:
+        from core.char_vocab import CharVocab
+        char_vocab = CharVocab()
+        print(f"--char_answer_stream enabled: alphabet size={char_vocab.vocab_size}, "
+              f"max_answer_char_len={args.max_answer_char_len}, weight={args.char_answer_weight}, CE-only (no KD)",
+              flush=True)
+
     train_ds = build_dataset(args.dataset_type, args.data, tok, args, teacher_targets=args.teacher_targets,
-                              repr_teacher_hidden=args.repr_teacher_hidden)
+                              repr_teacher_hidden=args.repr_teacher_hidden, char_vocab=char_vocab)
     print(f"loaded {len(train_ds)} {args.dataset_type} examples from {args.data}", flush=True)
     if train_ds.teacher is not None:
         print(f"loaded Teacher targets from {args.teacher_targets}: K={train_ds.teacher.k} -- "
@@ -476,7 +531,7 @@ def main() -> None:
     val_loader = None
     if args.val_data:
         val_ds = build_dataset(args.dataset_type, args.val_data, tok, args, teacher_targets=args.val_teacher_targets,
-                                repr_teacher_hidden=args.val_repr_teacher_hidden)
+                                repr_teacher_hidden=args.val_repr_teacher_hidden, char_vocab=char_vocab)
         print(f"loaded held-out val: {len(val_ds)} examples from {args.val_data}", flush=True)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                                  num_workers=args.num_workers, pin_memory=pin_memory)
@@ -492,6 +547,20 @@ def main() -> None:
         stream_n_layers = {"answer": args.answer_n_layers}
         max_target_len = args.max_answer_len
 
+    stream_vocab_sizes = {}
+    if char_vocab is not None:
+        # spec §11ter's per-stream vocabulary mechanism (originally built for cross-Teacher-family
+        # KD) reused here for a same-Teacher, DIFFERENT-granularity stream: 'answer_chars' gets its
+        # own embedding table (stream_vocab_sizes) and head (stream_dims), sized to the tiny
+        # character alphabet instead of vocab_size -- everything else (OutputStream's cross-attention
+        # over the shared SM trajectory) is exactly the existing multi-stream mechanism, no model
+        # code changes needed for this experiment.
+        stream_dims["answer_chars"] = char_vocab.vocab_size
+        stream_vocab_sizes["answer_chars"] = char_vocab.vocab_size
+        stream_sequence["answer_chars"] = True
+        stream_n_layers["answer_chars"] = args.answer_n_layers
+        max_target_len = max(max_target_len, args.max_answer_char_len)
+
     model = Thinker(
         vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
@@ -499,11 +568,22 @@ def main() -> None:
         level_dropout_p=args.level_dropout_p,
         use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims=stream_dims, stream_sequence=stream_sequence, max_target_len=max_target_len,
+        stream_vocab_sizes=stream_vocab_sizes,
         stream_n_layers=stream_n_layers, use_ingest_token=args.ingest_kb,
+        stream_head_init=({"answer": _load_answer_head_init(args.answer_head_init, vocab_size)}
+                           if args.answer_head_init else None),
     ).to(device)
+    if args.freeze_answer_head:
+        head = model.streams["answer"].head
+        head.weight.requires_grad = False
+        if head.bias is not None:
+            head.bias.requires_grad = False
+        print(f"'answer' stream head frozen ({'Teacher-init' if args.answer_head_init else 'random-init'})",
+              flush=True)
     n_params = sum(t.numel() for t in model.parameters())
+    n_trainable = sum(t.numel() for t in model.parameters() if t.requires_grad)
     print(f"dataset_type={args.dataset_type} d_model={args.d_model} n_step={args.n_step} "
-          f"params={n_params/1e6:.2f}M device={device}", flush=True)
+          f"params={n_params/1e6:.2f}M (trainable={n_trainable/1e6:.2f}M) device={device}", flush=True)
 
     raw_model = model  # unwrapped module -- state_dict() below always saves/loads THIS, so checkpoints stay
                         # compatible with eval_val_loss.py/etc. regardless of --compile (an OptimizedModule's
@@ -585,6 +665,8 @@ def main() -> None:
             target_input = {"answer": batch["answer_target_input"]}
             if args.dataset_type == "reasoning":
                 target_input["thinking"] = batch["thinking_target_input"]
+            if args.char_answer_stream:
+                target_input["answer_chars"] = batch["answer_chars_target_input"]
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16 and device.type == "cuda"):
                 # want_hidden: either repr-KD needs the pre-head state directly, or chunked CE/KD
@@ -605,13 +687,13 @@ def main() -> None:
                 hidden_streams = streams if want_hidden else None
 
                 if args.loss_chunk_size > 0:
-                    def stream_ce_kd(name, labels_key):
+                    def stream_ce_kd(name, labels_key, force_ce_only=False):
                         hidden = streams[name]
                         flat_hidden = hidden.reshape(-1, hidden.size(-1))
                         flat_labels = batch[labels_key].reshape(-1)
                         head = raw_model.streams[name].head
                         kd_kwargs = {}
-                        if train_ds.teacher is not None:
+                        if train_ds.teacher is not None and not force_ce_only:
                             k = train_ds.teacher.k
                             kd_kwargs = dict(
                                 teacher_indices=batch[f"{name}_kd_indices"].reshape(-1, k),
@@ -633,6 +715,13 @@ def main() -> None:
                         loss = (1 - args.kd_alpha) * ce_loss + args.kd_alpha * kd_loss
                     else:
                         loss = ce_loss
+
+                    ce_answer_chars = None
+                    if args.char_answer_stream:
+                        # force_ce_only=True: this stream is CE-only regardless of --teacher_targets
+                        # (no answer_chars_kd_* tensors exist -- see core/char_vocab.py's docstring for why).
+                        ce_answer_chars, _ = stream_ce_kd("answer_chars", "answer_chars_labels", force_ce_only=True)
+                        loss = loss + args.char_answer_weight * ce_answer_chars
                 else:
                     logit_streams = (
                         {name: raw_model.streams[name].head(h) for name, h in streams.items()}
@@ -653,6 +742,12 @@ def main() -> None:
                     else:
                         kd_answer = kd_thinking = None
                         loss = ce_loss
+
+                    ce_answer_chars = None
+                    if args.char_answer_stream:
+                        ce_answer_chars = F.cross_entropy(logit_streams["answer_chars"].transpose(1, 2),
+                                                           batch["answer_chars_labels"], ignore_index=-100)
+                        loss = loss + args.char_answer_weight * ce_answer_chars
 
                 embed_kd_value = None
                 if embed_teacher_target is not None:
@@ -695,6 +790,8 @@ def main() -> None:
                     extra2 += f" embed_kd={embed_kd_value.item():.4f}"
                 if repr_kd_value is not None:
                     extra2 += f" repr_kd={repr_kd_value.item():.4f}(w={repr_kd_ramp * args.repr_kd_weight:.4f})"
+                if ce_answer_chars is not None:
+                    extra2 += f" ce_answer_chars={ce_answer_chars.item():.4f}"
                 print(f"step={step:6d} elapsed={elapsed/60:.2f}m loss={mean_loss:.4f} "
                       f"ce_answer={ce_answer.item():.4f}{extra}{kd_extra}{extra2} lr={lr_at(step):.2e}", flush=True)
                 log_kwargs = {"kd_answer": kd_answer.item()} if kd_answer is not None else {}
@@ -704,6 +801,8 @@ def main() -> None:
                     log_kwargs["embed_kd"] = embed_kd_value.item()
                 if repr_kd_value is not None:
                     log_kwargs["repr_kd"] = repr_kd_value.item()
+                if ce_answer_chars is not None:
+                    log_kwargs["ce_answer_chars"] = ce_answer_chars.item()
                 logger.progress(step, loss=mean_loss, ce_answer=ce_answer.item(), lr=lr_at(step), **log_kwargs)
             if val_loader is not None and (step % args.val_every == 0 or step == 1):
                 val_losses = evaluate(model, val_loader, device, args.dataset_type, args.n_step,
@@ -713,7 +812,8 @@ def main() -> None:
                                        ingest_n_step=args.ingest_n_step, ingest_checkpoint=args.ingest_checkpoint,
                                        ingest_step_size=args.ingest_step_size,
                                        ingest_n_step_min=args.ingest_n_step_min,
-                                       ingest_n_step_max=args.ingest_n_step_max)
+                                       ingest_n_step_max=args.ingest_n_step_max,
+                                       char_answer_stream=args.char_answer_stream)
                 print(f"step={step:6d} VAL {val_losses}", flush=True)
                 logger.progress(step, **{f"val_{k}": v for k, v in val_losses.items()})
                 cur_val = val_losses["answer"]
@@ -747,7 +847,8 @@ def main() -> None:
         print("--- extrapolation probe (n_step_test vs training n_step), held-out ---", flush=True)
         for n_step_test in [int(x) for x in args.extrapolate_n_steps.split(",")]:
             r = evaluate(model, val_loader, device, args.dataset_type, n_step_test, args.block_size,
-                         n_batches=args.val_batches, teacher_enabled=val_ds.teacher is not None)
+                         n_batches=args.val_batches, teacher_enabled=val_ds.teacher is not None,
+                         char_answer_stream=args.char_answer_stream)
             extrapolation_results[n_step_test] = r
             marker = " <- training n_step" if n_step_test == args.n_step else ""
             print(f"  n_step_test={n_step_test:3d} {r}{marker}", flush=True)
