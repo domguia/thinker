@@ -48,20 +48,52 @@ covered explicitly by `_MATH_SYMBOLS` instead.
 
 **Coverage check performed 2026-09-22** (djm's concern: is 130-ish
 characters actually enough, or will real answers silently degrade to
-<unk>?): scanned every `answer` field in the only real data available
-locally at the time -- a 60-example real HotpotQA sample (/tmp/hotpot_
-real_sample, /tmp/hotpot_real_labeled.jsonl) and this project's own
-data/distill/synthetic_composition/{train,val}.jsonl (French) -- 1120
-answers, 9618 characters total, **zero** OOV. No real OpenR1-Math-220k
-data was available locally to scan the same way (the actual training data
-lives on Grid'5000, see dev_notes/grid5000_usage.log.md) -- re-run
-`CharVocab.scan_coverage()` (below) against the real reasoning jsonl
-before trusting this alphabet for a reasoning run, not just an assumption.
-Simulating typical math-answer strings by hand DID surface a real gap
-(closed by adding `_MATH_SYMBOLS` here): unicode math symbols like "√2",
-"π", "≤"/"≥", "±", "×"/"÷", "∞", "∑", "°" were all OOV before this fix --
-LaTeX-style ascii answers ("\\frac{1}{2}", "\\boxed{7}", "x^2") were
-already fine (every character involved is plain ASCII, already covered).
+<unk>?): first pass scanned every `answer` field in the only real data
+available locally at the time -- a 60-example real HotpotQA sample and
+this project's own data/distill/synthetic_composition/{train,val}.jsonl
+(French) -- 1120 answers, 9618 characters, zero OOV. That undersold the
+real risk: **run against the ACTUAL Grid'5000 training data**
+(data/distill/openr1_math(_full)/train.jsonl, data/distill/hotpotqa(_full)/
+train.jsonl, via `oarsh` on a running job, no dedicated reservation needed
+-- see dev_notes/grid5000_usage.log.md 2026-09-22) found real, non-zero
+OOV: 0.01% of characters on openr1_math_full (314835 chars, 65 OOV -- top
+offenders: a literal "\n" inside some multi-line answers, which the
+printable-ASCII-only range silently dropped -- a real bug, now fixed by
+adding "\n" below -- plus scattered Czech/Chinese/currency characters from
+a few non-English/symbolic answers), and 0.12% on hotpotqa_full (1110656
+chars, 1328 OOV -- mostly Latin-diacritic proper nouns: en/em dashes,
+curly quotes, and letters like š/č/á/í/ū/ř from foreign place/person
+names, plus rare Cyrillic/CJK fragments). Simulating typical math-answer
+strings by hand ALSO surfaced a gap (closed by adding `_MATH_SYMBOLS`):
+unicode math symbols like "√2", "π", "≤"/"≥", "±", "×"/"÷", "∞", "∑", "°"
+were all OOV before that fix -- LaTeX-style ascii answers ("\\frac{1}{2}",
+"\\boxed{7}", "x^2") were already fine (every character involved is plain
+ASCII).
+
+Response to the real-data findings (2026-09-22), in order of what actually
+moves the needle: (1) added "\n" and common typographic punctuation
+(en/em dash, curly quotes) to the alphabet outright -- cheap, and "\n" in
+particular is a genuine content character here, not decoration, so
+dropping it silently would be a real information loss, not a rounding
+error. (2) added a DIACRITIC-STRIPPING FALLBACK in `_normalize_char`
+(NFD-decompose, drop combining marks, retry) for anything still unknown
+after that -- turns š->s, č->c, á->a, ī->i, etc. into their plain-ASCII
+base letter instead of <unk>, at zero extra vocab cost, since these are
+overwhelmingly proper-noun transliterations where the base letter still
+carries real information. Deliberately NOT extended to cover the residual
+long tail (Cyrillic и/о/е, CJK 当/或/丙, Arabic ا/ل, atomic
+non-decomposable Latin letters like ø/ł/ı/æ/ð) -- those are genuine
+different-script or non-diacritic characters, not just "one more accent to
+add", and the alphabet's whole point is staying small; they degrade to
+<unk> by design. Re-ran the same scan after this fix to confirm it
+actually helped rather than assuming: openr1_math_full's OOV dropped from
+65 to 22 chars (314835 total -- 0.007%, the "\n" cases and most Latin
+diacritics gone, only CJK/currency-symbol answers left), hotpotqa_full's
+from 1328 to 363 (1110656 total -- 0.033%, only genuine
+different-script/atomic-letter cases left, exactly the documented
+boundary above). Re-run `CharVocab.scan_coverage()` again after any
+further extension of either dataset to confirm the OOV rate stays this
+low.
 
 No sliding-window / local+global attention split yet, even though answer
 strings can run 4-8x longer in characters than in subword tokens (spec
@@ -88,6 +120,16 @@ _EXTRA_LATIN = list("àâäéèêëïîôöùûüçñ ÀÂÄÉÈÊËÏÎÔÖÙÛ
 # fold into something else (they're distinct symbols, not compatibility
 # variants of an ASCII character).
 _MATH_SYMBOLS = list("√±≈≠≤≥×÷∞∑∏∫°πθφΔΣμαβγλ")
+# 2026-09-22, found by scanning the REAL Grid'5000 training data (see this
+# module's docstring): "\n" is a genuine content character (some OpenR1-Math
+# answers span multiple lines) that _PRINTABLE_ASCII's range(32,127) excludes
+# outright -- dropping it would silently corrupt those answers, unlike the
+# diacritic long tail below which degrades gracefully via the NFD fallback.
+# The dashes/quotes are common enough in HotpotQA proper-noun/prose answers
+# (en-dash alone: 300 occurrences across the two hotpotqa files) to be worth
+# their own slots rather than falling back to <unk> or a stripped ASCII "-"/"'"
+# that would lose the distinction.
+_PUNCTUATION = ["\n", "–", "—", "‘", "’", "“", "”"]  # \n, en/em dash, ‘’“”
 SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>"]
 
 
@@ -102,7 +144,9 @@ class CharVocab:
         # dict.fromkeys instead of a plain list+set to dedupe _EXTRA_LATIN
         # against _PRINTABLE_ASCII (the stray space above) while preserving
         # order and stable ids.
-        self.itos = list(dict.fromkeys(SPECIAL_TOKENS + _PRINTABLE_ASCII + _EXTRA_LATIN + _MATH_SYMBOLS))
+        self.itos = list(dict.fromkeys(
+            SPECIAL_TOKENS + _PRINTABLE_ASCII + _EXTRA_LATIN + _MATH_SYMBOLS + _PUNCTUATION
+        ))
         self.stoi = {ch: i for i, ch in enumerate(self.itos)}
         self.pad_id = self.stoi["<pad>"]
         self.bos_id = self.stoi["<bos>"]
@@ -113,6 +157,22 @@ class CharVocab:
     def vocab_size(self) -> int:
         return len(self.itos)
 
+    def _normalize_char(self, ch: str) -> str:
+        """A single already-NFKC-normalized char, mapped to whatever this
+        alphabet actually has a slot for: itself if covered, else its
+        diacritic-stripped base letter (NFD-decompose, drop combining marks,
+        e.g. "š"->"s", "ī"->"i") if THAT is covered, else left as-is for the
+        caller to map to <unk>. 2026-09-22, added after scanning real
+        hotpotqa_full/openr1_math_full data found this exact long tail (see
+        module docstring) -- covers foreign-name transliterations at zero
+        extra vocab cost; deliberately does not attempt anything for a
+        different script entirely (Cyrillic, CJK) or an atomic
+        non-decomposable Latin letter (ø, ł, ı, æ) -- those stay <unk>."""
+        if ch in self.stoi:
+            return ch
+        stripped = "".join(c for c in unicodedata.normalize("NFD", ch) if not unicodedata.combining(c))
+        return stripped if stripped in self.stoi else ch
+
     def encode(self, text: str, max_length: int = None, add_eos: bool = True) -> list:
         """No BOS prepended here (mirrors this project's subword convention,
         see _teacher_forced_target's own leading-pad shift) -- <eos> marks
@@ -120,7 +180,7 @@ class CharVocab:
         generating, the same role </s>/eos_token_id plays for the subword
         'answer' stream."""
         text = unicodedata.normalize("NFKC", text)
-        ids = [self.stoi.get(ch, self.unk_id) for ch in text]
+        ids = [self.stoi.get(self._normalize_char(ch), self.unk_id) for ch in text]
         if add_eos:
             ids = ids + [self.eos_id]
         if max_length is not None:
@@ -131,19 +191,20 @@ class CharVocab:
         """Diagnostic helper (not used at training time): counts, over
         `texts` (an iterable of raw strings, e.g. every `answer` field of a
         real dataset jsonl), how many characters fall outside this alphabet
-        after NFKC normalization -- run this against the REAL reasoning/
+        AFTER the same NFKC + diacritic-stripping pipeline `encode()` itself
+        applies -- i.e. what actually reaches <unk> during real encoding,
+        not a raw pre-fallback count. Run this against the REAL reasoning/
         retrieval data before trusting this alphabet on it (see this
         module's docstring for what was actually checked so far, and
         against what data). Returns {"n_chars": int, "n_oov": int,
         "oov_counts": Counter}."""
         import collections
-        covered = set(self.itos)
         oov_counts = collections.Counter()
         n_chars = 0
         for text in texts:
             for ch in unicodedata.normalize("NFKC", text or ""):
                 n_chars += 1
-                if ch not in covered:
+                if self._normalize_char(ch) not in self.stoi:
                     oov_counts[ch] += 1
         return {"n_chars": n_chars, "n_oov": sum(oov_counts.values()), "oov_counts": oov_counts}
 
