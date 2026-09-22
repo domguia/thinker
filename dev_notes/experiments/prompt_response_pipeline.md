@@ -700,3 +700,59 @@ Vérification (aucun GPU nécessaire, top-K Teacher déjà précomputé) : sur 2
 **Couverture KD train limitée** : le lot top-K train (`topk_n1714`) ne couvre que ~5% des 34279 exemples (`thinkfix_n1500` sera dans la même situation pour retrieval, 1500/80999 ~1.9%) -- `kd_answer`/`kd_thinking` train sont à 0.0 la plupart des pas par échantillonnage (attendu, PAS un bug -- confirmé par `val_kd_answer`/`val_kd_thinking` non nuls, val ayant une couverture complète). Ce run donne un signal partiel sur l'effet KD côté train, mais teste correctement le n_step-variable et sert de diagnostic rapide -- pas un résultat flagship tant que le top-K train n'est pas sur (une fraction significative de) le pool complet.
 
 **GPU** : A40 46GB, `abacus22-2` (Rennes), job `4127787` -- réservation `besteffort` déjà active sous ce compte (initialement prévue pour un precompute OLMo jamais lancé), repérée et réutilisée après que `infra-agent` a réservé puis relâché du compute trop petit/contesté ailleurs (Nancy `graffiti-11`, Rennes `abacus21/25/26/27` en attente longue). Run en cours au moment de cette note (`checkpoints/math_nsteprand_cleankd_best.pt`, `logs/math_nsteprand_cleankd_train.log`).
+
+**Suite -- préemption besteffort à 88%, résultat quand même récupéré** : le job `4127787` a été préempté par un job prioritaire à 17:36:47 (attendu pour du besteffort), run arrêté à step 5260/6000. **Pas de perte critique** grâce à `--save_best_checkpoint_path` (sauvegarde à chaque amélioration de `val_answer`, pas seulement en fin de run) -- dernier meilleur checkpoint : `val_answer=3.7348` (step 5250/6000). Éval finale (`eval_thinker_full_val.py`) lancée séparément sur ce checkpoint (Nancy `graffiti-7`, job `6937223`, `--batch_size 1` -- même OOM plein-vocab qu'à l'entraînement, encore plus contraignant sans gradient checkpointing implicite) : **`answer_ce` (full val, 3890/3890 ex.) = 3.2095**.
+
+**Comparaison avec les baselines historiques (§ ci-dessus, phase3a, LFM2/18k-2k, `n_step=4` fixe)** : CE-only=3.3045, KD top-K=4.1117 (KD pire que CE-only à l'époque). Ce nouveau résultat (3.2095) est meilleur que les deux, mais **pas directement comparable** : famille de tokenizer différente (qwen35/248k vs lfm2/64k), dataset ~17x plus grand (34279 vs 18000 train), régime `n_step` variable (Uniform(1,8)) au lieu de fixe, et couverture KD train très partielle (~5%, `topk_n1714`). Directionnellement positif mais pas de conclusion causale tirable de cette seule run.
+
+**Anomalie mineure notée, pas creusée (temps limité)** : le champ `thinking` du JSON de sortie de l'éval full-val est `NaN`, alors que les logs d'entraînement montraient des `ce_thinking` numériques normaux tout du long. Hypothèse la plus probable (cohérente avec le gotcha déjà documenté plus haut pour wiki/tinystory) : à `batch_size=1`, un exemple isolé avec un segment "thinking" entièrement vide/masqué donne une cross-entropy `0/0=nan` pour CE batch entier, et si l'agrégation finale n'est pas nan-aware (simple moyenne), un seul batch de ce type suffit à polluer la moyenne globale -- `answer_ce`, lui, reste valide car ce n'est pas le champ affecté. À vérifier si ça se reproduit / si l'agrégation devrait ignorer les NaN par batch.
+
+Fichiers : `checkpoints/math_nsteprand_cleankd_best.pt`, `logs/eval_thinker_math_nsteprand_cleankd_fullval.json`.
+
+## 2026-09-22 (suite 8, experiment-manager) — phase15 (retrieval, pool 81k canonique) terminé : extrapolation quasi plate confirmée sous KD aussi
+
+**Run complet jusqu'au bout** (Nancy `graffiti-3`, job `6937228`, `batch_size` réduit préventivement à 16 au lieu de 64 -- même risque OOM plein-vocab que math, mais séquences courtes ici donc jamais atteint en pratique, ~9.7GB/10.5GB utilisés). `TRAIN_DATA` = pool complet 81k (`hotpotqa/train.jsonl`, 80999 ex.), KD top-K couvrant seulement le lot `thinkfix_n1500` (~1.9%, même limite de couverture partielle que math). `max_steps=6000` atteint sans early-stop (`final_loss=3.89`).
+
+**Éval full-val (9000/9000 ex.)** : `answer_ce = 7.1731`. **Extrapolation quasi plate, confirmée sous KD (pas seulement CE-only comme dans le résultat majeur précédent)** :
+
+| n_step_test | answer_ce |
+|---|---|
+| 1 | 7.2743 |
+| 2 | 7.1755 |
+| **4 (réf. entraînement)** | **7.1731** |
+| 6 | 7.1733 |
+| 8 | 7.1743 |
+
+Écart n_step=1 à n_step=8 : +0.10 CE seulement -- cohérent avec le résultat CE-only déjà établi (`d3cc2dc`, facteur ~140x plus stable que le `n_step` fixe). **La combinaison n_step-variable + top-K KD (même avec couverture train très partielle, 1.9%) préserve cette robustesse d'extrapolation.**
+
+**`answer_hops_le1_n=0`** dans tous les résultats (training extrapolation probe ET full-val) : caractéristique du jeu de données lui-même (aucun exemple à 0-1 hop dans ce split), pas un bug -- `answer_hops_ge2` couvre donc la totalité des exemples valides.
+
+**Limite à garder en tête pour toute comparaison future** : couverture KD train ~1.9% seulement (`thinkfix_n1500`/80999) -- ce run teste surtout l'effet du `n_step` variable sous un RÉGIME combiné (CE dominant + KD occasionnel), pas un vrai résultat KD-vs-CE à pleine couverture. Le lot top-K sur une fraction beaucoup plus large du pool 81k reste à faire pour un résultat flagship.
+
+Fichiers : `checkpoints/retrieval1_nsteprand_cleankd_best.pt`, `logs/eval_thinker_nsteprand_cleankd_fullval.json`.
+
+## KD-vs-CE-only isolé + LoRA + embed-KD, n_step fixe, données propres n=1500 (2026-09-22)
+
+Demande supervisor-agent : comparaison directe KD-vs-CE (n_step fixe=4, pas de n_step-variable, contrairement au run précédent qui mélangeait les deux) sur le lot top-K propre `thinkfix_n1500`, plus deux leviers KD déjà testés sur données contaminées (frozen-head+LoRA32, embed-KD combiné) rejoués sur données propres. 3 runs Nancy en parallèle (`graffiti-1/3/5`, jobs `6937311/6937306/6937313`), même recette WSD+patience, `batch_size=16` (embed-KD relancé à `batch_size=8` après OOM sur GPU 10.57GiB de graffiti-5).
+
+**Full-val (9000/9000 ex., n_step_test=4, `answer_ce`, plus bas = mieux) :**
+
+| Run | answer_ce | vs KD baseline |
+|---|---|---|
+| KD top-K pur | 7.097 | -- |
+| CE-only | 7.033 | -0.064 (légèrement meilleur) |
+| Frozen-head + LoRA32 | 7.098 | ~identique |
+| KD + embed-KD (w=0.1) | 7.335 | +0.238 (pire) |
+
+**Mais le classement par CE-loss est trompeur** : `qualitative_eval_at_end` (génération libre, greedy + sampled, 30 ex.) signale un collapse sévère sur **les 4 checkpoints**, indépendamment de la recette :
+
+| Run | générations dégénérées (greedy+sampled, /60) |
+|---|---|
+| KD top-K pur | 46/60 |
+| CE-only | 44/60 |
+| Frozen-head + LoRA32 | 50/60 |
+| KD + embed-KD | 50/60 |
+
+Pattern identique aux boucles numériques déjà vues (`19720000...`) et au collapse `<think>`/tinystories documenté par agent2 le même jour (voir plus haut, entrée `wiki/tinystory`) : confirme que **le collapse en génération libre est un phénomène d'exposure bias général, indépendant de KD-vs-CE, de LoRA, ou d'embed-KD** -- aucun des 4 leviers testés ici ne le corrige, et le score CE seul (utilisé jusqu'ici comme proxy principal) ne le détecte pas. À traiter comme un problème à part (probablement scheduled sampling / n_step-variable côté génération, cf. `phase10`) plutôt que par le choix de recette KD.
+
+Fichiers : `checkpoints/retrieval1_kdvsce_{kd,ceonly}_best.pt`, `checkpoints/retrieval1_frozenhead_lora32_cleankd_best.pt`, `checkpoints/retrieval1_embedkd_cleankd_best.pt`, `checkpoints/*_qualitative.md`, `logs/eval_thinker_{kdvsce_kd,kdvsce_ceonly,frozenhead_lora32_cleankd,embedkd_cleankd}_fullval.json`.
