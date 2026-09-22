@@ -159,6 +159,10 @@ def main() -> None:
                           "(e.g. 0.7-1.0), combine with --top_p for nucleus sampling.")
     ap.add_argument("--top_p", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0, help="sampling seed, ignored if --temperature=0")
+    ap.add_argument("--answer_head_lora_rank", type=int, default=0,
+                     help="if >0, wrap the answer head in a LoRAHead (rank r) before loading "
+                          "--checkpoint/--checkpoint2 -- required to reload a checkpoint trained "
+                          "with train_prompt_response.py's --answer_head_lora_rank")
     ap.add_argument("--log_first_step_topk", type=int, default=0,
                      help="if >0, print the top-K (token, prob) pairs at generation position 0 "
                           "for every example -- diagnostic for whether a degenerate output is "
@@ -196,6 +200,9 @@ def main() -> None:
             stream_sequence={"answer": True}, max_target_len=args.max_answer_len,
             stream_n_layers={"answer": args.answer_n_layers},
         ).to(device)
+        if args.answer_head_lora_rank > 0:
+            from learn.indexed_attention.train_prompt_response import LoRAHead
+            m.streams["answer"].head = LoRAHead(m.streams["answer"].head, args.answer_head_lora_rank).to(device)
         m.load_state_dict(torch.load(checkpoint_path, map_location=device))
         m.eval()
         answers, diag = generate_thinker(
