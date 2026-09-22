@@ -44,6 +44,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import nn
 from torch.utils.data import DataLoader
 
 from core.indexed_thinker_model import Thinker
@@ -72,6 +73,32 @@ def _load_answer_head_init(path: str, vocab_size: int) -> torch.Tensor:
               f"(config vocab_size vs tokenizer's actual usable vocab, see docstring)", flush=True)
         head_init = head_init[:vocab_size]
     return torch.from_numpy(head_init).float()
+
+
+class LoRAHead(nn.Module):
+    """Wraps an existing (frozen) nn.Linear head with a trainable low-rank additive
+    correction: head(x) + (x @ A) @ B, A:(d_model,r) B:(r,vocab_size), B zero-init
+    (standard LoRA convention -- starts as a no-op, so training begins exactly at
+    the frozen checkpoint's behavior and only deviates as gradients accumulate).
+
+    2026-09-22: the binary --freeze_answer_head ablation showed a full freeze
+    clearly hurts (8.05-8.29 CE vs 7.86 unfrozen baseline, dev_notes/experiments/
+    prompt_response_pipeline.md) -- this tests whether a small amount of trainable
+    capacity on top of the frozen Teacher-projected head recovers some of that gap
+    while still keeping most of the head's parameter budget (63.8M of Thinker's
+    128.8M) untouched, i.e. whether the answer is "some head adaptation is needed"
+    rather than "the head must be fully free"."""
+
+    def __init__(self, base_head: nn.Linear, rank: int):
+        super().__init__()
+        self.base_head = base_head  # frozen (requires_grad=False set by caller)
+        d_model = base_head.in_features
+        vocab_size = base_head.out_features
+        self.A = nn.Parameter(torch.randn(d_model, rank) * d_model ** -0.5)
+        self.B = nn.Parameter(torch.zeros(rank, vocab_size))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.base_head(x) + (x @ self.A) @ self.B
 
 
 def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets: str = None, repr_teacher_hidden: str = None,
@@ -343,6 +370,14 @@ def main() -> None:
                          "random init if --answer_head_init is unset, though that combination is unlikely "
                          "to work well -- a random, never-adapted projection has no reason to be decodable). "
                          "--embed stays trainable regardless -- this only isolates the head specifically.")
+    p.add_argument("--answer_head_lora_rank", type=int, default=0,
+                    help="requires --freeze_answer_head. Adds a trainable low-rank additive correction "
+                         "(x @ A) @ B on top of the frozen head (B zero-init, starts as a no-op -- "
+                         "LoRAHead, see its docstring) instead of leaving the head fully frozen. Tests "
+                         "whether a small amount of trainable capacity recovers some of the gap the "
+                         "binary freeze ablation showed (8.05-8.29 CE vs 7.86 unfrozen baseline) while "
+                         "keeping most of the head's parameters (63.8M of 128.8M) untouched. 0 (default) "
+                         "= fully frozen, no adapter (original --freeze_answer_head behavior unchanged).")
     p.add_argument("--level_dropout_p", type=float, default=0.0,
                     help="HierarchicalMemory's stochastic level dropout (train-time only, core/"
                          "indexed_memory.py's attend()) -- randomly drops whole compressed hierarchy "
@@ -639,8 +674,15 @@ def main() -> None:
         head.weight.requires_grad = False
         if head.bias is not None:
             head.bias.requires_grad = False
-        print(f"'answer' stream head frozen ({'Teacher-init' if args.answer_head_init else 'random-init'})",
-              flush=True)
+        if args.answer_head_lora_rank > 0:
+            model.streams["answer"].head = LoRAHead(head, args.answer_head_lora_rank).to(device)
+            print(f"'answer' stream head frozen ({'Teacher-init' if args.answer_head_init else 'random-init'}) "
+                  f"+ LoRA adapter rank={args.answer_head_lora_rank}", flush=True)
+        else:
+            print(f"'answer' stream head frozen ({'Teacher-init' if args.answer_head_init else 'random-init'})",
+                  flush=True)
+    elif args.answer_head_lora_rank > 0:
+        raise ValueError("--answer_head_lora_rank requires --freeze_answer_head")
     n_params = sum(t.numel() for t in model.parameters())
     n_trainable = sum(t.numel() for t in model.parameters() if t.requires_grad)
     print(f"dataset_type={args.dataset_type} d_model={args.d_model} n_step={args.n_step} "
