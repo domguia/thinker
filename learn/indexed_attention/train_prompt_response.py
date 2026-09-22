@@ -54,6 +54,26 @@ from learn.distill.chunked_loss import chunked_ce_kd_loss
 from learn.distill.train_sft import embedding_kd_loss, repr_cosine_loss, topk_kd_loss
 
 
+def _load_answer_head_init(path: str, vocab_size: int) -> torch.Tensor:
+    """extract_teacher_head_lite.py's head_init is projected from the Teacher checkpoint's raw embedding
+    table row count (e.g. 248320 for Qwen3.5/Qwen3.8-27B's config.json vocab_size), which can be a few
+    hundred rows larger than len(AutoTokenizer.from_pretrained(...)) (248077 for 'qwen35' here) -- a known,
+    already-documented discrepancy (dev_notes/indexed_attention_spec.md §13.1) between the model config's
+    vocab_size and the tokenizer's actual usable vocab (a handful of reserved-but-unmapped ids at the end).
+    Row i still corresponds to token id i for every id the tokenizer actually uses, so truncating to the
+    first `vocab_size` rows is a safe, lossless-for-real-tokens fix, not an approximation."""
+    head_init = np.load(path)["head_init"]
+    if head_init.shape[0] < vocab_size:
+        raise ValueError(f"{path}: head_init has {head_init.shape[0]} rows, fewer than vocab_size={vocab_size} "
+                          f"-- can't truncate, and a mismatch this way (extracted from a SMALLER vocab) "
+                          f"would misalign token ids rather than just drop unused reserved ones")
+    if head_init.shape[0] > vocab_size:
+        print(f"{path}: truncating head_init {head_init.shape[0]} -> {vocab_size} rows "
+              f"(config vocab_size vs tokenizer's actual usable vocab, see docstring)", flush=True)
+        head_init = head_init[:vocab_size]
+    return torch.from_numpy(head_init).float()
+
+
 def build_dataset(dataset_type: str, path: str, tokenizer, args, teacher_targets: str = None, repr_teacher_hidden: str = None,
                    char_vocab=None):
     repr_kwargs = dict(repr_teacher_hidden=repr_teacher_hidden, repr_teacher_layer=args.repr_teacher_layer,
@@ -468,15 +488,20 @@ def main() -> None:
     p.add_argument("--max_time_minutes", type=float, default=15.0)
     p.add_argument("--log_every", type=int, default=20)
     p.add_argument("--val_every", type=int, default=200)
-    p.add_argument("--val_batches", type=int, default=None,
-                    help="cap the training-time val_answer to this many batches instead of the full "
-                         "--val_data set -- unset (default) evaluates every held-out example, so val_answer "
-                         "is directly comparable to any other full-val-set number (e.g. eval_llm_baseline_"
-                         "retrieval.py's reference-LLM baselines). Set explicitly (e.g. 20) only to speed up "
-                         "a quick sweep at the cost of evaluating on a smaller, fixed (shuffle=False) subset "
-                         "of --val_data -- was silently the default (20) before this flag existed, which made "
-                         "every val_answer reported by this script incomparable to a full-val-set number "
-                         "without noticing (see dev_notes/experiments/prompt_response_pipeline.md 2026-09-22).")
+    p.add_argument("--val_batches", type=int, default=20,
+                    help="cap the training-time val_answer to this many batches (fixed, shuffle=False "
+                         "subset of --val_data) for cheap periodic monitoring/early-stopping during "
+                         "training -- default 20 keeps per-eval cost roughly constant regardless of how "
+                         "large --val_data is, which matters when --data is a small subset (e.g. a few "
+                         "thousand examples) but --val_data is the full held-out set (thousands of "
+                         "examples): evaluating in full at every --val_every would otherwise dominate "
+                         "training wall-clock. This training-time number is NOT directly comparable to "
+                         "a full-val-set number (e.g. eval_llm_baseline_retrieval.py's reference-LLM "
+                         "baselines) -- for any final/reported comparison, re-evaluate the saved "
+                         "checkpoint on the FULL val set with eval_thinker_full_val.py instead (see "
+                         "dev_notes/experiments/prompt_response_pipeline.md 2026-09-22 for the original "
+                         "comparability bug this two-tier policy fixes). Pass 0 or a value >= len(val_loader) "
+                         "for a full-val training-time eval when --val_data is itself already small.")
     p.add_argument("--extrapolate_n_steps", default=None,
                    help="comma-separated n_step_test values, probed on held-out --val_data after training "
                         "-- does 'thinking longer' at inference help solve reasoning/retrieval examples "
@@ -493,6 +518,8 @@ def main() -> None:
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     add_run_args(p)
     args = p.parse_args()
+    if args.val_batches is not None and args.val_batches <= 0:
+        args.val_batches = None  # 0 means "no cap" (full val), matching evaluate()'s n_batches=None
     logger = logger_from_args(args)
 
     if args.ingest_kb:

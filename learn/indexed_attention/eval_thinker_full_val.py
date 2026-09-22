@@ -65,6 +65,14 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--extrapolate_n_steps", default=None,
+                    help="comma-separated n_step_test values (e.g. '1,2,4,8,12,16') -- evaluates the SAME "
+                         "loaded checkpoint at each, on the full val set, to probe whether the model "
+                         "generalizes to a different number of recurrent iterations than it was trained "
+                         "with (--n_step). Relevant here specifically because the register-update weights "
+                         "are reused identically across every iteration (see train_prompt_response.py's own "
+                         "--extrapolate_n_steps, same mechanism, just against a saved checkpoint instead of "
+                         "right after training).")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -115,9 +123,20 @@ def main() -> None:
     print(f"\n[Thinker full-val] {args.checkpoint}: {result}", flush=True)
     print(f"answer_ce (full {len(val_ds)} examples) = {result['answer']:.4f}", flush=True)
 
+    extrapolation_results = {}
+    if args.extrapolate_n_steps:
+        print(f"\n--- extrapolation probe (n_step_test vs training n_step={args.n_step}), full val ---", flush=True)
+        for n_step_test in [int(x) for x in args.extrapolate_n_steps.split(",")]:
+            r = evaluate(model, val_loader, device, args.dataset_type, n_step_test, args.block_size,
+                         n_batches=n_batches, teacher_enabled=val_ds.teacher is not None)
+            extrapolation_results[n_step_test] = r
+            marker = " <- training n_step" if n_step_test == args.n_step else ""
+            print(f"  n_step_test={n_step_test:3d} answer={r['answer']:.4f}{marker}", flush=True)
+
     if args.out:
         with open(args.out, "w") as f:
-            json.dump({"checkpoint": args.checkpoint, **result}, f, indent=2)
+            json.dump({"checkpoint": args.checkpoint, **result,
+                       "extrapolation": extrapolation_results or None}, f, indent=2)
         print(f"wrote {args.out}", flush=True)
 
 
