@@ -984,12 +984,21 @@ def main() -> None:
         print(f"checkpoint saved to {ckpt_path}", flush=True)
 
     if args.qualitative_eval_at_end:
-        if args.dataset_type != "retrieval":
-            print("qualitative_eval_at_end: skipped (only --dataset_type retrieval is wired so far)", flush=True)
+        if args.dataset_type not in ("retrieval", "reasoning"):
+            print(f"qualitative_eval_at_end: skipped (--dataset_type {args.dataset_type!r} not wired)", flush=True)
         elif val_loader is None:
             print("qualitative_eval_at_end: skipped (no --val_data)", flush=True)
         else:
-            from learn.indexed_attention.generate_qualitative_compare import generate_thinker
+            if args.dataset_type == "retrieval":
+                from learn.indexed_attention.generate_qualitative_compare import generate_thinker as _gen
+                def _run_gen(indices, temperature):
+                    return _gen(raw_model, val_ds, indices, device, args.n_step, args.block_size,
+                                args.max_answer_len, tok, temperature=temperature, top_p=0.9, seed=0)[0]
+            else:
+                from learn.indexed_attention.generate_qualitative_compare import generate_thinker_reasoning as _gen
+                def _run_gen(indices, temperature):
+                    return _gen(raw_model, val_ds, indices, device, args.n_step,
+                                args.max_answer_len, tok, temperature=temperature, top_p=0.9, seed=0)
             n = min(args.qualitative_eval_n_samples, len(val_ds))
             indices = list(range(n))
             out_path = (args.save_best_checkpoint_path or args.save_checkpoint_path
@@ -999,8 +1008,7 @@ def main() -> None:
                      f"- Sample: first {n} rows of {args.val_data} (fixed, deterministic)", ""]
             n_degenerate = 0
             for label, temperature in [("greedy", 0.0), ("sampled (t=0.8, top_p=0.9)", 0.8)]:
-                answers, _ = generate_thinker(raw_model, val_ds, indices, device, args.n_step, args.block_size,
-                                               args.max_answer_len, tok, temperature=temperature, top_p=0.9, seed=0)
+                answers = _run_gen(indices, temperature)
                 lines.append(f"## {label}")
                 for i, a in zip(indices, answers):
                     lines.append(f"- example {i}: {a!r}")

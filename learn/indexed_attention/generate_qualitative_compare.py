@@ -116,6 +116,62 @@ def generate_thinker(model, ds: RetrievalPromptDataset, indices: list[int], devi
 
 
 @torch.no_grad()
+def generate_thinker_reasoning(model, ds, indices: list[int], device, n_step: int,
+                                max_answer_len: int, tokenizer,
+                                temperature: float = 0.0, top_p: float = 1.0, seed: int = 0
+                                ) -> list[str]:
+    """Same convention as generate_thinker (autoregressive answer-stream decoding,
+    one forward() per token, see this module's docstring), adapted for
+    ReasoningPromptDataset -- query_tokens is the WHOLE problem (kb_tokens), not
+    the last block_size positions, matching train_prompt_response.py's
+    query_tokens_for(dataset_type='reasoning', ...). The "thinking" stream is
+    teacher-forced from the dataset's own ground-truth thinking_target_input
+    (not autoregressed) -- this script only checks the ANSWER completion isn't
+    degenerate (2026-09-22, supervisor-agent request to verify a CE-only-vs-KD
+    result qualitatively), not thinking-trace quality, so teacher-forcing it
+    keeps the check simple and matches evaluate()'s own full-teacher-forcing
+    convention for the CE numbers being sanity-checked here."""
+    items = [ds[i] for i in indices]
+    kb_tokens = torch.stack([it["kb_tokens"] for it in items]).to(device)
+    kb_source_ids = torch.stack([it["kb_source_ids"] for it in items]).to(device)
+    kb_leaf_mask = torch.stack([it["kb_leaf_mask"] for it in items]).to(device)
+    thinking_input = torch.stack([it["thinking_target_input"] for it in items]).to(device)
+    query_tokens = kb_tokens
+
+    B = kb_tokens.shape[0]
+    pad_id = ds.pad_id
+    eos_id = tokenizer.eos_token_id
+    target_input = torch.full((B, max_answer_len), pad_id, dtype=torch.long, device=device)
+    generated = torch.full((B, max_answer_len), pad_id, dtype=torch.long, device=device)
+    done = torch.zeros(B, dtype=torch.bool, device=device)
+    if temperature > 0:
+        torch.manual_seed(seed)
+
+    for t in range(max_answer_len):
+        _, stream_outputs = model(kb_tokens, kb_source_ids, query_tokens, n_step,
+                                   kb_leaf_mask=kb_leaf_mask,
+                                   target_input={"answer": target_input, "thinking": thinking_input})
+        logits_t = stream_outputs["answer"][:, t, :]
+        next_token = _sample_next(logits_t, temperature, top_p)
+        next_token = torch.where(done, torch.full_like(next_token, pad_id), next_token)
+        generated[:, t] = next_token
+        if eos_id is not None:
+            done = done | (next_token == eos_id)
+        if t + 1 < max_answer_len:
+            target_input[:, t + 1] = next_token
+        if bool(done.all()):
+            break
+
+    texts = []
+    for b in range(B):
+        ids = generated[b].tolist()
+        if eos_id is not None and eos_id in ids:
+            ids = ids[:ids.index(eos_id)]
+        texts.append(tokenizer.decode(ids, skip_special_tokens=True).strip())
+    return texts
+
+
+@torch.no_grad()
 def generate_reference(model, tokenizer, prompts: list[str], device, max_new_tokens: int) -> list[str]:
     texts = []
     for prompt in prompts:  # one at a time -- different prompt lengths, avoids left-padding complexity for a small sample
