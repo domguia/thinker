@@ -463,6 +463,25 @@ def main() -> None:
                          "when combining WSD with --patience, so the anneal actually completes before "
                          "patience would otherwise stop training. lr stays at --lr_decay_to for any step "
                          "past the end of this window.")
+    p.add_argument("--scheduled_sampling_p", type=float, default=0.0,
+                    help="Bengio et al. 2015 scheduled sampling -- final probability that a sequence-"
+                         "mode stream's target_input at each position is replaced by the MODEL'S OWN "
+                         "argmax prediction (from a preliminary no-grad forward pass with the gold "
+                         "target_input) instead of the gold previous token, before the real (graded) "
+                         "forward pass. 0.0 (default) = pure teacher forcing, unchanged behavior. "
+                         "2026-09-22: motivated by a confirmed train/inference mismatch -- checkpoints "
+                         "with excellent teacher-forced CE (beating every reference LLM) collapse into "
+                         "repetition loops under free-running greedy/sampled generation, on both "
+                         "retrieval and reasoning datasets, with or without KD, at 9500 AND 81000 "
+                         "training examples (see dev_notes/experiments/prompt_response_pipeline.md) -- "
+                         "the model is never exposed to its own predictions during training. Doubles "
+                         "the forward-pass cost for sequence-mode streams (a preliminary pass to get "
+                         "predictions, then the real pass) -- expect roughly 1.5-2x slower steps.")
+    p.add_argument("--scheduled_sampling_warmup_steps", type=int, default=500,
+                    help="--scheduled_sampling_p ramps linearly from 0 to its final value over this "
+                         "many steps, rather than starting at full strength immediately -- early "
+                         "predictions are close to random, mixing them in at full probability from "
+                         "step 0 would mostly train on noise instead of gold data.")
     p.add_argument("--patience", type=int, default=None,
                     help="early-stopping patience in number of --val_every evals without a new best "
                          "val_answer -- if set, training stops as soon as patience is exhausted instead of "
@@ -535,6 +554,10 @@ def main() -> None:
 
     if args.ingest_kb:
         assert args.dataset_type == "retrieval", "--ingest_kb is only meaningful for --dataset_type retrieval"
+        assert args.scheduled_sampling_p == 0, (
+            "--scheduled_sampling_p + --ingest_kb not implemented -- the preliminary preview pass "
+            "doesn't run ingest_documents()/kb_prebuilt, would silently give a wrong preview forward"
+        )
 
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
@@ -705,6 +728,23 @@ def main() -> None:
                 target_input["thinking"] = batch["thinking_target_input"]
             if args.char_answer_stream:
                 target_input["answer_chars"] = batch["answer_chars_target_input"]
+
+            if args.scheduled_sampling_p > 0:
+                ss_p = args.scheduled_sampling_p * min(1.0, step / max(args.scheduled_sampling_warmup_steps, 1))
+                if ss_p > 0:
+                    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+                                                           enabled=args.bf16 and device.type == "cuda"):
+                        _, preview_streams = model(batch["kb_tokens"], batch["kb_source_ids"], query_tokens,
+                                                    args.n_step, kb_leaf_mask=batch["kb_leaf_mask"],
+                                                    target_input=target_input)
+                    for name, gold_input in target_input.items():
+                        own_pred = preview_streams[name].argmax(dim=-1)  # (B, T): own_pred[t] predicts labels[t]
+                        # target_input[t] feeds the token that PREDICTS position t -- shift own_pred by
+                        # one to align (position 0 has no prior prediction, stays gold/pad as-is).
+                        own_shifted = torch.cat([gold_input[:, :1], own_pred[:, :-1]], dim=1)
+                        mask = torch.rand_like(gold_input, dtype=torch.float32) < ss_p
+                        mask[:, 0] = False  # never replace position 0 (no prior token to sample)
+                        target_input[name] = torch.where(mask, own_shifted, gold_input)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16 and device.type == "cuda"):
                 # want_hidden: either repr-KD needs the pre-head state directly, or chunked CE/KD
