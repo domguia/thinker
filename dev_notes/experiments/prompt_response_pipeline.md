@@ -818,9 +818,13 @@ Piste utilisateur (via supervisor-agent) : le cœur récurrent de Thinker, plus 
 
 **Résultat** : `260.36M params` (2x vs `128.80M` à d_model=256, cohérent avec un head qui domine linéairement en d_model). `answer_ce` (full val, 9000 ex.) = **7.1893** -- QUASI IDENTIQUE à phase20 (7.1891 à d_model=256, écart négligeable). Qualitatif (greedy, 60 ex.) : **43/60 dégénéré (72%)**, proche des 45/60 (75%) à taille normale.
 
-**Diagnostic de calibration (agent2, `diagnose_generation_divergence.py`, mêmes heuristiques argmax teacher-forcé)** : en cours, résultat à suivre pour confirmation directe (comparaison au ~0.4-0.6% mesuré à d_model=256).
+**Diagnostic de calibration (agent2, `diagnose_generation_divergence.py`, mêmes heuristiques argmax teacher-forcé)** -- un premier lancement a crashé (`--use_ff` oublié, mismatch `fuse_proj` vs `fuse_in`/`fuse_out` selon `use_ff`, corrigé au relancement) :
 
-**Conclusion préliminaire (avant le chiffre exact de calibration)** : doubler la largeur du cœur récurrent ne change quasiment rien à la CE ni au taux de dégénérescence qualitative -- cohérent avec l'hypothèse que le collapse n'est pas un problème de capacité/taille, mais structurel au mécanisme lui-même (poids partagés à travers les `n_step` itérations).
+**Résultat décisif : accuracy argmax teacher-forcée = 0.4% (26/6400 tokens)** -- STRICTEMENT IDENTIQUE (dans la marge de bruit) au ~0.4-0.6% mesuré à d_model=256 par agent2. Distribution "paris sûrs" similaire (43 tokens uniques sur 6400 positions, top-5 couvre 89.8%, dominé par `'2'`/`'1'`/`'Based'`).
+
+**Conclusion (signal net, pas d'ambiguïté -- pas besoin d'escalader à 768 comme prévu en réserve)** : **doubler la largeur du cœur récurrent de Thinker (256->512, x2 params) ne change RIEN à la calibration teacher-forcée, à la CE, ni au taux de dégénérescence qualitative.** Confirme fortement l'hypothèse structurelle : le collapse n'est pas un problème de capacité/taille du modèle, mais est propre au mécanisme du cœur récurrent partagé à travers les `n_step` itérations (le même point fixe/attracteur dégénéré apparaît indépendamment de la largeur).
+
+Fichiers : `checkpoints/retrieval_kd_scale_d512_best.pt` (260.36M params), `checkpoints/retrieval_kd_scale_d512_best_qualitative.md`, `logs/eval_thinker_retrieval_kd_scale_d512_fullval.json`, `logs/diagnose_retrieval_scale_d512.log`.
 
 **Note opérationnelle sur `qualitative_eval_math_kd_manual.py`** : `generate_thinker_reasoning` batch tous les exemples ensemble par défaut -- avec `max_thinking_len=1024` (math, contrairement à wikitext's `max_thinking_len=8`), batcher 30 exemples produit un tenseur logits `(30, 1024, vocab=248320)` ≈ 28GB, OOM même sur un L40S 48GB. Fix : boucler un exemple à la fois (`indices=[i]` par appel + `torch.cuda.empty_cache()`), coût en temps négligeable vs le gain de mémoire.
 
