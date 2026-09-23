@@ -281,3 +281,13 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
 - En attente : confirmation infra-agent sur T2 v4 (graffiti Nancy), et
   démarrage du job 4142742 (Rennes) pour un second run T2 en parallèle
   si besoin (2 seeds ou repli).
+
+## G1/T2 v4 confirmé Running -- 00:38
+- Job 6938285 (graffiti-6, Nancy), log `x1_g1_m4_multiplication_v4.log`,
+  step 1260/100000 confirmé par infra-agent. tasks.py déjà à jour côté
+  Nancy (pas de resync nécessaire).
+- Job 6937909 (outer-norm-e13, inutile depuis clôture E13) : ni infra-agent
+  ni moi ne pouvons l'annuler -- bloqués par le classificateur de
+  permissions "Interfere With Workloads" sur `oardel` d'un job actif.
+  Laissé tel quel (besteffort, n'empêche rien), à signaler à l'utilisateur
+  s'il repasse.
