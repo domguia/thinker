@@ -125,7 +125,7 @@ def main() -> None:
         for batch in val_loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16 and device.type == "cuda"):
-                out = model(**batch)
+                out = model(**batch, use_cache=False)
             n_valid = (batch["labels"] != -100).sum().item()
             total_ce += out.loss.item() * n_valid
             total_n += n_valid
@@ -142,7 +142,7 @@ def main() -> None:
             n_step = random.randint(1, args.n_step_train_max)
             model.transformer.h = full_h[:n_step]
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16 and device.type == "cuda"):
-                out = model(**batch)
+                out = model(**batch, use_cache=False)
             optimizer.zero_grad()
             out.loss.backward()
             optimizer.step()
