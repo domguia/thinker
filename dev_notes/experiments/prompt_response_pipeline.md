@@ -940,3 +940,13 @@ Vérifié :
 - Chemin chunked (`--loss_chunk_size`) vs non-chunked : les deux calculent CE/KD de façon équivalente, pas utilisé sur les checkpoints diagnostiqués de toute façon (loss_chunk_size=0 par défaut).
 
 **Aucun bug de recette identifié.** Piste alternative non-architecturale, non vérifiée : les CE ~7.0-7.3 rapportées ne sont pas réellement "basses" en absolu (vocab=248320, entropie uniforme=12.42 nats) -- juste meilleures que les baselines LLM de référence citées. Un argmax quasi-toujours faux à CE~7 n'est pas forcément contradictoire : peut simplement traduire un modèle qui reste tres incertain (prob correcte élevée dans le top-K mais rarement au rang 1) plutôt qu'un vrai bug de calcul de loss. Pas creusé plus (hors périmètre demandé -- coûterait un calcul de rang moyen du token correct, pas juste un audit de code).
+
+## Ablation answer_head_per_position : décision utilisateur "les deux en parallèle" (answer head + n_register), résultat answer head (2026-09-23, suite)
+
+Décision utilisateur (via supervisor-agent) : lancer 2 trainings diagnostics KD (même recette/données que phase17) en parallèle plutôt que de trancher a priori entre answer head et n_register. Code ajouté (commit `3256a2d`) : `--answer_head_per_position` sur `OutputStream` (core/indexed_thinker_model.py) -- un vrai head NON-partagé par position (une matrice `(d_model, vocab)` distincte par position) multiplierait les ~63.7M params du head par `max_answer_len` (jusqu'à ~4 milliards, infaisable) ; proxy retenu : une transformation `(d_model, d_model)` propre à chaque position, appliquée juste avant le head (toujours partagé) -- teste la même hypothèse qualitative à coût borné (quelques millions de paramètres, pas des milliards). Voir le docstring de `OutputStream.__init__` pour le raisonnement complet.
+
+Entraîné sur GPU L40S (Rennes, abacus26-1, job infra-agent), 6000 steps/14.5min, `val_answer=7.236` (comparable aux checkpoints précédents ~7.0-7.3).
+
+**Résultat : accuracy argmax teacher-forcée = 0.3125% -- strictement dans la même plage que tous les checkpoints précédents (0.25-0.5%).** Ajouter de la capacité par-position juste avant le head ne change rien à la sévérité du collapse.
+
+**Conclusion : infirme aussi cette hypothèse (proxy testé).** Trois pistes structurelles écartées maintenant (n_step, KB, answer-head-per-position-proxy). Fichiers : `logs/divergence_answerhead_perposition.json`, `checkpoints/retrieval1_answerhead_perposition_best_qualitative.md`.
