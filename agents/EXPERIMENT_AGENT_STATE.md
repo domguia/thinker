@@ -91,6 +91,24 @@ compléter les seeds manquantes de la grille T1 : `x1_g3_m1_addition_seed2.log`
 (M1 seed2), `x1_x2a_m2_addition_seed1.log` / `_seed2.log` (M2 seed1+2).
 Les 4 GPU graffiti-4 actifs (M3 seed2, M1 seed2, M2 seed1, M2 seed2).
 
+## INCIDENT (22:09) -- panne nœud graffiti-4, 4 jobs en Error simultanément
+Les 4 jobs (6938131-6938134) sont tombés en état `Error` en même temps
+(`SWITCH_INTO_ERROR_STATE`, pas une préemption normale -- vraisemblablement
+panne matérielle/nœud). Signalé à infra-agent.
+
+**Sauvé (données sur NFS avant la panne)** :
+- M1/T1 seed2 : sweep complet jusqu'à n_step_test=32, EM=0.0000 partout --
+  **3e seed confirmant le défaut H8** (avec seed0/seed1 déjà clos).
+- M2/T1 (outer_norm) seed1 : sweep complet, EM≈0.005 in-dist (négligeable),
+  0.0000 OOD -- confirme X2(a) inefficace.
+- M2/T1 seed2 : sweep complet, EM=0.0000 partout.
+- **Grille M1+M2/T1 (3 seeds chacun) est donc COMPLÈTE et négative** --
+  résultat prêt à consolider dans results.csv/results_inventory.md.
+
+**Perdu (à relancer)** : M3/T1 seed2 (looped-dense), coupé à step 25220/30000
+(loss ~0.05-0.09, sur la bonne trajectoire vu G2/T1 v3). Nouveau GPU réservé
+(job 6938205, besteffort, en attente de démarrage) pour relancer.
+
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
   rapports courts, batchés, escalade uniquement selon X1_DISPATCH.md §6.
