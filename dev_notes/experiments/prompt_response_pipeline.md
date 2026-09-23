@@ -900,3 +900,11 @@ Suite à la comparaison Baseline C : test à moindre coût (inference-time uniqu
 **Résultat : accuracy argmax teacher-forcée quasi identique entre `n_step=1` (0.25%) et `n_step=4` (0.375%)** -- les deux sévèrement effondrés, aucune amélioration en réduisant la récurrence à une seule itération. `mean_divergence_position` diffère un peu (2.32 vs 1.52) mais reste faible dans les deux cas, et le safe-bet dominant à n_step=4 devient encore plus dégénéré (répétition de chiffres/années, `"yes"`/`"no"` uniformes) qu'à n_step=1.
 
 **Conclusion : infirme l'hypothèse "récurrence n_step = cause du collapse".** Le nombre d'itérations de bouclage n'explique pas la différence avec Baseline C. La cause doit être ailleurs dans l'architecture Thinker (le mécanisme retrieval/KB lui-même, le answer head partagé, ou la façon dont le "register"/mémoire est construit) et non le simple fait de réutiliser les poids plusieurs fois. Fichiers : `logs/divergence_nstep1.json`, `logs/divergence_nstep4.json`.
+
+## Ablation KB (`--disable_kb`) sur le même checkpoint -- infirme aussi cette hypothèse (2026-09-23, suite)
+
+Même méthode que le test n_step (inférence seule, `model.disable_kb` est un simple bool lu dans `Thinker.forward`, cf. `learn/indexed_attention/eval_checkpoint.py`). Checkpoint KD (`retrieval1_kdvsce_kd_best.pt`), `--disable_kb` ajouté au même diagnostic.
+
+**Résultat : accuracy argmax teacher-forcée = 0.25%, strictement identique au run KB actif (0.375% à n_step=4, 0.25% à n_step=1)** -- désactiver entièrement le mécanisme retrieval/KB ne change rien à la sévérité du collapse. `mean_divergence_position` similaire (1.36). Safe-bet encore plus concentré sans KB (top5=64.8%, dominé par `"1"` à 46%).
+
+**Conclusion : infirme aussi l'hypothèse KB/retrieval comme cause.** Deux hypothèses structurelles écartées (nombre d'itérations `n_step`, mécanisme KB). La cause reste à identifier -- candidats restants : le answer head partagé lui-même (design/init), la construction du "register" (les `n_register=8` slots), ou un problème plus fondamental de la boucle d'entraînement/loss propre à `train_prompt_response.py` indépendant de ces deux mécanismes. Fichier : `logs/divergence_disablekb.json`.
