@@ -1070,4 +1070,6 @@ Répétition de phase13/14 (extrapolation n_step à l'inférence, gap fixe-vs-al
 | random, seed0 | 8.09 | 7.97 | 8.06 | **+0.09** |
 | random, seed1 | 8.20 | 7.97 | 8.41 | **+0.44** |
 
-**Confirme le résultat original (gap ~0.03 vs ~4.0) sur 2 seeds indépendantes par condition** : le training à n_step fixe produit systématiquement une explosion en U à l'extrapolation (+5.9 à +7.9 sur ce sweep élargi jusqu'à 32), tandis que le training à n_step aléatoire reste quasi plat (+0.09 à +0.44) -- écart d'un ordre de grandeur, robuste au bruit de seed. 2 runs restants (seed2 x {fixed, random}) en cours (fixed_seed2 sur H100, random_seed2 en attente de GPU) pour compléter les 3 seeds.
+**Confirme le résultat original (gap ~0.03 vs ~4.0) sur 2 seeds indépendantes par condition** : le training à n_step fixe produit systématiquement une explosion en U à l'extrapolation (+5.9 à +7.9 sur ce sweep élargi jusqu'à 32), tandis que le training à n_step aléatoire reste quasi plat (+0.09 à +0.44) -- écart d'un ordre de grandeur, robuste au bruit de seed.
+
+**5/6 -- fixed_seed2 terminé (H100)** : n_step_test=1 -> 9.34, =4 (train) -> 7.84, =32 -> 20.47. **Gap = +12.63**, encore plus marqué que seed0/1 -- confirme la tendance sur 3/3 seeds fixed. Seul `random_seed2` reste en attente de GPU pour clôturer les 3 seeds des deux conditions.
