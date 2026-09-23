@@ -75,8 +75,21 @@ journal. X2(b)/(c)/(d) pas implémentés -- besoin de dev avant de tester.
   n_step_test complet (1..32) en fin de run pour la grille finale.
 - GPU graffiti-4 (job 6938131, ex-G2/T1 v3) réutilisé : `x1_m3_addition_seed2_v3.log`,
   M3/T1 seed2 (n_step_train_max=16, n_step_test=16 fixe), complète les 3 seeds
-  de la grille pour M3/T1. Les 4 GPU graffiti-4 actifs (M3 seed2, G3/T1 seed0,
-  G3/T1 seed1, X2a/T1).
+  de la grille pour M3/T1.
+
+## G3/T1 + X2(a)/T1 terminés (21:00) -- défaut H8 confirmé sur T1
+M1 seed0+seed1 + X2a seed0 : sweep complet (n_step_test 1..32), EM=0.0000
+partout, in-dist ET OOD -- identique à G3/T3 de data-agent (24/24 cellules à
+0 chez eux aussi). data-agent a aussi testé X2(b) (--enable_kb, recall input)
+: négatif également (loss plafonne ~ln(2), même signature). 2 remèdes
+isolés testés, tous deux négatifs -- avis donné à data-agent : tenter X2(c)
+une fois avec budget capé, sinon documenter comme limite ouverte et prioriser
+la fin de grille vu la deadline (2j restants).
+
+3 GPU graffiti-4 libérés relancés immédiatement (job 6938132/33/34) pour
+compléter les seeds manquantes de la grille T1 : `x1_g3_m1_addition_seed2.log`
+(M1 seed2), `x1_x2a_m2_addition_seed1.log` / `_seed2.log` (M2 seed1+2).
+Les 4 GPU graffiti-4 actifs (M3 seed2, M1 seed2, M2 seed1, M2 seed2).
 
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
