@@ -7,11 +7,21 @@ détail chronologique/résultats complets restent dans
 Dernière mise à jour : 2026-09-23 ~16:52, en cours de session (deadline papier 26/09).
 
 ## En cours
-- **E8** (filler P1) : nmax=4 en cours sur graffiti-1 (Nancy, step~2000/6000, sain).
-  nmax=16 préempté sur abacus27-1 (step2120/6000, checkpoint préservé), en attente d'un GPU
-  pour reprendre via --init_from_checkpoint (pas urgent). nmax=8 déjà couvert par E1.
-- Toujours en attente de la réponse d'agent2 sur E13 (outer_norm) pour prendre le relai
-  training complet + éval EM/F1.
+- **BASCULE PRIORITAIRE : X1** (supervisor-agent, 18h20) -- dispatch autonome 48h, teste H2
+  (extrapolation algorithmique OOD), lire `thesis/research/RESEARCH_CHARTER.md` +
+  `thesis/research/X1_DISPATCH.md` en premier si reprise. Échéance 25/09 12h00.
+  - Générateurs T1 (addition) + T3 (prefix-sum/parité) écrits et validés mathématiquement
+    (`learn/x1/tasks.py`, committé) -- avec offset de position aléatoire (mécanisme Abacus
+    McLeish 2024, nécessaire pour que la généralisation OOD de position fonctionne).
+  - Harnais M4 (dense baseline) écrit (`learn/x1/train_dense.py`), test CPU jouet en cours
+    (0 params quasi nuls, juste pour vérifier l'absence de crash avant déploiement GPU réel).
+  - Porte G1 (M4 >=95% EM en distribution) PAS ENCORE VALIDÉE -- prochaine étape : lancer un
+    vrai training M4 sur GPU (taille normale ~5-20M params) pour T1 et T3.
+  - E8 (nmax=4 Nancy graffiti-1 step~2000/6000 sain, nmax=16 préempté Rennes checkpoint
+    préservé) est EN PAUSE, plus prioritaire que X1 pour l'instant -- reprendre après X1 ou
+    si supervisor redonne la priorité.
+- Toujours en attente de la réponse d'agent2 sur E13 (outer_norm) -- sujet distinct de X1,
+  gardé en fond.
 
 ## Terminé et rapporté cette session (résumé, voir journal pour détails)
 - **E5** : diagnostic mécanistique par itération -- R converge vers une DIRECTION fixe
