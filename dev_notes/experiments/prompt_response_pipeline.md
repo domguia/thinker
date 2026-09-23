@@ -908,3 +908,15 @@ Même méthode que le test n_step (inférence seule, `model.disable_kb` est un s
 **Résultat : accuracy argmax teacher-forcée = 0.25%, strictement identique au run KB actif (0.375% à n_step=4, 0.25% à n_step=1)** -- désactiver entièrement le mécanisme retrieval/KB ne change rien à la sévérité du collapse. `mean_divergence_position` similaire (1.36). Safe-bet encore plus concentré sans KB (top5=64.8%, dominé par `"1"` à 46%).
 
 **Conclusion : infirme aussi l'hypothèse KB/retrieval comme cause.** Deux hypothèses structurelles écartées (nombre d'itérations `n_step`, mécanisme KB). La cause reste à identifier -- candidats restants : le answer head partagé lui-même (design/init), la construction du "register" (les `n_register=8` slots), ou un problème plus fondamental de la boucle d'entraînement/loss propre à `train_prompt_response.py` indépendant de ces deux mécanismes. Fichier : `logs/divergence_disablekb.json`.
+
+## Audit ciblé de `train_prompt_response.py` : aucun bug de recette évident trouvé (2026-09-23, suite)
+
+Demande supervisor-agent (avant de lancer un training coûteux sur answer head/n_register) : chercher un bug indépendant de l'architecture dans la boucle d'entraînement/KD/construction des targets.
+
+Vérifié :
+- `_teacher_forced_target` (`data/prompt_response_dataset.py:107-115`) : shift-by-one standard (`target_input[t]` = pad ou `ids[t-1]`, `labels[t]=ids[t]`), cohérent avec ce que lit `diagnose_generation_divergence.py`. Pas de bug d'alignement.
+- Boucle d'entraînement (`train_prompt_response.py:769-969`) : `target_input` construit identiquement en train/eval, `n_step` (fixe ou randomisé via `--n_step_train_max`) correctement threadé, `kd_alpha`/mix CE-KD standard, `clip_grad_norm_`, LR schedule, patience -- rien d'anormal.
+- `evaluate()` (ligne 237-308) : même construction `target_input`/`query_tokens_for` que le training, cohérent.
+- Chemin chunked (`--loss_chunk_size`) vs non-chunked : les deux calculent CE/KD de façon équivalente, pas utilisé sur les checkpoints diagnostiqués de toute façon (loss_chunk_size=0 par défaut).
+
+**Aucun bug de recette identifié.** Piste alternative non-architecturale, non vérifiée : les CE ~7.0-7.3 rapportées ne sont pas réellement "basses" en absolu (vocab=248320, entropie uniforme=12.42 nats) -- juste meilleures que les baselines LLM de référence citées. Un argmax quasi-toujours faux à CE~7 n'est pas forcément contradictoire : peut simplement traduire un modèle qui reste tres incertain (prob correcte élevée dans le top-K mais rarement au rang 1) plutôt qu'un vrai bug de calcul de loss. Pas creusé plus (hors périmètre demandé -- coûterait un calcul de rang moyen du token correct, pas juste un audit de code).
