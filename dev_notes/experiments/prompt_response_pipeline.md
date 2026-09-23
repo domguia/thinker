@@ -1170,3 +1170,47 @@ data-agent à une 2e tâche (addition, pas seulement prefix_sum). X2(b)/(c)/(d)
 (recall input, lecture multi-latents, tête d'arrêt) pas encore implémentés dans
 le code -- nécessiteraient du développement avant de pouvoir tester s'ils
 corrigent mieux que outer_norm seul.
+
+## E13 — Outer normalization (RMSNorm/LayerNorm sur R) ne corrige PAS le collapse — 2026-09-23
+
+Hypothese WRITING_PLAN.md §9 (E13, citant Labovich arXiv 2604.15259) : absence de
+normalisation du registre R lui-meme entre iterations n_step (seul `fuse_norm`
+normalise l'ENTREE du calcul de delta, pas R apres l'accumulation residuelle) comme
+cause du collapse. Motivee par le diagnostic mecanistique de experiment-agent (E5) :
+||R|| croit sans borne (63->1070 a n_step=32), rang effectif -> 1.
+
+Implemente en option (`--outer_norm`, `--outer_norm_type rmsnorm|layernorm`) dans
+`core/indexed_thinker_model.py` (Thinker._step, apres `R = R + delta`). Deux runs KD
+complets (meme recette que phase17, hotpotqa retrieval, n_step=4 train) :
+
+| Variante   | teacher_forced_argmax_accuracy | EM (n=500) | F1 (n=500) |
+|------------|--------------------------------|------------|------------|
+| RMSNorm    | 0.375%                         | 0.00%      | 0.08%      |
+| LayerNorm  | 0.375%                         | 0.00%      | 0.37%      |
+| Baseline C (dense, reference) | 21.2%          | -          | -          |
+| Thinker sans outer_norm (avant E13) | ~0.25-0.5% | 0.00% | -    |
+
+**Conclusion : E13 rejete.** Les deux variantes donnent une accuracy teacher-forced
+identique au baseline pre-E13 (aucune amelioration mesurable) -- l'hypothese
+"outer-normalization" n'explique pas le collapse. Corrobore le resultat independant
+X1/X2(a) (meme flag `--outer_norm`, tache T1 addition) : "meme plafond de loss (~2.2),
+EM≈0.5% ... outer_norm seul ne corrige pas le defaut sur T1 non plus" -- 2e tache,
+2e architecture de test (retrieval HotpotQA ici vs synthetique T1 la-bas), meme
+verdict negatif. Une hypothese de plus ecartee (cf. framing WRITING_PLAN.md : "si
+aucun effet -> une hypothese de plus ecartee").
+
+## E7 — Profondeur utile (accuracy vs n_step_test sur synthetic_composition) — BLOQUE (bug script)
+
+Tentative de sweep EM/F1 vs n_step_test (1,2,4,6,8,12,16) sur
+`checkpoints/synth_composition_kd_best.pt` (COMPOSITION=2-hop vs CONTROL=1-hop).
+2 bugs successifs dans `tmp_scripts_local/phase26_e7_depth_sweep.sh` :
+1. `--tokenizer qwen35` au lieu de `lfm2` (vocab checkpoint=64400=LFM2, corrige).
+2. Apres correction tokenizer : `RuntimeError: Unexpected key(s) in state_dict:
+   "memory.level_norms.1.weight"` -- le checkpoint a une memoire hierarchique
+   (probablement n_slots>1 ou un param de niveaux non expose par les flags CLI de
+   `eval_retrieval_em_f1.py`, qui ne couvre que le cas retrieval simple). Pas encore
+   diagnostique/corrige -- a reprendre : verifier la config d'entrainement exacte de
+   `synth_composition_kd_best.pt` (probablement dans
+   `dev_notes/experiments/synthetic_composition_causal_control.md` ou le script
+   d'entrainement d'origine) pour les flags manquants (`--n_slots`, hierarchie
+   memoire) avant de relancer le sweep.
