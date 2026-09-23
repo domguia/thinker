@@ -4,11 +4,16 @@
 détail chronologique/résultats complets restent dans
 `dev_notes/experiments/prompt_response_pipeline.md`.)
 
-Dernière mise à jour : 2026-09-23 ~19:45, session locale sur le point d'être fermée
-par l'utilisateur -- les 4 jobs GPU (Nancy graffiti-4, job group 6938131-6938134)
-continuent de tourner indépendamment sur Grid'5000, seul le suivi local (Monitor/
-ScheduleWakeup) sera perdu. À la reprise : relire ce fichier + relancer un check
-des logs (commande ci-dessous), pas besoin de relancer les jobs.
+Dernière mise à jour : 2026-09-23 ~20:05. Les monitors précédents sont tombés
+(session fermée/rouverte entre-temps) -- vérifié directement, les 4 jobs GPU
+tournent toujours sains (Nancy graffiti-4, job group 6938131-6938134), aucune
+perte. Contexte plus court désormais -- je log plus fréquemment dans ce fichier
+à chaque check, pas seulement en fin de gate.
+
+État à 20:05 : x1_g2_m3_addition_v2 step=14740/20000 loss~0.09-0.11 ;
+x1_m4_addition_seed1 step=16720/20000 loss~0.01-0.03 ; x1_m4_addition_seed2
+step=16000/20000 loss~0.01-0.03 ; x1_m3_addition_seed1_v2 step=14360/20000
+loss~0.11-0.20. Tous devraient FINAL dans ~5-10min (20000 steps proche).
 
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
