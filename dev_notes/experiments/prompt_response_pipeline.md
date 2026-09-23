@@ -1096,3 +1096,27 @@ Question : le collapse est-il une convergence vers un point fixe/attracteur du c
 4. **Entropie du logit-lens** : haute et proche du max au démarrage (12.19/12.42 nats, quasi-uniforme, step1), MINIMUM local vers step4-9 (4.2-4.4 nats -- précisément la plage d'entraînement n_step=4 !), puis **redescend monotonement** après step~10 jusqu'à 1.28 nats à step32 (quasi déterministe) -- la confiance du modèle AUGMENTE à mesure que `R` diverge le long de sa direction dominante, au lieu de se dégrader vers l'incertitude comme on pourrait le supposer naïvement.
 
 **Interprétation mécanistique complète** : le cœur récurrent ne converge pas vers un point fixe borné, mais vers une **direction dominante instable** (probablement liée au vecteur propre dominant de la carte linéaire effective par itération) le long de laquelle `R` diverge sans borne à chaque pas supplémentaire. Cette divergence directionnelle pousse la sortie du modèle vers une confiance croissante et FAUSSE sur un token générique fixe (cohérent avec les "paris sûrs" identifiés plus haut dans ce journal, ~25-43 tokens génériques dominants) -- explique à la fois l'explosion CE en extrapolation (E1) ET le collapse qualitatif en boucles répétitives observé partout dans la session. **Corrobore directement l'hypothèse motivant l'ablation `outer_norm` en cours par agent2 (E13)** : normaliser `R` à chaque itération (au lieu de laisser sa norme diverger librement) est le candidat naturel pour stabiliser ce mécanisme. Fichiers : `learn/indexed_attention/diagnose_iteration_dynamics.py`, `logs/diagnose_iteration_dynamics_kd_fullcov.json`.
+
+## X1 — Gate G1 (M4 dense, T1 addition) — 2026-09-23
+
+Bug trouvé et fixé : `greedy_generate()` dans `learn/x1/train_dense.py` omettait
+`attention_mask` explicite. Avec des `position_ids` non-monotones (schéma
+place-value), l'absence de ce mask fait diverger la construction du masque
+causal de GPT2 par rapport au chemin d'entraînement teacher-forcé,
+collapsant la génération vers EOS immédiat -- confirmé empiriquement
+(entrée identique, seule différence attention_mask présent/absent, cf.
+commit 2aaea79). Une fois fixé, EM passe de 0.0000 (bug) à des valeurs
+croissantes avec le budget d'entraînement.
+
+Résultats (n_layer=6, n_embd=320, n_head=5, ~7.4M params, digit_range 1-20,
+position_offset_max=80) :
+- 3000 steps : EM in-dist 18% (best 18%)
+- 12000 steps : EM in-dist 93% (best 93.5%)
+- 20000 steps : EM in-dist 99% (best 99%), OOD (21-100 chiffres) 6.5%
+
+**G1 VALIDÉE** (seuil >=95% franchi). OOD quasi nul, normal -- c'est
+précisément la question H2 que la grille complète doit trancher, pas un
+échec du gate.
+
+T3 (prefix_sum) : G1 et G2 déjà validés par data-agent (EM=1.0 in-dist),
+`learn/x1/train_looped_dense.py` (M3 looped-dense générique) créé.
