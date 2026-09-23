@@ -1056,3 +1056,18 @@ Question : le calibration-collapse (~0.3-0.5% partout sur Thinker, 6 ablations d
 **Accuracy argmax teacher-forcée = 20.5% (378/1844 tokens) -- proche de Baseline C (21.2%), à des ANNÉES-LUMIÈRE des ~0.3-0.5% de Thinker.**
 
 **Conclusion (résultat le plus informatif du lot selon la revue adverse) : la récurrence à poids partagés SEULE, sur une architecture dense/attention classique, NE REPRODUIT PAS le collapse de Thinker.** Ceci exclut définitivement l'hypothèse "c'est juste la récursion" et confirme que le collapse est spécifique à quelque chose de propre à l'architecture Thinker (register/KB/output-stream ou une interaction entre eux -- déjà exclus individuellement dans les 6 ablations précédentes, donc interaction complexe non encore isolée). Renforce fortement C3 pour le papier. Fichiers : `learn/distill/train_looped_dense.py`, `checkpoints/e3_looped_dense_wikitext/checkpoint.pt`, `logs/diagnose_e3_looped_dense.json`.
+
+## E1 (revue adverse papier, robustesse du gap CE fixe-vs-aléatoire sur 3 seeds) -- 4/6 runs terminés, résultat confirmé (2026-09-23)
+
+Répétition de phase13/14 (extrapolation n_step à l'inférence, gap fixe-vs-aléatoire) sur 3 seeds par condition ({n_step fixe=4 training} vs {n_step ~ U(1,8) training}), éval élargie `n_step_test` ∈ {1,2,4,8,12,16,24,32} (au lieu de {1,2,4,6,8,12,16}). Même dataset/setup que phase13/14 (`hotpotqa_full/train_repr10k_ab.jsonl`, d_model=256, n_head=4). `batch_size` ajusté selon la classe GPU (64 sur H100, 16 sur 2080Ti 12GB -- OOM initial à 64 sur 2080Ti, corrigé). Un run (fixed_seed0) a subi une préemption besteffort à mi-parcours (step 2360/6000), repris proprement via `--init_from_checkpoint` sans perte (budget complet rejoué).
+
+**4/6 runs terminés (fixed seed0/seed1, random seed0/seed1)** -- extrapolation `answer_ce` à n_step_test=1/4/32 :
+
+| Run | n_step_test=1 | n_step_test=4 (train) | n_step_test=32 | Gap (32 - 4) |
+|---|---|---|---|---|
+| fixed, seed0 | 9.23 | 7.85 | 15.75 | **+7.90** |
+| fixed, seed1 | 9.01 | 7.91 | 13.84 | **+5.93** |
+| random, seed0 | 8.09 | 7.97 | 8.06 | **+0.09** |
+| random, seed1 | 8.20 | 7.97 | 8.41 | **+0.44** |
+
+**Confirme le résultat original (gap ~0.03 vs ~4.0) sur 2 seeds indépendantes par condition** : le training à n_step fixe produit systématiquement une explosion en U à l'extrapolation (+5.9 à +7.9 sur ce sweep élargi jusqu'à 32), tandis que le training à n_step aléatoire reste quasi plat (+0.09 à +0.44) -- écart d'un ordre de grandeur, robuste au bruit de seed. 2 runs restants (seed2 x {fixed, random}) en cours (fixed_seed2 sur H100, random_seed2 en attente de GPU) pour compléter les 3 seeds.
