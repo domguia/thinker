@@ -54,7 +54,16 @@ def greedy_generate(model, prompt_ids: list, prompt_pos: list, max_new_tokens: i
     for _ in range(max_new_tokens):
         pos = torch.tensor([prompt_pos + [p for p in range(next_pos)]], device=device) if generated else \
               torch.tensor([prompt_pos], device=device)
-        out = model(input_ids=ids, position_ids=pos, use_cache=False)
+        # explicit attention_mask is REQUIRED: with our non-monotonic
+        # place-value position_ids, omitting it (relying on the None default)
+        # makes GPT2's causal-mask construction diverge from the
+        # teacher-forced training path and collapses generation to
+        # immediate EOS -- confirmed empirically (X1 gate G1 debug,
+        # 2026-09-23): identical input_ids/position_ids, only difference is
+        # attention_mask presence, with_mask predicts correctly, without
+        # predicts <eos> every time.
+        mask = torch.ones_like(ids)
+        out = model(input_ids=ids, position_ids=pos, attention_mask=mask, use_cache=False)
         next_id = out.logits[0, -1].argmax().item()
         if next_id == eos_id:
             break
