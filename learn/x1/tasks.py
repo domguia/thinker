@@ -22,7 +22,8 @@ from dataclasses import dataclass
 # Shared vocab: digits 0-9, then task-specific symbols appended.
 DIGITS = list("0123456789")
 PAD, BOS, EOS, PLUS, EQUALS, TIMES, SEP = "<pad>", "<bos>", "<eos>", "+", "=", "*", ","
-VOCAB = DIGITS + [PAD, BOS, EOS, PLUS, EQUALS, TIMES, SEP]
+MOVE_R, MOVE_D, MOVE_U, MOVE_L = ">", "v", "^", "<"
+VOCAB = DIGITS + [PAD, BOS, EOS, PLUS, EQUALS, TIMES, SEP, MOVE_R, MOVE_D, MOVE_U, MOVE_L]
 TOK2ID = {t: i for i, t in enumerate(VOCAB)}
 ID2TOK = {i: t for t, i in TOK2ID.items()}
 PAD_ID = TOK2ID[PAD]
@@ -209,5 +210,127 @@ def gen_multiplication(n_examples: int, digit_range: tuple, seed: int, position_
     return examples
 
 
+def _carve_perfect_maze(n: int, rng: random.Random):
+    """Randomized-DFS spanning tree over an n x n grid (Bansal et al. 2022's maze-solving
+    setup): guarantees exactly one path between any two cells, so the shortest path from
+    (0,0) to (n-1,n-1) is unique and well-defined (no path-choice ambiguity for the target).
+    Returns right_open[r][c] (c in 0..n-2, True=passage open between (r,c)-(r,c+1)) and
+    down_open[r][c] (r in 0..n-2, True=passage open between (r,c)-(r+1,c))."""
+    visited = [[False] * n for _ in range(n)]
+    right_open = [[False] * (n - 1) for _ in range(n)]
+    down_open = [[False] * n for _ in range(n - 1)]
+    stack = [(0, 0)]
+    visited[0][0] = True
+    while stack:
+        r, c = stack[-1]
+        neighbors = []
+        if c + 1 < n and not visited[r][c + 1]:
+            neighbors.append(("R", r, c + 1))
+        if c - 1 >= 0 and not visited[r][c - 1]:
+            neighbors.append(("L", r, c - 1))
+        if r + 1 < n and not visited[r + 1][c]:
+            neighbors.append(("D", r + 1, c))
+        if r - 1 >= 0 and not visited[r - 1][c]:
+            neighbors.append(("U", r - 1, c))
+        if not neighbors:
+            stack.pop()
+            continue
+        direction, nr, nc = rng.choice(neighbors)
+        if direction == "R":
+            right_open[r][c] = True
+        elif direction == "L":
+            right_open[r][c - 1] = True
+        elif direction == "D":
+            down_open[r][c] = True
+        elif direction == "U":
+            down_open[r - 1][c] = True
+        visited[nr][nc] = True
+        stack.append((nr, nc))
+    return right_open, down_open
+
+
+def _maze_path_moves(right_open, down_open, n: int) -> list:
+    """BFS from (0,0) to (n-1,n-1) over the spanning tree's open edges; since it's a tree
+    the path is unique, BFS just recovers it (no shortest-path ambiguity to worry about)."""
+    from collections import deque
+
+    parent = {}
+    move_from_parent = {}
+    visited = [[False] * n for _ in range(n)]
+    q = deque([(0, 0)])
+    visited[0][0] = True
+    while q:
+        r, c = q.popleft()
+        if (r, c) == (n - 1, n - 1):
+            break
+        cand = []
+        if c + 1 < n and right_open[r][c]:
+            cand.append((r, c + 1, MOVE_R))
+        if c - 1 >= 0 and right_open[r][c - 1]:
+            cand.append((r, c - 1, MOVE_L))
+        if r + 1 < n and down_open[r][c]:
+            cand.append((r + 1, c, MOVE_D))
+        if r - 1 >= 0 and down_open[r - 1][c]:
+            cand.append((r - 1, c, MOVE_U))
+        for nr, nc, mv in cand:
+            if not visited[nr][nc]:
+                visited[nr][nc] = True
+                parent[(nr, nc)] = (r, c)
+                move_from_parent[(nr, nc)] = mv
+                q.append((nr, nc))
+    moves = []
+    cur = (n - 1, n - 1)
+    while cur != (0, 0):
+        moves.append(move_from_parent[cur])
+        cur = parent[cur]
+    moves.reverse()
+    return moves
+
+
+def gen_labyrinth(n_examples: int, size_range: tuple, seed: int, position_offset_max: int = 0) -> list:
+    """T5 (X1_DISPATCH.md, Bansal et al. 2022 "End-to-End Algorithm Synthesis with
+    Recurrent Networks": maze solving, train 9x9, test 13x13-33x33): each loop iteration
+    can be read as one step of path-following/relaxation, probing the same H2 iteration
+    question as T3/T4 but on a spatial (non-linear-chain) reasoning structure.
+
+    size_range is the maze SIDE LENGTH n (n x n grid), NOT a token-sequence length like
+    the other tasks' size_range -- callers must set --n_positions from the actual encoded
+    sequence length (~2*n*(n-1)+1+path_len), not from n itself, or position ids will run
+    out of range for n>~10.
+
+    Input: the maze's spanning-tree connectivity, flattened row-major as one '1'/'0' token
+    per potential right-neighbor and down-neighbor edge (1=open passage, 0=wall), then SEP.
+    Target: the unique shortest path from (0,0) to (n-1,n-1) as a sequence of move tokens
+    (MOVE_R/MOVE_D/MOVE_U/MOVE_L), then EOS. Maze is a perfect maze (spanning tree) so this
+    path is unique -- no shortest-path-choice ambiguity in the supervised target."""
+    rng = random.Random(seed)
+    examples = []
+    for _ in range(n_examples):
+        n = rng.randint(*size_range)
+        offset = rng.randint(0, position_offset_max) if position_offset_max > 0 else 0
+        right_open, down_open = _carve_perfect_maze(n, rng)
+
+        ids = []
+        for r in range(n):
+            for c in range(n):
+                if c < n - 1:
+                    ids.append(TOK2ID[str(int(right_open[r][c]))])
+                if r < n - 1:
+                    ids.append(TOK2ID[str(int(down_open[r][c]))])
+        ids.append(TOK2ID[SEP])
+        prompt_len = len(ids)
+        pos = _place_value_positions(prompt_len, offset)
+
+        moves = _maze_path_moves(right_open, down_open, n)
+        target_ids = [TOK2ID[m] for m in moves] + [TOK2ID[EOS]]
+        target_pos = _place_value_positions(len(target_ids), offset)
+
+        full_ids = ids + target_ids
+        full_pos = pos + target_pos
+        examples.append(Example(input_ids=full_ids, position_ids=full_pos,
+                                 target_ids=[-100] * prompt_len + target_ids, prompt_len=prompt_len))
+    return examples
+
+
 TASKS = {"addition": gen_addition, "prefix_sum": gen_prefix_sum_parity, "p_hop": gen_p_hop_induction,
-         "multiplication": gen_multiplication}
+         "multiplication": gen_multiplication, "labyrinth": gen_labyrinth}
