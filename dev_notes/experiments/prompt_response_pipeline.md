@@ -1120,3 +1120,16 @@ précisément la question H2 que la grille complète doit trancher, pas un
 
 T3 (prefix_sum) : G1 et G2 déjà validés par data-agent (EM=1.0 in-dist),
 `learn/x1/train_looped_dense.py` (M3 looped-dense générique) créé.
+
+## X1 — Gate G2 (M3 looped-dense, T1 addition) — bug use_cache — 2026-09-23
+
+Crash identique à E3 : `learn/x1/train_looped_dense.py` (fichier de data-agent,
+pas encore commité, récupéré+fixé+commité par moi, commit 5f3cc40) omettait
+`use_cache=False` dans l'appel forward d'entraînement. Blocs ModuleList
+aliasés (weight-tying) partagent `layer_idx=0` -> cache KV incohérent dès
+qu'un seul appel forward boucle plusieurs fois sur le même bloc (n_step>1).
+Fixé, runs relancés (G2/T1 seed0 + M3/T1 seed1) sur graffiti-4.
+
+Parallélisation X1 en cours (consigne supervisor-agent) : 4 GPU Nancy
+graffiti-4 utilisés (G2/T1 + M4/T1 seed1+2 + M3/T1 seed1), coordination avec
+data-agent pour graffiti-11 (Nancy) + abacus27-1/abacus22-1 (Rennes).
