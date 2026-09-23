@@ -44,7 +44,8 @@ def main() -> None:
         from transformers import AutoConfig
         config = AutoConfig.from_pretrained(args.config_dir)
         model = AutoModelForCausalLM.from_config(config)
-        state_dict = torch.load(args.checkpoint, map_location=device)
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        state_dict = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
         model.load_state_dict(state_dict)
     else:
         model = AutoModelForCausalLM.from_pretrained(args.checkpoint)
