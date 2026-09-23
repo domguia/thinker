@@ -799,6 +799,19 @@ KD, n_step=4 fixe, même méthodologie : `answer_ce` (full val, 9000 ex.) = **7.
 
 Fichiers : `checkpoints/retrieval_kd_fullcov_best.pt`, `checkpoints/retrieval_kd_fullcov_best_qualitative.md`, `logs/eval_thinker_retrieval_kd_fullcov_fullval.json`.
 
+## phase21 (tinystories) -- 4e et dernier dataset de la liste prioritaire, collapse MOINS sévère que les autres (2026-09-23)
+
+Dataset repéré proactivement (couverture top-K déjà full, 4503/4503 train + 497/497 val, jamais testé en CE-vs-KD isolé -- agent2 avait seulement fait du KD-alone diagnostic dessus). Même méthodologie que phase18 (reformat 96/48 tokens, n_step=4 fixe).
+
+| Variante | answer_ce (full val, 497 ex.) | Qualitatif (greedy, 60 ex.) |
+|---|---|---|
+| CE-only | 5.1968 | 28/60 dégénéré (47%) |
+| KD (kd_alpha=0.5) | 5.0961 (mieux) | 24/60 dégénéré (40%) |
+
+**Notable : c'est le SEUL des 4 datasets testés où le taux de dégénérescence reste sous 50%** (wikitext 83-93%, retrieval 75%, math 97-100%). Le collapse reste présent et significatif, mais nettement moins total que sur les 3 autres -- première nuance à l'affirmation "collapse universel". Hypothèse à creuser : vocabulaire/structure de phrase bien plus simple dans TinyStories (langage enfantin répétitif par construction) pourrait rendre la tâche plus proche de ce que Thinker peut réellement apprendre à ce stade, ou au contraire la répétitivité naturelle du corpus rend les heuristiques de dégénérescence (uniformité lexicale) moins discriminantes ici -- pas encore tranché, nécessiterait une inspection qualitative manuelle des générations non-dégénérées.
+
+Fichiers : `checkpoints/tinystories_{ceonly,kd}_best.pt`, `checkpoints/tinystories_{ceonly,kd}_best_qualitative.md`, `logs/eval_thinker_tinystories_{ceonly,kd}_fullval.json`.
+
 **Note opérationnelle sur `qualitative_eval_math_kd_manual.py`** : `generate_thinker_reasoning` batch tous les exemples ensemble par défaut -- avec `max_thinking_len=1024` (math, contrairement à wikitext's `max_thinking_len=8`), batcher 30 exemples produit un tenseur logits `(30, 1024, vocab=248320)` ≈ 28GB, OOM même sur un L40S 48GB. Fix : boucler un exemple à la fois (`indices=[i]` par appel + `torch.cuda.empty_cache()`), coût en temps négligeable vs le gain de mémoire.
 
 **Phase19 terminé (retrieval, palier top-K 57%, `thinkfix_p46250`)** :
