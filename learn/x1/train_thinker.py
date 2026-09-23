@@ -72,7 +72,8 @@ def collate(examples, device, kb_leaves: int = None):
 
 
 @torch.no_grad()
-def greedy_generate_batch(model, prompt_ids, n_step: int, max_len: int, eos_id: int, device, kb_leaf_mask=None):
+def greedy_generate_batch(model, prompt_ids, n_step: int, max_len: int, eos_id: int, device, kb_leaf_mask=None,
+                           residual_readout: bool = False):
     """Same convention as generate_qualitative_compare_reasoning.py's
     generate_stream: target_input[0] = PAD_ID, recompute the full forward
     (including the n_step core loop) at every position -- sm_k/sm_v only
@@ -86,7 +87,8 @@ def greedy_generate_batch(model, prompt_ids, n_step: int, max_len: int, eos_id: 
     for t in range(max_len):
         _, stream_outputs = model(kb_tokens=prompt_ids, kb_source_ids=kb_source_ids,
                                    query_tokens=prompt_ids, n_step=n_step, kb_leaf_mask=kb_leaf_mask,
-                                   target_input={"answer": target_input})
+                                   target_input={"answer": target_input},
+                                   residual_tokens=prompt_ids if residual_readout else None)
         next_token = stream_outputs["answer"][:, t, :].argmax(dim=-1)
         next_token = torch.where(done, torch.full_like(next_token, PAD_ID), next_token)
         generated[:, t] = next_token
@@ -98,10 +100,12 @@ def greedy_generate_batch(model, prompt_ids, n_step: int, max_len: int, eos_id: 
     return generated
 
 
-def exact_match_eval(model, examples, device, eos_id, n_step: int, max_new_tokens=40, kb_leaves=None):
+def exact_match_eval(model, examples, device, eos_id, n_step: int, max_new_tokens=40, kb_leaves=None,
+                      residual_readout: bool = False):
     batch = collate(examples, device, kb_leaves=kb_leaves)
     generated = greedy_generate_batch(model, batch["prompt_ids"], n_step, max_new_tokens, eos_id, device,
-                                       kb_leaf_mask=batch["kb_leaf_mask"] if kb_leaves is not None else None)
+                                       kb_leaf_mask=batch["kb_leaf_mask"] if kb_leaves is not None else None,
+                                       residual_readout=residual_readout)
     correct = 0
     for i, e in enumerate(examples):
         target = e.target_ids[e.prompt_len:]
@@ -142,6 +146,13 @@ def main() -> None:
     ap.add_argument("--kb_block_size", type=int, default=4)
     ap.add_argument("--kb_depth", type=int, default=5, help="kb_leaves = kb_block_size**kb_depth must "
                      "be >= max(train_size_range[1], test_size_range[1]) + 2")
+    ap.add_argument("--residual_readout", action="store_true", help="X2(c) 'lecture depuis un residuel "
+                     "non recurrent' (X1_DISPATCH.md G3 note / RESEARCH_DIRECTION.md X2(c)): appends the "
+                     "raw (untouched-by-the-loop) prompt embedding to sm_k/sm_v after the n_step loop, so "
+                     "the answer stream's cross-attention has a hard bypass to the literal input tokens "
+                     "regardless of what the recurrent core computed -- orthogonal to X2(b)/enable_kb "
+                     "(a real hierarchical KB) and to sm_k/sm_v's own per-step trajectory (already a "
+                     "'read from all recurrent latents', not a residual around them).")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--max_steps", type=int, default=3000)
@@ -184,6 +195,8 @@ def main() -> None:
     model_name = "M2 Thinker+outer_norm" if args.outer_norm else "M1 Thinker"
     if args.enable_kb:
         model_name += " +X2(b)enable_kb"
+    if args.residual_readout:
+        model_name += " +X2(c)residual_readout"
     print(f"Model ({model_name}): {n_params / 1e6:.2f}M params "
           f"d_model={args.d_model} n_register={args.n_register} n_step_train_max={args.n_step_train_max} "
           f"kb_leaves={kb_leaves}", flush=True)
@@ -203,7 +216,8 @@ def main() -> None:
         _, stream_outputs = model(kb_tokens=batch["prompt_ids"], kb_source_ids=kb_source_ids,
                                    query_tokens=batch["prompt_ids"], n_step=n_step,
                                    kb_leaf_mask=batch["kb_leaf_mask"] if args.enable_kb else None,
-                                   target_input={"answer": batch["target_input"]})
+                                   target_input={"answer": batch["target_input"]},
+                                   residual_tokens=batch["prompt_ids"] if args.residual_readout else None)
         logits = stream_outputs["answer"]
         loss = torch.nn.functional.cross_entropy(logits.reshape(-1, VOCAB_SIZE), batch["labels"].reshape(-1),
                                                    ignore_index=-100)
@@ -217,7 +231,7 @@ def main() -> None:
         if step % args.eval_every == 0:
             model.eval()
             id_examples = gen_fn(args.n_eval, (train_lo, train_hi), seed=999_000 + step, position_offset_max=0)
-            id_em = exact_match_eval(model, id_examples, device, eos_id, n_step_test, args.max_answer_len, kb_leaves)
+            id_em = exact_match_eval(model, id_examples, device, eos_id, n_step_test, args.max_answer_len, kb_leaves, args.residual_readout)
             print(f"step={step} IN-DIST EM={id_em:.4f} (n_step_test={n_step_test})", flush=True)
             model.train()
             if id_em > best_id_em:
@@ -229,9 +243,9 @@ def main() -> None:
 
     model.eval()
     id_examples = gen_fn(args.n_eval, (train_lo, train_hi), seed=999_001, position_offset_max=0)
-    id_em = exact_match_eval(model, id_examples, device, eos_id, n_step_test, args.max_answer_len, kb_leaves)
+    id_em = exact_match_eval(model, id_examples, device, eos_id, n_step_test, args.max_answer_len, kb_leaves, args.residual_readout)
     ood_examples = gen_fn(args.n_eval, (test_lo, test_hi), seed=999_002, position_offset_max=0)
-    ood_em = exact_match_eval(model, ood_examples, device, eos_id, n_step_test, args.max_answer_len, kb_leaves)
+    ood_em = exact_match_eval(model, ood_examples, device, eos_id, n_step_test, args.max_answer_len, kb_leaves, args.residual_readout)
     print(f"FINAL in-distribution EM={id_em:.4f} ({args.train_size_range}) n_step_test={n_step_test}")
     print(f"FINAL OOD EM={ood_em:.4f} ({args.test_size_range}) n_step_test={n_step_test}")
     print(f"best_in_dist_em_during_training={best_id_em:.4f}")
@@ -240,9 +254,9 @@ def main() -> None:
         sweep_values = [int(v) for v in args.n_step_test_sweep.split(",")]
         for ns in sweep_values:
             id_examples = gen_fn(args.n_eval, (train_lo, train_hi), seed=999_001, position_offset_max=0)
-            id_sweep = exact_match_eval(model, id_examples, device, eos_id, ns, args.max_answer_len, kb_leaves)
+            id_sweep = exact_match_eval(model, id_examples, device, eos_id, ns, args.max_answer_len, kb_leaves, args.residual_readout)
             ood_examples = gen_fn(args.n_eval, (test_lo, test_hi), seed=999_002, position_offset_max=0)
-            ood_sweep = exact_match_eval(model, ood_examples, device, eos_id, ns, args.max_answer_len, kb_leaves)
+            ood_sweep = exact_match_eval(model, ood_examples, device, eos_id, ns, args.max_answer_len, kb_leaves, args.residual_readout)
             print(f"SWEEP n_step_test={ns} in-dist EM={id_sweep:.4f} OOD EM={ood_sweep:.4f}")
 
 

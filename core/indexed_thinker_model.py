@@ -563,7 +563,8 @@ class Thinker(nn.Module):
     def forward(self, kb_tokens: torch.Tensor, kb_source_ids: torch.Tensor,
                 query_tokens: torch.Tensor, n_step: int, kb_leaf_mask: torch.Tensor = None,
                 register_init_override: torch.Tensor = None, target_input: torch.Tensor = None,
-                kb_prebuilt: bool = False, return_hidden: bool = False):
+                kb_prebuilt: bool = False, return_hidden: bool = False,
+                residual_tokens: torch.Tensor = None):
         """
         kb_tokens: (B, N) leaf token ids for the unified input∪KB sequence
             (N must equal block_size ** depth when depth > 0).
@@ -614,6 +615,17 @@ class Thinker(nn.Module):
             logits (B, T, out_dim), letting the caller run the head itself
             through a chunked loss (learn/distill/chunked_loss.py) instead of
             materializing the full (B, T, vocab) logits tensor here.
+        residual_tokens: optional (B, Tres) -- X1_DISPATCH.md X2(c) "lecture
+            depuis un résiduel non récurrent": raw input token ids, embedded
+            here and appended to sm_k/sm_v as extra keys/values AFTER the
+            n_step loop, so every output stream's cross-attention has direct
+            access to the untouched input embedding regardless of what the
+            recurrent core computed -- a hard non-recurrent bypass, distinct
+            from sm_k/sm_v's existing per-step trajectory (which is already a
+            "read from all latents" of the recurrent state, not a residual
+            around it) and from the KB mechanism (X2(b), disable_kb). Default
+            None preserves prior behavior exactly (no other caller passes
+            this yet).
 
         Returns: (R, stream_outputs) with R: (B, n_register, d_model) the final
                  core register state, and stream_outputs a dict {name: (B, 1, out_dim)}
@@ -639,6 +651,11 @@ class Thinker(nn.Module):
 
         for _ in range(n_step):
             R, sm_k, sm_v = self._step(R, sm_k, sm_v)
+
+        if residual_tokens is not None:
+            res_emb = self.embed(residual_tokens)  # (B, Tres, d) -- untouched by the loop above
+            sm_k = torch.cat([sm_k, res_emb], dim=1)
+            sm_v = torch.cat([sm_v, res_emb], dim=1)
 
         # spec §14.3: sequence_mode streams need teacher-forced target-token
         # embeddings as their per-position query input; embedded here (shared
