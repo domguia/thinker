@@ -24,6 +24,7 @@ WIKI_ROOT="/srv/storage/killerdroid@storage3.rennes.grid5000.fr/thinker-distill/
   --batch_size 4 --bf16 \
   --lr 1e-4 --max_steps 6000 --max_time_minutes 150 \
   --val_every 250 \
+  --save_dir checkpoints/baselineC_wikitext \
   --seed 0 \
   > logs/baselineC_wikitext_ceonly_train.log 2>&1
 
