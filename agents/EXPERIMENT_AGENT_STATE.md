@@ -4,7 +4,11 @@
 détail chronologique/résultats complets restent dans
 `dev_notes/experiments/prompt_response_pipeline.md`.)
 
-Dernière mise à jour : 2026-09-23 ~19:14, en cours de session (deadline X1 25/09 12h00).
+Dernière mise à jour : 2026-09-23 ~19:45, session locale sur le point d'être fermée
+par l'utilisateur -- les 4 jobs GPU (Nancy graffiti-4, job group 6938131-6938134)
+continuent de tourner indépendamment sur Grid'5000, seul le suivi local (Monitor/
+ScheduleWakeup) sera perdu. À la reprise : relire ce fichier + relancer un check
+des logs (commande ci-dessous), pas besoin de relancer les jobs.
 
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
@@ -14,8 +18,21 @@ Dernière mise à jour : 2026-09-23 ~19:14, en cours de session (deadline X1 25/
   `greedy_generate()` (learn/x1/train_dense.py) cassait toute génération malgré
   loss d'entraînement saine (commit 2aaea79). OOD=6.5% -- normal, c'est la question
   H2 elle-même, pas un échec de gate.
-  - Prochaine étape : G2/T1 (M3 looped-dense) -- réutiliser
-    `learn/x1/train_looped_dense.py` (générique, déjà validé par data-agent sur T3).
+- **G2/T1 (M3 looped-dense) EN COURS** sur graffiti-4, 4 jobs parallèles (besteffort,
+  job group 6938131-6938134), tous sains à la dernière lecture (2026-09-23 ~19:45,
+  aucune erreur, loss en baisse) :
+  - `x1_g2_m3_addition_v2.log` : step=11000/20000, loss~0.12-0.19, n_step curriculum OK
+  - `x1_m4_addition_seed1.log` (réplicat seed1 M4/T1) : step=13380/20000, loss~0.04
+  - `x1_m4_addition_seed2.log` (réplicat seed2 M4/T1) : step=12960/20000, loss~0.01-0.02
+  - `x1_m3_addition_seed1_v2.log` (M3/T1 seed1) : step=10760/20000, loss~0.11-0.15,
+    dernier EM lu à step 3000 = 0.1100 (n_step_test=8), normal si tôt dans training
+  - Bug déjà rencontré + fixé sur ces 4 runs : `use_cache=False` manquant dans
+    `learn/x1/train_looped_dense.py` (commit 5f3cc40) -- ne pas rediagnostiquer si
+    ça réapparaît, juste vérifier que le fix est bien dans le fichier committé.
+  - Commande de vérification à la reprise :
+    `ssh nancy.g5k 'for f in x1_g2_m3_addition_v2 x1_m4_addition_seed1 x1_m4_addition_seed2 x1_m3_addition_seed1_v2; do echo "=== $f ==="; OAR_JOB_ID=6938131 oarsh graffiti-4 "tail -5 ~/thinker/logs/$f.log 2>/dev/null"; done'`
+  - Une fois `FINAL in-distribution EM=` >=95% sur `x1_g2_m3_addition_v2.log` :
+    G2/T1 validée, committer résultat (journal + ce fichier), comme pour G1/T1.
 - **T3 (prefix_sum) : G1 + G2 VALIDÉES par data-agent** (EM=1.0 in-dist les deux).
   data-agent construit maintenant le harnais Thinker (M1) pour le vocab synthétique
   X1 -- plan : disable_kb=True (Baseline B, pas de KB externe pour ces tâches),
