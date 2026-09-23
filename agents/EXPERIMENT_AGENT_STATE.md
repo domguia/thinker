@@ -37,6 +37,25 @@ Résultats FINAL à 20:15 :
   `learn/x1/train_thinker.py` générique, réutilisable pour G3/T1 une fois
   G2/T1 clos. data-agent passe à la grille complète T3 sur graffiti-11.
 
+## Proactivité GPU (20:20, directive supervisor-agent + infra-agent)
+3 des 4 GPU graffiti-4 étaient devenus idle (jobs M4 seed1/seed2 + M3 seed1
+terminés, GPU 0% util confirmé nvidia-smi) pendant que G2/T1 v3 tournait sur
+le 4e -- relancés immédiatement, sans attendre G2/T1 :
+- `x1_g3_m1_addition.log` (job 6938132) : G3/T1, M1 Thinker baseline B,
+  n_step_train_max=16, n_step_test_sweep 1..32, seed=0, 30k steps.
+- `x1_x2a_m2_addition.log` (job 6938133) : X2(a)/T1, M2 Thinker+outer_norm
+  (remède déjà implémenté dans core/indexed_thinker_model.py, flag
+  --outer_norm), même config, seed=0. Justifié par la table de décision
+  X1_DISPATCH §5 (data-agent a déjà observé le défaut H8 sur G3/T3, donc
+  tester le remède outer_norm en parallèle sur T1 est autorisé sans attendre).
+- `x1_g3_m1_addition_seed1.log` (job 6938134) : 2e seed de G3/T1 M1, même
+  config, seed=1 -- tâche la plus incertaine/bloquante, priorité aux seeds.
+- X2(b)/(c)/(d) (recall input, lecture multi-latents, tête d'arrêt) : PAS
+  encore implémentés dans le code (vérifié, seul outer_norm=X2a existe) --
+  nécessitent du dev, pas juste un lancement. À faire si G3/T1+X2a confirment
+  le besoin d'un remède plus poussé.
+- Les 4 GPU graffiti-4 sont maintenant tous actifs (aucun idle).
+
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
   rapports courts, batchés, escalade uniquement selon X1_DISPATCH.md §6.
