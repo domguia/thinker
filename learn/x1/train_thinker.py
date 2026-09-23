@@ -118,6 +118,12 @@ def main() -> None:
     ap.add_argument("--n_step_train_max", type=int, default=8, help="upper bound of the per-step "
                      "random.randint(1, n) curriculum")
     ap.add_argument("--n_step_test", type=int, default=None, help="default: n_step_train_max")
+    ap.add_argument("--n_step_test_sweep", default=None, help="comma-separated n_step_test values "
+                     "(Thinker's forward loop is `for _ in range(n_step)`, so any value works with no "
+                     "aliasing tricks needed) evaluated at the end using the same trained checkpoint -- "
+                     "e.g. 1,2,4,8,12,16,24,32")
+    ap.add_argument("--outer_norm", action="store_true", help="M2: Thinker+outer_norm variant "
+                     "(core/indexed_thinker_model.py Thinker's outer_norm flag)")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--max_steps", type=int, default=3000)
@@ -144,10 +150,11 @@ def main() -> None:
         block_size=2, depth=0, n_head=args.n_head, pool_n_head=args.pool_n_head,
         disable_kb=True, stream_dims={"answer": VOCAB_SIZE},
         stream_n_layers={"answer": 1}, stream_sequence={"answer": True},
-        max_target_len=args.max_answer_len,
+        max_target_len=args.max_answer_len, outer_norm=args.outer_norm,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model (M1 Thinker, disable_kb=True/Baseline B): {n_params / 1e6:.2f}M params "
+    model_name = "M2 Thinker+outer_norm" if args.outer_norm else "M1 Thinker"
+    print(f"Model ({model_name}, disable_kb=True/Baseline B): {n_params / 1e6:.2f}M params "
           f"d_model={args.d_model} n_register={args.n_register} n_step_train_max={args.n_step_train_max}",
           flush=True)
 
@@ -197,6 +204,15 @@ def main() -> None:
     print(f"FINAL in-distribution EM={id_em:.4f} ({args.train_size_range}) n_step_test={n_step_test}")
     print(f"FINAL OOD EM={ood_em:.4f} ({args.test_size_range}) n_step_test={n_step_test}")
     print(f"best_in_dist_em_during_training={best_id_em:.4f}")
+
+    if args.n_step_test_sweep:
+        sweep_values = [int(v) for v in args.n_step_test_sweep.split(",")]
+        for ns in sweep_values:
+            id_examples = gen_fn(args.n_eval, (train_lo, train_hi), seed=999_001, position_offset_max=0)
+            id_sweep = exact_match_eval(model, id_examples, device, eos_id, ns, args.max_answer_len)
+            ood_examples = gen_fn(args.n_eval, (test_lo, test_hi), seed=999_002, position_offset_max=0)
+            ood_sweep = exact_match_eval(model, ood_examples, device, eos_id, ns, args.max_answer_len)
+            print(f"SWEEP n_step_test={ns} in-dist EM={id_sweep:.4f} OOD EM={ood_sweep:.4f}")
 
 
 if __name__ == "__main__":

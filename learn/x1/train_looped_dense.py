@@ -45,6 +45,9 @@ def main() -> None:
     ap.add_argument("--n_step_train_max", type=int, default=8, help="ModuleList aliased to this many "
                      "entries; also the upper bound of the per-step random.randint(1, n) curriculum")
     ap.add_argument("--n_step_test", type=int, default=None, help="default: n_step_train_max")
+    ap.add_argument("--n_step_test_sweep", default=None, help="comma-separated n_step_test values "
+                     "(may exceed n_step_train_max, see eval_em's dynamic aliasing) evaluated at the end "
+                     "using the same trained checkpoint -- e.g. 1,2,4,8,12,16,24,32")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--max_steps", type=int, default=3000)
@@ -88,7 +91,10 @@ def main() -> None:
           f"block), n_step_train_max={args.n_step_train_max} n_embd={args.n_embd}", flush=True)
 
     def eval_em(examples, n_step: int) -> float:
-        model.transformer.h = full_h[:n_step]
+        # dynamic aliasing (not full_h[:n_step]): lets n_step_test EXCEED
+        # n_step_train_max (the actual H2 extrapolation question) -- GPT2Model.forward
+        # iterates over self.h directly (not config.n_layer), so any length works.
+        model.transformer.h = torch.nn.ModuleList([base_block for _ in range(n_step)])
         em = exact_match_eval(model, examples, device, eos_id)
         model.transformer.h = full_h
         return em
@@ -144,6 +150,15 @@ def main() -> None:
     print(f"FINAL in-distribution EM={id_em:.4f} ({args.train_size_range}) n_step_test={n_step_test}")
     print(f"FINAL OOD EM={ood_em:.4f} ({args.test_size_range}) n_step_test={n_step_test}")
     print(f"best_in_dist_em_during_training={best_id_em:.4f}")
+
+    if args.n_step_test_sweep:
+        sweep_values = [int(v) for v in args.n_step_test_sweep.split(",")]
+        for ns in sweep_values:
+            id_examples = gen_fn(args.n_eval, (train_lo, train_hi), seed=999_001, position_offset_max=0)
+            id_sweep = eval_em(id_examples, ns)
+            ood_examples = gen_fn(args.n_eval, (test_lo, test_hi), seed=999_002, position_offset_max=0)
+            ood_sweep = eval_em(ood_examples, ns)
+            print(f"SWEEP n_step_test={ns} in-dist EM={id_sweep:.4f} OOD EM={ood_sweep:.4f}")
 
 
 if __name__ == "__main__":
