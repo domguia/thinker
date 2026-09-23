@@ -73,7 +73,7 @@ def greedy_generate(model, prompt_ids: list, prompt_pos: list, max_new_tokens: i
     return generated
 
 
-def exact_match_eval(model, examples, device, eos_id, max_new_tokens=40):
+def exact_match_eval(model, examples, device, eos_id, max_new_tokens=100):
     correct = 0
     for e in examples:
         target = e.target_ids[e.prompt_len:]
