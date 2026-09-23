@@ -1025,3 +1025,20 @@ Décision utilisateur (via supervisor-agent) : tester si un changement de décod
 2. **Réponse forcée courte** (troncature post-hoc à 6 tokens subword, `--truncate_pred_tokens` -- PAS via `--max_answer_len` réduit, qui casse le chargement du checkpoint car cette valeur dimensionne aussi la table `pos_embed` à la construction du modèle, cf. erreur `size mismatch` rencontrée) : EM=0.00% (KD et CE-only), F1=1.01%/1.95% -- légèrement mieux qu'avant troncature (effet mécanique attendu : moins de mots = moins de chances de diluer le F1 avec du bruit après une éventuelle bonne réponse partielle), mais **EM reste strictement à zéro**.
 
 **Conclusion : aucun des deux leviers de décodage (température/top-p, ou format de réponse court) ne récupère de réponse correcte.** Cohérent avec le diagnostic de calibration : le problème n'est pas un excès de déterminisme greedy sur une distribution par ailleurs correcte (le sampling n'aide pas), ni une dilution du signal par une génération trop longue (la troncature courte n'aide pas non plus sur l'EM) -- la masse de probabilité elle-même, à chaque position, n'est simplement jamais concentrée sur le bon token, quelle que soit la stratégie de décodage. Recovery-path épuisé à coût nul (inférence seule). Fichiers : `logs/emf1_{kd_fullcov,ceonly}_{sampled,shortlen}.json`.
+
+## Efficience Thinker vs LLM de référence : premier chiffrage direct params + latence/débit (2026-09-23)
+
+Réallocation supervisor-agent (décision utilisateur, après clôture du chantier collapse) : mesurer l'objectif central "petit modèle, gros gain vs LLM pré-entraînés" pas encore chiffré directement (accuracy/CE déjà comparée plus haut, mais pas l'efficience -- latence, débit, paramètres). Vérifié `dev_notes/` avant d'écrire quoi que ce soit : aucun chiffre de latence/tokens-sec/FLOPs existant, seulement des comparaisons de CE (`eval_llm_baseline_retrieval.py`).
+
+Nouveau script `learn/indexed_attention/bench_efficiency_thinker_vs_llm.py` : charge un checkpoint Thinker et un LLM HF de référence, génère en greedy sur les MÊMES 30 prompts retrieval (mêmes `block_size`/`n_docs_max`/`max_answer_len` que partout ailleurs dans ce fichier), mesure params + latence murale + tokens/sec, batch_size=1 des deux côtés.
+
+**⚠️ Caveat méthodologique explicite (documenté dans le script)** : `generate_thinker` n'a PAS de KV-cache (un `forward()` complet par token généré, ré-attend tout le contexte à chaque étape -- limitation connue, cf. `generate_qualitative_compare.py`), alors que `.generate()` HF utilise nativement son cache. Comparaison "tel qu'exécuté réellement", pas un banc d'essai à moteur d'inférence égal.
+
+**Résultat (`retrieval_kd_fullcov_best.pt` vs Qwen3.5-0.8B, 30 prompts, L40S 48GB, bf16 pour le LLM)** :
+
+| | Params | Tokens/s | s/exemple |
+|---|---|---|---|
+| Thinker | 128.8M | **517.3** | 0.121 |
+| Qwen3.5-0.8B | 752.4M | 60.8 | 1.053 |
+
+**Thinker utilise 5.8x moins de paramètres ET génère 8.5x plus vite (tokens/s), MALGRÉ l'absence de cache KV.** Résultat net dès le premier run, sans ambiguïté. FLOPs/token non mesuré (optionnel selon la consigne) -- params + débit mesuré donnent déjà un chiffrage direct et cohérent de l'objectif "efficience" ; à ajouter si demandé. Fichiers : `logs/bench_efficiency_thinker_vs_qwen35.json`.
