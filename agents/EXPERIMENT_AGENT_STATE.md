@@ -231,3 +231,15 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
 - Pas de nouvelle réponse de data-agent sur l'avancement T5 (labyrinthes) --
   aucun générateur `gen_labyrinth`/maze écrit encore côté aucun agent, à
   vérifier/coordonner pour éviter le double travail avant de s'y attaquer.
+
+## G1/T2 v2 -- progrès réel, pas un plateau, v3 lancé -- 23:36
+- v2 (20000 steps) : FINAL EM=0.4850 in-dist (best 0.51), OOD=0.0000, loss
+  0.69 en baisse continue depuis 1.20 (v1). Signal d'apprentissage réel
+  (pas un plateau mort type ln(2)) -- pas d'escalade, on prolonge.
+- v3 lancé même GPU (abacus21-1, job 4140312) : max_steps 60000 (x3),
+  max_time_minutes 30, eval_every 1000. Log
+  `logs/x1_g1_m4_multiplication_v3.log`, save_dir
+  `runs/x1_g1_m4_multiplication_v3`.
+- Toujours pas de réponse de data-agent sur T5 (labyrinthes) -- aucun
+  générateur `gen_labyrinth` écrit. Pas d'urgence à insister, GPU restent
+  utilisés sur T2 en attendant.
