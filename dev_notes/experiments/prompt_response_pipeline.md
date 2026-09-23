@@ -878,3 +878,17 @@ GPU disponible (job `6937373`, `graffiti-1`, Nancy) pour `learn/distill/train_sf
 2. **`KeyError: 'teacher_indices'` dans `evaluate_val`** (`learn/distill/train_sft.py:482`) -- bug réel indépendant de Baseline C : la fonction fait un `.pop("teacher_indices")` inconditionnel (sans défaut), alors que la boucle d'entraînement (ligne 865) gère déjà correctement le cas CE-only (`.pop(..., None)`). Crash au premier `val_every` après le tout premier step de training (step 1 logué avant le crash, donc pas un problème de démarrage du training lui-même). **Fix appliqué** (commit à faire) : `.pop(..., None)` sur les 4 clés teacher_*, `kd = topk_kd_loss(...) if teacher_indices is not None else 0`, et `kd_alpha` forcé à 0 si pas de teacher targets -- ce bug latent aurait cassé N'IMPORTE QUEL run CE-only de `train_sft.py` dès le premier `--val_every`, pas seulement Baseline C. Synchronisé vers Nancy, relancé.
 
 Modèle : 68.5M params (5.0M core + 63.5M head -- vocab qwen35 domine largement la taille, cf. lecon vocab). `n_layer=6, n_embd=256, n_head=4, block_size=256`, comparable en largeur/n_head à Thinker (`d_model=256, n_head=4`) mais sans récurrence.
+
+## Baseline C -- résultat décisif : calibration teacher-forcée nettement meilleure, mais collapse en génération libre présent aussi (2026-09-23)
+
+Entraînement terminé (6000 steps, ~13min, A40-class 2080Ti Nancy) : `best_loss=3.658` (train), val CE dégrade 7.76->8.27 sur l'entraînement (overfitting classique, 68.5M params vs 4497 exemples). Checkpoint sauvegardé (`checkpoints/baselineC_wikitext/checkpoint.pt`, 822MB).
+
+**Diagnostic de calibration (`diagnose_generation_divergence_flat.py`, patché pour dépaqueter le `state_dict` imbriqué de `save_checkpoint`)** : **accuracy argmax teacher-forcée = 21.2% (391/1844 tokens)**, divergence libre-vs-forcé faible (immédiat t=0 : 0/30, dans les 3 premiers tokens : 27/30, moyenne 1.47). **Comparaison directe avec Thinker (CE-only, math/wikitext/retrieval, tous checkpoints confondus) : ~0.4-0.6% argmax teacher-forcé (agent2)** -- Baseline C fait ~35-50x mieux sur cette métrique précise.
+
+**MAIS éval qualitative en génération libre gourmande (greedy, 30 exemples, mêmes heuristiques que les checks Thinker) : 23/30 dégénéré** -- boucles de répétition classiques (`"the 19th century , the 19th century , ..."`, `"the game was the game , and the game was the game ..."`), très proche des 25/30 et 28/30 observés sur Thinker.
+
+**Interprétation** : ce sont DEUX modes de défaillance distincts, pas le même phénomène.
+1. Le collapse en génération libre (boucles répétitives) apparaît sur LES DEUX architectures -- artefact générique attendu à cette échelle (modèle minuscule, 4497 exemples, greedy decoding) : exposure bias classique, bien documenté dans la littérature, pas spécifique à Thinker.
+2. Mais l'échec de calibration SOUS TEACHER-FORCING (argmax quasi tout le temps faux, ~0.5%) semble **spécifique au mécanisme récurrent de Thinker** -- Baseline C, sans récurrence, reste largement fonctionnel sous teacher-forcing (21.2%, ordre de grandeur normal pour un si petit modèle) malgré la même donnée/vocab/échelle.
+
+**Conclusion pour l'hypothèse structurelle** : renforce fortement l'hypothèse que le cœur récurrent partagé de Thinker (poids réutilisés à travers les `n_step` itérations) est la cause du calibration-collapse sévère, indépendamment du collapse générique en génération libre que tout petit modèle undertrained présente de toute façon. Fichiers : `logs/diagnose_baselineC_wikitext.json`, `logs/qualitative_baselineC_wikitext.log`.
