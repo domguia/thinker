@@ -995,3 +995,20 @@ Décision utilisateur (via supervisor-agent) : dernier test avant d'arrêter la 
 ### Clôture de l'investigation "génération collapse" (décision utilisateur, 2026-09-23)
 
 6 ablations/isolations testées au total (n_step récurrence, KB/retrieval, answer-head-per-position, n_register, et leur combinaison, plus le contrôle architectural Baseline C dense-transformer) : **aucune n'explique le calibration-collapse sévère et stable (accuracy argmax teacher-forcée ~0.25-0.5% partout sur Thinker, contre 21.2% pour Baseline C à échelle/données identiques).** Décision utilisateur : arrêter la chasse au mécanisme isolé, documenter le collapse comme une propriété du mécanisme récurrent Thinker dans son ensemble (non isolable à un composant testé individuellement ni à une simple interaction par paire), et recentrer l'effort sur les résultats de thèse centraux (extrapolation n_step, performance retrieval, efficience) pour le papier plutôt que de continuer cette investigation diagnostique.
+
+## Accuracy retrieval réelle (EM/F1) sur la réponse finale générée : chiffrage direct (2026-09-23)
+
+Demande supervisor-agent (décision utilisateur, après clôture de l'investigation collapse) : mesurer l'objectif central pas encore chiffré directement -- exact match / F1 sur la réponse finale générée en libre (greedy), pas juste CE ou l'heuristique qualitative visuelle. Question posée : la réponse finale (souvent courte/factuelle) reste-t-elle correcte malgré le bruit observé ailleurs en génération libre ?
+
+Nouveau script `learn/indexed_attention/eval_retrieval_em_f1.py` (aucun script EM/F1 existant trouvé pour ce dataset -- `eval_llm_baseline_retrieval.py` ne mesure que la CE) : génère en greedy via `generate_thinker` (même mécanisme que le qualitatif), normalise (minuscules, ponctuation/articles retirés, standard SQuAD/HotpotQA) et calcule EM (égalité stricte) + F1 (chevauchement token-level).
+
+Testé sur les 2 meilleurs checkpoints disponibles, 500 exemples du val set (9000 dispo) :
+
+| Checkpoint | EM | F1 |
+|---|---|---|
+| KD top-K, couverture FULL (100%) -- `retrieval_kd_fullcov_best.pt` | **0.00%** | 0.32% |
+| CE-only (phase19, `retrieval_ceonly_fixed_best.pt`) | **0.00%** | 0.79% |
+
+**Réponse nette : NON, la réponse finale n'est pas préservée.** Sur 0/1000 exemples générés (les deux checkpoints combinés), aucune réponse exacte. F1 quasi nul (0.3-0.8%, l'aléatoire pur sur des réponses courtes donnerait déjà plus par chevauchement fortuit de mots-outils). Exemples de générations pour des réponses attendues courtes ("65 million", "Kenichi Yamamoto", "no") : boucles numériques (`19720000...`) ou tokens génériques (`"The 200000...`, `"yes...no..."`) -- exactement les "paris sûrs" déjà identifiés par le diagnostic de calibration, pas une réponse tronquée-mais-reconnaissable.
+
+**Conclusion pour le papier : le collapse de calibration n'épargne pas la réponse finale -- contrairement à l'hypothèse testée, ce n'est pas un bruit cosmétique limité aux tokens "de remplissage" autour d'une réponse correcte. La performance retrieval réelle de Thinker sur ce jeu de checkpoints est ~0% EM, quel que soit KD/CE-only.** Fichiers : `logs/emf1_kd_fullcov.json`, `logs/emf1_ceonly_fixed.json`.
