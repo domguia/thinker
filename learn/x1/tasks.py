@@ -173,4 +173,41 @@ def gen_p_hop_induction(n_examples: int, hop_range: tuple, seed: int, position_o
     return examples
 
 
-TASKS = {"addition": gen_addition, "prefix_sum": gen_prefix_sum_parity, "p_hop": gen_p_hop_induction}
+def gen_multiplication(n_examples: int, digit_range: tuple, seed: int, position_offset_max: int = 0) -> list:
+    """T2 (X1_DISPATCH.md, McLeish et al. 2024): A * B = C, same reversed-digit /
+    place-value-position scheme as gen_addition. digit_range applies to BOTH
+    operands independently (dispatch table: train 1-5 digits, test OOD up to
+    10x10 -- i.e. also digit_range but wider at eval time, position_offset_max=0
+    there as with the other tasks)."""
+    rng = random.Random(seed)
+    examples = []
+    for _ in range(n_examples):
+        da = rng.randint(*digit_range)
+        db = rng.randint(*digit_range)
+        a = rng.randint(10 ** (da - 1) if da > 1 else 0, 10 ** da - 1)
+        b = rng.randint(10 ** (db - 1) if db > 1 else 0, 10 ** db - 1)
+        c = a * b
+        offset = rng.randint(0, position_offset_max) if position_offset_max > 0 else 0
+
+        a_digits = _encode_number_reversed(a)
+        b_digits = _encode_number_reversed(b)
+        c_digits = _encode_number_reversed(c)
+
+        ids = [TOK2ID[str(d)] for d in a_digits] + [TOK2ID[TIMES]] + \
+              [TOK2ID[str(d)] for d in b_digits] + [TOK2ID[EQUALS]]
+        pos = _place_value_positions(len(a_digits), offset) + [offset + len(a_digits)] + \
+              _place_value_positions(len(b_digits), offset) + [offset + max(len(a_digits), len(b_digits)) + 1]
+        prompt_len = len(ids)
+
+        target_ids = [TOK2ID[str(d)] for d in c_digits] + [TOK2ID[EOS]]
+        target_pos = _place_value_positions(len(target_ids), offset)
+
+        full_ids = ids + target_ids
+        full_pos = pos + target_pos
+        examples.append(Example(input_ids=full_ids, position_ids=full_pos,
+                                 target_ids=[-100] * prompt_len + target_ids, prompt_len=prompt_len))
+    return examples
+
+
+TASKS = {"addition": gen_addition, "prefix_sum": gen_prefix_sum_parity, "p_hop": gen_p_hop_induction,
+         "multiplication": gen_multiplication}
