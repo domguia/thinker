@@ -92,15 +92,32 @@ class JsonlTextDataset(Dataset):
         self.repr_proj_dim = None
         if repr_teacher_hidden is not None:
             assert repr_teacher_layer is not None, "--repr_teacher_layer is required with --repr_teacher_hidden"
-            rnpz = np.load(repr_teacher_hidden)
             key = f"hidden_{repr_teacher_layer}"
-            assert key in rnpz, f"{repr_teacher_hidden!r} has no {key!r} -- available: {list(rnpz.keys())}"
-            raw_hidden = torch.from_numpy(rnpz[key].astype(np.float32))  # (total_tokens, teacher_hidden_size)
+            if os.path.isdir(repr_teacher_hidden):
+                # precompute_teacher_targets.py --hidden_layers memmap-directory storage
+                # (hidden_<layer>.npy + offsets.npy, tens of GB, never loaded whole into RAM --
+                # see merge_shards()'s own docstring on why hidden states are memmap'd, not npz'd).
+                raw_hidden = np.load(os.path.join(repr_teacher_hidden, f"{key}.npy"), mmap_mode="r")
+                offsets = np.load(os.path.join(repr_teacher_hidden, "offsets.npy"))
+            else:
+                rnpz = np.load(repr_teacher_hidden)
+                assert key in rnpz, f"{repr_teacher_hidden!r} has no {key!r} -- available: {list(rnpz.keys())}"
+                raw_hidden = rnpz[key]
+                offsets = rnpz["offsets"]
             g = torch.Generator().manual_seed(repr_seed)
             P = torch.empty(raw_hidden.shape[1], repr_proj_dim, dtype=torch.float32)
             torch.nn.init.orthogonal_(P, generator=g)
-            projected = (raw_hidden @ P).to(torch.float16).numpy()  # (total_tokens, repr_proj_dim)
-            repr_teacher = {"projected": projected, "offsets": rnpz["offsets"]}
+            # Project in chunks straight from the (possibly memmap'd) source -- the projected
+            # output (repr_proj_dim=64, float16) is tiny regardless of input size, so only the
+            # chunk itself is ever materialized at fp32, not the whole tens-of-GB teacher array.
+            total_tokens = raw_hidden.shape[0]
+            chunk = 200_000
+            projected = np.empty((total_tokens, repr_proj_dim), dtype=np.float16)
+            for start in range(0, total_tokens, chunk):
+                end = min(start + chunk, total_tokens)
+                block = torch.from_numpy(np.asarray(raw_hidden[start:end], dtype=np.float32))
+                projected[start:end] = (block @ P).to(torch.float16).numpy()
+            repr_teacher = {"projected": projected, "offsets": offsets}
             self.repr_proj_dim = repr_proj_dim
 
         with open(path) as f:
@@ -462,21 +479,22 @@ def evaluate_val(model, val_loader, device, args, width_mult):
             batch = {kk: v.to(device) for kk, v in batch.items()}
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.bf16 and device.type == "cuda"):
                 labels = batch.pop("labels")
-                teacher_indices = batch.pop("teacher_indices")
-                teacher_values = batch.pop("teacher_values")
-                teacher_residual = batch.pop("teacher_residual")
-                teacher_mask = batch.pop("teacher_mask")
+                teacher_indices = batch.pop("teacher_indices", None)
+                teacher_values = batch.pop("teacher_values", None)
+                teacher_residual = batch.pop("teacher_residual", None)
+                teacher_mask = batch.pop("teacher_mask", None)
                 logits = model(**batch).logits
                 if args.mup:
                     logits = logits / width_mult
                 ce = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
-                kd = topk_kd_loss(logits, teacher_indices, teacher_values, teacher_residual, teacher_mask)
+                kd = topk_kd_loss(logits, teacher_indices, teacher_values, teacher_residual, teacher_mask) if teacher_indices is not None else torch.zeros((), device=device)
             total_ce += ce.item()
             total_kd += kd.item()
             n_batches += 1
     model.train()
     val_ce, val_kd = total_ce / n_batches, total_kd / n_batches
-    return val_ce, val_kd, (1 - args.kd_alpha) * val_ce + args.kd_alpha * val_kd
+    kd_alpha = args.kd_alpha if teacher_indices is not None else 0.0
+    return val_ce, val_kd, (1 - kd_alpha) * val_ce + kd_alpha * val_kd
 
 
 def main():
