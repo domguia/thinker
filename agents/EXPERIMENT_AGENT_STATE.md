@@ -73,10 +73,10 @@ journal. X2(b)/(c)/(d) pas implémentés -- besoin de dev avant de tester.
 - Les 2 runs G3/T1 (M1 seed0+seed1) et X2a/T1 continuent jusqu'à leur fin
   naturelle (30k steps) -- pas besoin de les tuer, ils fournissent le sweep
   n_step_test complet (1..32) en fin de run pour la grille finale.
-- GPU graffiti-4 : 1 GPU (ex-G2/T1 v3, job 6938131) redevenu libre --
-  prochaine tâche à y lancer : soit grille T1 M3/M4 pour sweep n_step_test +
-  seeds supplémentaires, soit démarrer T4 (p-hop induction, tasks.py à
-  étendre, pas encore de générateur pour cette tâche).
+- GPU graffiti-4 (job 6938131, ex-G2/T1 v3) réutilisé : `x1_m3_addition_seed2_v3.log`,
+  M3/T1 seed2 (n_step_train_max=16, n_step_test=16 fixe), complète les 3 seeds
+  de la grille pour M3/T1. Les 4 GPU graffiti-4 actifs (M3 seed2, G3/T1 seed0,
+  G3/T1 seed1, X2a/T1).
 
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
