@@ -1042,3 +1042,17 @@ Nouveau script `learn/indexed_attention/bench_efficiency_thinker_vs_llm.py` : ch
 | Qwen3.5-0.8B | 752.4M | 60.8 | 1.053 |
 
 **Thinker utilise 5.8x moins de paramètres ET génère 8.5x plus vite (tokens/s), MALGRÉ l'absence de cache KV.** Résultat net dès le premier run, sans ambiguïté. FLOPs/token non mesuré (optionnel selon la consigne) -- params + débit mesuré donnent déjà un chiffrage direct et cohérent de l'objectif "efficience" ; à ajouter si demandé. Fichiers : `logs/bench_efficiency_thinker_vs_qwen35.json`.
+
+## E3 (revue adverse papier, WRITING_PLAN §, P0) : la récurrence à poids partagés SEULE n'explique PAS le collapse -- spécifique à Thinker (2026-09-23)
+
+Question : le calibration-collapse (~0.3-0.5% partout sur Thinker, 6 ablations déjà infirmées -- n_step, KB/retrieval, answer-head-per-position, n_register, leur combinaison, scaling x2) est-il une propriété GÉNÉRALE de la récurrence à poids partagés (peu importe l'architecture), ou spécifique à Thinker ?
+
+**Design** : dense transformer classique (GPT2-style, base de Baseline C : n_embd=256, n_head=4, vocab qwen35) mais avec UN SEUL bloc attention+FFN, poids PARTAGÉS (alias, pas copie -- `model.parameters()` déduplique par identité d'objet), réappliqué `n_step` fois avec `n_step = random.randint(1, 8)` par batch (copie exacte de la ligne de curriculum de `train_prompt_response.py`, même principe que Thinker : un cœur unique, plusieurs itérations). Nouveau script `learn/distill/train_looped_dense.py` -- mécanisme validé localement avant déploiement (CPU, config jouet, 10 steps n_step variable, aucun crash).
+
+**Bug rencontré et corrigé avant le lancement réel** : `RuntimeError: size mismatch (512 vs 256)` dans l'attention -- cause : tous les blocs alias partagent `layer_idx=0`, donc le cache KV interne de HF (`use_cache` par défaut `True`) accumulait les clés/valeurs À TRAVERS les itérations de la boucle comme s'il s'agissait d'un vrai cache multi-couches, doublant la longueur de séquence à chaque itération. Fix : `model(**batch, use_cache=False)` explicite. Revalidé localement (n_step jusqu'à 8) avant redéploiement -- confirmé stable.
+
+**Résultat (wikitext, CE-only comme Baseline C, 64.56M params -- 0.83M core + 63.5M head, cohérent avec l'estimation ~93.9% de Baseline C)** :
+
+**Accuracy argmax teacher-forcée = 20.5% (378/1844 tokens) -- proche de Baseline C (21.2%), à des ANNÉES-LUMIÈRE des ~0.3-0.5% de Thinker.**
+
+**Conclusion (résultat le plus informatif du lot selon la revue adverse) : la récurrence à poids partagés SEULE, sur une architecture dense/attention classique, NE REPRODUIT PAS le collapse de Thinker.** Ceci exclut définitivement l'hypothèse "c'est juste la récursion" et confirme que le collapse est spécifique à quelque chose de propre à l'architecture Thinker (register/KB/output-stream ou une interaction entre eux -- déjà exclus individuellement dans les 6 ablations précédentes, donc interaction complexe non encore isolée). Renforce fortement C3 pour le papier. Fichiers : `learn/distill/train_looped_dense.py`, `checkpoints/e3_looped_dense_wikitext/checkpoint.pt`, `logs/diagnose_e3_looped_dense.json`.
