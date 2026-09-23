@@ -267,3 +267,17 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
   donné la commande pour reprendre G1/T2 v4 (100000 steps) pendant que mon
   propre job Rennes reste en attente comme backup. outer-norm-e13-grat
   (6937909, E13 déjà clos) annulable pour libérer la place.
+
+## Alerte supervisor-agent (deadline compressée ce matin) + correction job V100 -- 00:32
+- supervisor-agent : deadline compressée à ce matin, priorité absolue à
+  maximiser l'usage GPU nocturne. T5 déjà couvert par data-agent (pas de
+  doublon). Confirmé prêt à enchaîner sur Y_DISPATCH.md si X1 clôt avant.
+- **Bug évité** : le job de secours Rennes (4142736) était tombé sur
+  abacus30-2 (Tesla V100, CC7.0) car soumis sans filtre de capacité pendant
+  le debug du piège oarsub -- incompatible avec notre build torch persistant
+  (cf. mémoire : Volta/Pascal donnent cudaErrorNoKernelImageForDevice).
+  Annulé avant tout lancement d'entraînement dessus, resoumis avec
+  `-p "gpu_compute_capability >= '7.5'"` -- nouveau job 4142742.
+- En attente : confirmation infra-agent sur T2 v4 (graffiti Nancy), et
+  démarrage du job 4142742 (Rennes) pour un second run T2 en parallèle
+  si besoin (2 seeds ou repli).
