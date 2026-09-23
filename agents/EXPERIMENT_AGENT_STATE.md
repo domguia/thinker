@@ -56,6 +56,16 @@ le 4e -- relancés immédiatement, sans attendre G2/T1 :
   le besoin d'un remède plus poussé.
 - Les 4 GPU graffiti-4 sont maintenant tous actifs (aucun idle).
 
+## G2/T1 v3 -- quasi-VALIDÉE (20:34)
+n_step_train_max=16 (au lieu de 8) a résolu le problème de seuil : EM
+in-dist stable >=98% depuis step 14000 (n_step_test=16) : 98.5/99/98.5/98.5/
+98/99.5%. Run pas encore fini (25860/30000 steps à 20:34, ~4min restantes).
+Cause confirmée a posteriori : n_step_test=8 était insuffisant pour la
+propagation de retenue sur addition 1-20 chiffres (pas un bug -- besoin de
+capacité récurrente, cohérent avec l'hypothèse notée précédemment).
+Prochain check : lire la ligne FINAL, si >=95% (quasi certain vu la
+stabilité), clore G2/T1 formellement dans le journal + ici, committer.
+
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
   rapports courts, batchés, escalade uniquement selon X1_DISPATCH.md §6.
