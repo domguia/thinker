@@ -90,6 +90,7 @@ def main() -> None:
     ap.add_argument("--ff_hidden_mult", type=int, default=4)
     ap.add_argument("--answer_n_layers", type=int, default=1)
     ap.add_argument("--disable_kb", action="store_true")
+    ap.add_argument("--outer_norm", action="store_true")
     ap.add_argument("--answer_head_per_position", action="store_true")
     ap.add_argument("--answer_head_lora_rank", type=int, default=0)
     ap.add_argument("--n_samples", type=int, default=500, help="0 = full val set")
@@ -130,7 +131,7 @@ def main() -> None:
     model = Thinker(
         vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
-        disable_kb=args.disable_kb, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
+        disable_kb=args.disable_kb, outer_norm=args.outer_norm, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
         use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims={"answer": vocab_size}, stream_sequence={"answer": True}, max_target_len=args.max_answer_len,
         stream_n_layers={"answer": args.answer_n_layers},

@@ -410,6 +410,15 @@ def main() -> None:
                          "available for this model (no dropout anywhere else in it). Default 0.0 keeps "
                          "every existing run's behavior unchanged.")
     p.add_argument("--disable_kb", action="store_true")
+    p.add_argument("--outer_norm", action="store_true",
+                    help="2026-09-23, supervisor-agent request (thesis/paper/WRITING_PLAN.md §9 E13, "
+                         "citing Labovich 'Stability and Generalization in Looped Transformers', "
+                         "arXiv 2604.15259): adds an RMSNorm applied to the recurrent register R itself "
+                         "at the end of every _step() iteration (core/indexed_thinker_model.py), on top "
+                         "of the existing fuse_norm (which only normalizes the input to the delta "
+                         "computation, not R's own unbounded residual accumulation across n_step "
+                         "iterations of shared weights). Candidate fix for the generation-collapse "
+                         "calibration issue -- see _step's docstring for the full rationale.")
     p.add_argument("--ingest_kb", action="store_true",
                     help="spec §8ter, retrieval only: build the KB by running each document through "
                          "model.ingest() (the model's own recurrent loop + sm_write_proj) instead of "
@@ -684,7 +693,7 @@ def main() -> None:
     model = Thinker(
         vocab_size=vocab_size, d_model=args.d_model, n_register=args.n_register,
         block_size=args.block_size, depth=args.depth, n_slots=args.n_slots, n_head=args.n_head,
-        disable_kb=args.disable_kb, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
+        disable_kb=args.disable_kb, outer_norm=args.outer_norm, pool_n_head=args.pool_n_head, k_dim=args.k_dim,
         level_dropout_p=args.level_dropout_p,
         use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims=stream_dims, stream_sequence=stream_sequence, max_target_len=max_target_len,

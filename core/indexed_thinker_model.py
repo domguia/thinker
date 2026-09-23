@@ -197,7 +197,7 @@ class Thinker(nn.Module):
                  stream_n_layers: dict = None, level_dropout_p: float = 0.0,
                  detach_sm_keys: bool = False, use_ff: bool = False, ff_hidden_mult: int = 4,
                  decouple_kv: bool = True, pool_n_head: int = 1, k_dim: int = None,
-                 disable_kb: bool = False, disable_sm: bool = False,
+                 disable_kb: bool = False, disable_sm: bool = False, outer_norm: bool = False,
                  stream_sequence: dict = None, max_target_len: int = None,
                  stream_vocab_sizes: dict = None, use_ingest_token: bool = False,
                  stream_head_per_position: dict = None,
@@ -261,6 +261,10 @@ class Thinker(nn.Module):
         # anywhere" premise costs composition/computation capacity — not
         # re-added to the compressor or the output streams, see spec §11bis.
         self.fuse_norm = RMSNorm(3 * d_model)
+        # 2026-09-23, supervisor-agent request (thesis/paper/WRITING_PLAN.md §9 E13) --
+        # see _step's docstring for the full rationale. None (default) = old behavior,
+        # unchanged for every existing checkpoint.
+        self.outer_norm = RMSNorm(d_model) if outer_norm else None
         if use_ff:
             ff_hidden = d_model * ff_hidden_mult
             self.fuse_in = nn.Linear(3 * d_model, ff_hidden)
@@ -418,6 +422,19 @@ class Thinker(nn.Module):
         else:
             delta = self.fuse_proj(self.fuse_norm(fused))
         R = R + delta
+        if self.outer_norm is not None:
+            # 2026-09-23, supervisor-agent request (thesis/paper/WRITING_PLAN.md §9 E13,
+            # citing Labovich "Stability and Generalization in Looped Transformers"):
+            # `fuse_norm` above only normalizes the INPUT to the delta computation
+            # (pre-norm style) -- R itself is a raw, unnormalized residual accumulation
+            # across all n_step iterations of a WEIGHT-SHARED loop, unlike a normal deep
+            # transformer where each layer has distinct weights and pre-norm alone is
+            # enough. Nothing bounds ||R|| as n_step grows. This "outer" norm (applied to
+            # R itself, at the end of each iteration, not just to a sub-block's input) is
+            # the candidate stabilizer the paper argues is necessary for looped/recurrent
+            # transformers specifically. Opt-in (existing checkpoints have no such
+            # weights) -- see --outer_norm in train_prompt_response.py.
+            R = self.outer_norm(R)
 
         if not self.disable_sm:
             new_k, new_v = self.sm_write_proj(R).chunk(2, dim=-1)
