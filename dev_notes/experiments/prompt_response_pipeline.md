@@ -781,6 +781,18 @@ Fichiers : `tmp_scripts_local/qualitative_eval_wikitext_manual.py`, log complet 
 
 **Conséquence pour toute comparaison CE-vs-KD en cours (phase17/18/19)** : tant que ce mode de collapse structurel n'est pas résolu, un écart de CE entre deux checkpoints (KD vs CE-only) ne prouve rien de solide sur la qualité réelle de génération -- les deux variantes du même dataset semblent atterrir dans le même bassin d'attraction dégénéré. Continuer à documenter les chiffres CE (utiles comme mesure de calibration relative) mais ne plus les présenter comme des résultats "qui gagne" sans le caveat qualitatif désormais systématique.
 
+## phase17 (math) -- résultat final CE-only vs KD, collapse confirmé des deux côtés (2026-09-23)
+
+Chiffres jamais journalisés au moment où ils ont été obtenus (avant la correction du gap de journalisation) -- rattrapé ici.
+
+- **CE-only** (`math_ceonly_fixed_best.pt`, n_step=4 fixe, batch_size=1) : `answer_ce` (full val, 3890 ex.) = **3.1094**.
+- **KD** (`math_kd_fixed_best.pt`, kd_alpha=0.5, même n_step=4) : préempté 3x sur abacus25 (besteffort, trafic normal-queue actif cette nuit -- ~45-60min entre préemptions), repris à chaque fois via `--init_from_checkpoint` (poids seuls, cf. `dev_notes/ideas/checkpoint_resume_signal.md`) plutôt que redémarrer de zéro. `answer_ce` (full val, 3890 ex.) = **3.1720** -- légèrement pire que CE-only, comme sur retrieval (phase19) et wikitext (mais dans l'autre sens sur wikitext où KD était meilleur en CE).
+- **Éval qualitative (greedy, 30 ex., même heuristiques)** : KD = **30/30 dégénéré** (boucles de chiffres du type `"1001}{2}+1000000110112}..."`, encore plus uniformément dégénéré que retrieval/wikitext). CE-only : en cours (checkpoint récupéré depuis Nancy, job graffiti-1).
+
+Confirme le collapse universel sur math aussi (4e dataset après wikitext/retrieval/math -- reste à confirmer CE-only spécifiquement, mais l'attracteur dégénéré semble total ici).
+
+**Note opérationnelle sur `qualitative_eval_math_kd_manual.py`** : `generate_thinker_reasoning` batch tous les exemples ensemble par défaut -- avec `max_thinking_len=1024` (math, contrairement à wikitext's `max_thinking_len=8`), batcher 30 exemples produit un tenseur logits `(30, 1024, vocab=248320)` ≈ 28GB, OOM même sur un L40S 48GB. Fix : boucler un exemple à la fois (`indices=[i]` par appel + `torch.cuda.empty_cache()`), coût en temps négligeable vs le gain de mémoire.
+
 **Phase19 terminé (retrieval, palier top-K 57%, `thinkfix_p46250`)** :
 
 | Variante | answer_ce (full val, 9000 ex.) | Qualitatif (greedy, 30 ex.) |
