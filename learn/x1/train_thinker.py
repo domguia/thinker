@@ -41,28 +41,38 @@ from core.indexed_thinker_model import Thinker
 from learn.x1.tasks import TASKS, PAD_ID, VOCAB_SIZE, TOK2ID, EOS
 
 
-def collate(examples, device):
+def collate(examples, device, kb_leaves: int = None):
+    """kb_leaves (X2(b) "recall de l'input" variant, X1_DISPATCH.md §3 G3 note):
+    when set, prompt_ids is right-padded to exactly this length (must equal
+    kb_block_size**kb_depth) and a kb_leaf_mask is returned so the caller can
+    build a real Thinker KB from the prompt itself (disable_kb=False) -- lets
+    the recurrent loop retrieve specific input positions via cross-attention
+    instead of only seeing the mean-pooled query embedding."""
     max_prompt = max(e.prompt_len for e in examples)
+    prompt_len = kb_leaves if kb_leaves is not None else max_prompt
+    assert kb_leaves is None or kb_leaves >= max_prompt, "kb_leaves must fit the longest prompt in the batch"
     max_ans = max(len(e.target_ids) - e.prompt_len for e in examples)
     B = len(examples)
-    prompt_ids = torch.full((B, max_prompt), PAD_ID, dtype=torch.long)
+    prompt_ids = torch.full((B, prompt_len), PAD_ID, dtype=torch.long)
+    kb_leaf_mask = torch.zeros((B, prompt_len), dtype=torch.bool)
     answer_ids = torch.full((B, max_ans), PAD_ID, dtype=torch.long)
     labels = torch.full((B, max_ans), -100, dtype=torch.long)
     for i, e in enumerate(examples):
         prompt_ids[i, :e.prompt_len] = torch.tensor(e.input_ids[:e.prompt_len])
+        kb_leaf_mask[i, :e.prompt_len] = True
         ans = e.target_ids[e.prompt_len:]
         n = len(ans)
         answer_ids[i, :n] = torch.tensor(ans)
         labels[i, :n] = torch.tensor(ans)
     target_input = torch.full((B, max_ans), PAD_ID, dtype=torch.long)
     target_input[:, 1:] = answer_ids[:, :-1]
-    return {k: v.to(device) for k, v in
-            {"prompt_ids": prompt_ids, "answer_ids": answer_ids, "labels": labels,
-             "target_input": target_input}.items()}
+    out = {"prompt_ids": prompt_ids, "answer_ids": answer_ids, "labels": labels,
+           "target_input": target_input, "kb_leaf_mask": kb_leaf_mask}
+    return {k: v.to(device) for k, v in out.items()}
 
 
 @torch.no_grad()
-def greedy_generate_batch(model, prompt_ids, n_step: int, max_len: int, eos_id: int, device):
+def greedy_generate_batch(model, prompt_ids, n_step: int, max_len: int, eos_id: int, device, kb_leaf_mask=None):
     """Same convention as generate_qualitative_compare_reasoning.py's
     generate_stream: target_input[0] = PAD_ID, recompute the full forward
     (including the n_step core loop) at every position -- sm_k/sm_v only
@@ -75,7 +85,7 @@ def greedy_generate_batch(model, prompt_ids, n_step: int, max_len: int, eos_id: 
     done = torch.zeros(B, dtype=torch.bool, device=device)
     for t in range(max_len):
         _, stream_outputs = model(kb_tokens=prompt_ids, kb_source_ids=kb_source_ids,
-                                   query_tokens=prompt_ids, n_step=n_step,
+                                   query_tokens=prompt_ids, n_step=n_step, kb_leaf_mask=kb_leaf_mask,
                                    target_input={"answer": target_input})
         next_token = stream_outputs["answer"][:, t, :].argmax(dim=-1)
         next_token = torch.where(done, torch.full_like(next_token, PAD_ID), next_token)
@@ -88,9 +98,10 @@ def greedy_generate_batch(model, prompt_ids, n_step: int, max_len: int, eos_id: 
     return generated
 
 
-def exact_match_eval(model, examples, device, eos_id, n_step: int, max_new_tokens=40):
-    batch = collate(examples, device)
-    generated = greedy_generate_batch(model, batch["prompt_ids"], n_step, max_new_tokens, eos_id, device)
+def exact_match_eval(model, examples, device, eos_id, n_step: int, max_new_tokens=40, kb_leaves=None):
+    batch = collate(examples, device, kb_leaves=kb_leaves)
+    generated = greedy_generate_batch(model, batch["prompt_ids"], n_step, max_new_tokens, eos_id, device,
+                                       kb_leaf_mask=batch["kb_leaf_mask"] if kb_leaves is not None else None)
     correct = 0
     for i, e in enumerate(examples):
         target = e.target_ids[e.prompt_len:]
@@ -124,6 +135,13 @@ def main() -> None:
                      "e.g. 1,2,4,8,12,16,24,32")
     ap.add_argument("--outer_norm", action="store_true", help="M2: Thinker+outer_norm variant "
                      "(core/indexed_thinker_model.py Thinker's outer_norm flag)")
+    ap.add_argument("--enable_kb", action="store_true", help="X2(b) 'recall de l'input' variant "
+                     "(X1_DISPATCH.md G3 note): disable_kb=False, builds a real KB from the prompt "
+                     "itself so the recurrent loop can retrieve specific input positions via "
+                     "cross-attention, instead of only the mean-pooled query embedding.")
+    ap.add_argument("--kb_block_size", type=int, default=4)
+    ap.add_argument("--kb_depth", type=int, default=5, help="kb_leaves = kb_block_size**kb_depth must "
+                     "be >= max(train_size_range[1], test_size_range[1]) + 2")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--max_steps", type=int, default=3000)
@@ -145,18 +163,30 @@ def main() -> None:
     test_lo, test_hi = map(int, args.test_size_range.split(","))
     eos_id = TOK2ID[EOS]
 
+    kb_leaves = None
+    block_size, depth = 2, 0
+    if args.enable_kb:
+        kb_leaves = args.kb_block_size ** args.kb_depth
+        assert kb_leaves >= max(train_hi, test_hi) + 2, (
+            f"kb_leaves={kb_leaves} too small for the longest possible prompt "
+            f"(max(train_hi, test_hi)+2={max(train_hi, test_hi) + 2}) -- raise --kb_depth"
+        )
+        block_size, depth = args.kb_block_size, args.kb_depth
+
     model = Thinker(
         vocab_size=VOCAB_SIZE, d_model=args.d_model, n_register=args.n_register,
-        block_size=2, depth=0, n_head=args.n_head, pool_n_head=args.pool_n_head,
-        disable_kb=True, stream_dims={"answer": VOCAB_SIZE},
+        block_size=block_size, depth=depth, n_head=args.n_head, pool_n_head=args.pool_n_head,
+        disable_kb=not args.enable_kb, stream_dims={"answer": VOCAB_SIZE},
         stream_n_layers={"answer": 1}, stream_sequence={"answer": True},
         max_target_len=args.max_answer_len, outer_norm=args.outer_norm,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     model_name = "M2 Thinker+outer_norm" if args.outer_norm else "M1 Thinker"
-    print(f"Model ({model_name}, disable_kb=True/Baseline B): {n_params / 1e6:.2f}M params "
-          f"d_model={args.d_model} n_register={args.n_register} n_step_train_max={args.n_step_train_max}",
-          flush=True)
+    if args.enable_kb:
+        model_name += " +X2(b)enable_kb"
+    print(f"Model ({model_name}): {n_params / 1e6:.2f}M params "
+          f"d_model={args.d_model} n_register={args.n_register} n_step_train_max={args.n_step_train_max} "
+          f"kb_leaves={kb_leaves}", flush=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     model.train()
@@ -167,11 +197,12 @@ def main() -> None:
     while step < args.max_steps and (time.time() - start) / 60 < args.max_time_minutes:
         batch_examples = gen_fn(args.batch_size, (train_lo, train_hi), seed=args.seed * 1_000_003 + step,
                                  position_offset_max=args.position_offset_max)
-        batch = collate(batch_examples, device)
+        batch = collate(batch_examples, device, kb_leaves=kb_leaves)
         n_step = random.randint(1, args.n_step_train_max)
         kb_source_ids = torch.zeros_like(batch["prompt_ids"])
         _, stream_outputs = model(kb_tokens=batch["prompt_ids"], kb_source_ids=kb_source_ids,
                                    query_tokens=batch["prompt_ids"], n_step=n_step,
+                                   kb_leaf_mask=batch["kb_leaf_mask"] if args.enable_kb else None,
                                    target_input={"answer": batch["target_input"]})
         logits = stream_outputs["answer"]
         loss = torch.nn.functional.cross_entropy(logits.reshape(-1, VOCAB_SIZE), batch["labels"].reshape(-1),
@@ -186,7 +217,7 @@ def main() -> None:
         if step % args.eval_every == 0:
             model.eval()
             id_examples = gen_fn(args.n_eval, (train_lo, train_hi), seed=999_000 + step, position_offset_max=0)
-            id_em = exact_match_eval(model, id_examples, device, eos_id, n_step_test, args.max_answer_len)
+            id_em = exact_match_eval(model, id_examples, device, eos_id, n_step_test, args.max_answer_len, kb_leaves)
             print(f"step={step} IN-DIST EM={id_em:.4f} (n_step_test={n_step_test})", flush=True)
             model.train()
             if id_em > best_id_em:
@@ -198,9 +229,9 @@ def main() -> None:
 
     model.eval()
     id_examples = gen_fn(args.n_eval, (train_lo, train_hi), seed=999_001, position_offset_max=0)
-    id_em = exact_match_eval(model, id_examples, device, eos_id, n_step_test, args.max_answer_len)
+    id_em = exact_match_eval(model, id_examples, device, eos_id, n_step_test, args.max_answer_len, kb_leaves)
     ood_examples = gen_fn(args.n_eval, (test_lo, test_hi), seed=999_002, position_offset_max=0)
-    ood_em = exact_match_eval(model, ood_examples, device, eos_id, n_step_test, args.max_answer_len)
+    ood_em = exact_match_eval(model, ood_examples, device, eos_id, n_step_test, args.max_answer_len, kb_leaves)
     print(f"FINAL in-distribution EM={id_em:.4f} ({args.train_size_range}) n_step_test={n_step_test}")
     print(f"FINAL OOD EM={ood_em:.4f} ({args.test_size_range}) n_step_test={n_step_test}")
     print(f"best_in_dist_em_during_training={best_id_em:.4f}")
@@ -209,9 +240,9 @@ def main() -> None:
         sweep_values = [int(v) for v in args.n_step_test_sweep.split(",")]
         for ns in sweep_values:
             id_examples = gen_fn(args.n_eval, (train_lo, train_hi), seed=999_001, position_offset_max=0)
-            id_sweep = exact_match_eval(model, id_examples, device, eos_id, ns, args.max_answer_len)
+            id_sweep = exact_match_eval(model, id_examples, device, eos_id, ns, args.max_answer_len, kb_leaves)
             ood_examples = gen_fn(args.n_eval, (test_lo, test_hi), seed=999_002, position_offset_max=0)
-            ood_sweep = exact_match_eval(model, ood_examples, device, eos_id, ns, args.max_answer_len)
+            ood_sweep = exact_match_eval(model, ood_examples, device, eos_id, ns, args.max_answer_len, kb_leaves)
             print(f"SWEEP n_step_test={ns} in-dist EM={id_sweep:.4f} OOD EM={ood_sweep:.4f}")
 
 
