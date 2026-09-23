@@ -130,4 +130,47 @@ def gen_prefix_sum_parity(n_examples: int, len_range: tuple, seed: int, position
     return examples
 
 
-TASKS = {"addition": gen_addition, "prefix_sum": gen_prefix_sum_parity}
+def gen_p_hop_induction(n_examples: int, hop_range: tuple, seed: int, position_offset_max: int = 0,
+                         n_nodes: int = 10) -> list:
+    """T4 (X1_DISPATCH.md, Saunshi et al. 2025 arXiv:2502.17416 "p-hop induction"):
+    each loop iteration = one reasoning hop, so this task directly probes whether
+    Thinker's n_step recurrence composes p atomic lookups, train p<=8 test p 9-32.
+
+    Input encodes a random permutation over n_nodes (single-digit node ids,
+    n_nodes<=10 so DIGITS alone suffice) as n_nodes pointer pairs "i -> perm[i]",
+    then a query: EQUALS, decimal digits of p, SEP, the start node. Target: the
+    single node reached after following the permutation p times from start,
+    then EOS. p can exceed n_nodes (the permutation's cycles just wrap), which
+    is what makes p>n_nodes-ish OOD values well-defined for the test range."""
+    assert n_nodes <= 10, "single-digit node ids only"
+    rng = random.Random(seed)
+    examples = []
+    for _ in range(n_examples):
+        perm = list(range(n_nodes))
+        rng.shuffle(perm)
+        p = rng.randint(*hop_range)
+        start = rng.randint(0, n_nodes - 1)
+        offset = rng.randint(0, position_offset_max) if position_offset_max > 0 else 0
+
+        ids = []
+        for i in range(n_nodes):
+            ids += [TOK2ID[str(i)], TOK2ID[str(perm[i])], TOK2ID[SEP]]
+        p_digits = _digits_of(p)
+        ids += [TOK2ID[EQUALS]] + [TOK2ID[str(d)] for d in p_digits] + [TOK2ID[SEP], TOK2ID[str(start)]]
+        prompt_len = len(ids)
+        pos = _place_value_positions(prompt_len, offset)
+
+        cur = start
+        for _ in range(p):
+            cur = perm[cur]
+        target_ids = [TOK2ID[str(cur)], TOK2ID[EOS]]
+        target_pos = _place_value_positions(len(target_ids), offset)
+
+        full_ids = ids + target_ids
+        full_pos = pos + target_pos
+        examples.append(Example(input_ids=full_ids, position_ids=full_pos,
+                                 target_ids=[-100] * prompt_len + target_ids, prompt_len=prompt_len))
+    return examples
+
+
+TASKS = {"addition": gen_addition, "prefix_sum": gen_prefix_sum_parity, "p_hop": gen_p_hop_induction}
