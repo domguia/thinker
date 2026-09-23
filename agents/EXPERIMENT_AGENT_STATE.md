@@ -4,19 +4,30 @@
 détail chronologique/résultats complets restent dans
 `dev_notes/experiments/prompt_response_pipeline.md`.)
 
-## REPRISE RAPIDE (préparé pour interruption transfert de compte, 21:20)
-1. Lire ce fichier en entier (état complet ci-dessous), puis vérifier
-   `git log --oneline -10` pour confirmer aucun commit perdu.
-2. Vérifier le run en cours : `ssh nancy.g5k 'OAR_JOB_ID=6938205 oarsh
-   graffiti-3 "tail -8 ~/thinker/logs/x1_m3_addition_seed2_retry.log"'`
-   (M3/T1 seed2, ETA ~21:47, devrait être FINAL ou proche à la reprise).
-3. Si FINAL >=95% : grille T1 M1-M4 (3 seeds chacun) COMPLÈTE. Consolider
-   dans `dev_notes/experiments/X1/results.csv` (même format que data-agent
-   pour T3), MAJ `results_inventory.md` + `OBJECTIVES_LOG.md`, commit,
-   informer data-agent + supervisor-agent que T1 est clos.
-4. Ensuite : T4 (p-hop induction, data-agent) en attente d'arbitrage GPU --
-   voir si T1+T3 sont bien tous deux clos avant d'investir dessus. T5/T2
-   pas commencés (prochains dans l'ordre du dispatch après T4).
+## T1 CLOS (23:20) -- grille M1-M4 (3 seeds chacun) COMPLÈTE
+
+- M3/T1 seed2 retry (job 6938205, graffiti-3) : FINAL in-dist EM=0.9800,
+  OOD=0.0600 -- **G2/T1 3e seed VALIDÉE**. Le job a atteint son walltime
+  (1h) juste après avoir écrit le FINAL -- pas un échec, `oarstat` affiche
+  juste l'état `Error` post-walltime normal (cleanup), résultat déjà en NFS.
+- Grille T1 (addition) complète et consolidée dans
+  `dev_notes/experiments/X1/results.csv` (même format que T3 de data-agent) :
+  - **G1/M4** (dense, 3 seeds) : EM≈0.99 in-dist -- VALIDÉE.
+  - **G2/M3** (looped-dense, 3 seeds, n_step_train_max=16) : EM 0.98-0.995
+    in-dist -- VALIDÉE.
+  - **G3/M1** (Thinker baseline, 3 seeds, sweep n_step_test complet) :
+    EM=0.0000 partout -- défaut H8 confirmé, identique à T3 (data-agent).
+  - **X2a/M2** (Thinker + outer_norm, 3 seeds) : EM≈0.000-0.005 -- X2(a) ne
+    corrige pas le défaut sur T1 non plus (cohérent avec T3).
+- **Conclusion cross-task (T1 addition + T3 prefix_sum) : le défaut H8
+  (mean-pooling des query_tokens détruit l'info order-dependent) est
+  robuste et généralisé, pas un artefact d'une seule tâche.** outer_norm
+  (X2a) et enable_kb (X2b, data-agent) inefficaces sur les deux tâches.
+- Prochaine étape : coordonner avec data-agent sur T4 (p-hop, actuellement
+  <50% EM, en cours d'entraînement plus long) et le lancement de T5/T2
+  une fois T1+T3 formellement clos des deux côtés.
+
+## REPRISE RAPIDE (ancienne version, gardée pour référence)
 5. Les GPU jobs Grid'5000 continuent de tourner indépendamment d'une
    interruption de session Claude -- rien à relancer sauf si un job a
    effectivement crashé (vérifier `oarstat -j <id> -f`).
