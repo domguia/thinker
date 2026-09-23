@@ -243,3 +243,27 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
 - Toujours pas de réponse de data-agent sur T5 (labyrinthes) -- aucun
   générateur `gen_labyrinth` écrit. Pas d'urgence à insister, GPU restent
   utilisés sur T2 en attendant.
+
+## T2 v3 préempté, coordination T5/infra -- 00:20
+- v3 (60000 steps) a été préempté par un job prioritaire à 00:55 (besteffort
+  kill, pas walltime) alors qu'il tournait bien : EM était monté à 78%
+  (step 52000), loss ~0.27, toujours en progression -- PAS un plateau.
+  Job resoumis auto (idempotent, nouveau id 4142702) mais resté en attente.
+- **Piège oarsub découvert** : la commande passée à `oarsub` doit être un
+  SEUL token argv (entre guillemets, ex. `"/bin/sleep 3600"`), sinon
+  `oarsub -l gpu=1,walltime=... -t besteffort ... /bin/sleep 3600` (sans
+  guillemets autour de la commande) échoue avec un message d'usage
+  générique trompeur (semble être un bug/limitation de cette version
+  OAR 2.5.10+g5k32, pas un problème de ressources). À documenter dans le
+  skill grid5000.
+- Nouveau job GPU réservé sur Rennes (4142736, capability filter, Waiting).
+- **data-agent a écrit `gen_labyrinth` pour T5** (commit 901fb95) : maze
+  parfait DFS randomisé, validé sur 30 mazes. Piège noté par data-agent :
+  `n_positions` doit être calculé depuis la longueur réelle de séquence
+  encodée (~2*n*(n-1)+1+chemin), PAS depuis n directement -- pour n=9
+  ~145 tokens, pour n=33 (OOD) ~2113 tokens, gap important pour la mémoire.
+  data-agent lance G1/T5 lui-même.
+- **infra-agent a un GPU graffiti (Nancy) libre immédiatement** -- lui ai
+  donné la commande pour reprendre G1/T2 v4 (100000 steps) pendant que mon
+  propre job Rennes reste en attente comme backup. outer-norm-e13-grat
+  (6937909, E13 déjà clos) annulable pour libérer la place.
