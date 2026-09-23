@@ -791,6 +791,14 @@ Chiffres jamais journalisés au moment où ils ont été obtenus (avant la corre
 
 CE-only qualitatif (récupéré depuis Nancy, checkpoint `math_ceonly_fixed_best.pt`) : **29/30 dégénéré**, même signature de boucles de fractions/chiffres. **Quasi identique au KD (30/30)** -- confirme le collapse universel sur math, indépendamment CE/KD, complétant la couverture wikitext/retrieval/math (3/3 datasets testés, tous universellement dégénérés en génération libre malgré des CE raisonnables).
 
+## phase20 (retrieval) -- nouveau tier top-K couverture FULL (100%), collapse toujours présent (2026-09-23)
+
+Nouveau tier arrivé côté data-agent (`thinkfix_full.qwen_big.npz`, 20.4GB, 100% de couverture vs 57% en phase19) -- repéré proactivement sur un GPU idle (job 4132565 libéré après phase17, réutilisé plutôt que rendu, cf. `feedback_proactively_use_idle_compute`). `TeacherTopKStore` fusionne automatiquement tous les subsets du manifest, donc même pointeur de répertoire que phase19 suffit.
+
+KD, n_step=4 fixe, même méthodologie : `answer_ce` (full val, 9000 ex.) = **7.1891** -- légèrement mieux que le KD à 57% de couverture (7.2077, phase19) mais toujours pire que CE-only (7.0325). **Qualitatif (auto-wired, 60 générations) : 45/60 dégénéré (75%)** -- la couverture complète du Teacher ne résout PAS le collapse, renforçant encore l'hypothèse structurelle (le goulot n'est pas la densité du signal KD mais le mécanisme récurrent lui-même).
+
+Fichiers : `checkpoints/retrieval_kd_fullcov_best.pt`, `checkpoints/retrieval_kd_fullcov_best_qualitative.md`, `logs/eval_thinker_retrieval_kd_fullcov_fullval.json`.
+
 **Note opérationnelle sur `qualitative_eval_math_kd_manual.py`** : `generate_thinker_reasoning` batch tous les exemples ensemble par défaut -- avec `max_thinking_len=1024` (math, contrairement à wikitext's `max_thinking_len=8`), batcher 30 exemples produit un tenseur logits `(30, 1024, vocab=248320)` ≈ 28GB, OOM même sur un L40S 48GB. Fix : boucler un exemple à la fois (`indices=[i]` par appel + `torch.cuda.empty_cache()`), coût en temps négligeable vs le gain de mémoire.
 
 **Phase19 terminé (retrieval, palier top-K 57%, `thinkfix_p46250`)** :
