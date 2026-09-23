@@ -89,3 +89,15 @@ Utilisateur irrité (GPU idle alors que X2-X6 sont prêtes à lancer) : demande 
 - **Conclusion cross-task (T1 addition + T3 prefix_sum, deux tâches indépendantes) : le défaut H8 est confirmé général, pas un artefact d'une seule tâche.** outer_norm (X2a, testé sur T1+T3+E13) et enable_kb (X2b, T3) tous deux inefficaces isolément.
 - Résultats consolidés : `dev_notes/experiments/X1/results.csv`, `thesis/research/results_inventory.md`, commit 65d55b9.
 - Prochaine étape à arbitrer avec data-agent : T4 (p-hop, encore <50% EM, sous-échelle) vs lancement T5/T2 maintenant que T1+T3 sont formellement clos des deux côtés.
+
+## 2026-09-23 (suite) — X2(c) négatif, investigation X2 close ; accord pour passer à T5/T2
+- X2(c) "lecture depuis un résiduel non récurrent" (`--residual_readout`, `core/indexed_thinker_model.py` + `learn/x1/train_thinker.py`, commit 9f36db9, job 6938208/graffiti-10) : EM=0.0000 in-dist et OOD sur toute la sweep n_step_test {1,2,4,8,12,16,24,32}, même plateau plat ~ln(2) que X2(a)/X2(b).
+- **X2 formellement clos : les 3 remèdes isolés testés (X2a outer_norm, X2b enable_kb, X2c residual bypass) échouent tous à corriger le défaut H8.** Cause racine toujours non isolée (mean-pooling de query_tokens détruit l'info d'ordre, mais aucun correctif de readout/normalisation testé ne la restaure). Documenté comme limite ouverte plutôt que d'enchaîner X2(d) (tête d'arrêt stochastique), vu la deadline ICLR à 2 jours.
+- Résultats consolidés : `dev_notes/experiments/X1/results.csv`, `thesis/research/results_inventory.md`.
+- experiment-agent a proposé de passer à T5/T2 (T1+T3 formellement clos des deux côtés) plutôt que continuer d'investir sur T4 (encore <50% EM, sous-échelle) — accord donné, experiment-agent lance T5/T2 sur ses GPU libres.
+
+## 2026-09-23 21h40 — T1 clos, défaut H8 confirmé cross-task (T1+T3), transfert de compte effectué
+- T1 (addition) formellement clos : grille M1-M4 × 3 seeds complète. G1/G2 validées, G3/X2a confirment le défaut H8 sur T1 aussi (identique à T3/data-agent). Commits 65d55b9, 1fe178f.
+- Défaut H8 maintenant confirmé sur 2 tâches synthétiques indépendantes (T1 addition, T3 prefix-sum) en plus du LM réel — pattern robuste, pas un artefact d'une tâche.
+- experiment-agent/data-agent coordonnent directement l'arbitrage T5/T2 vs T4 (sous-échelle) sans passer par supervisor — cohérent avec l'autonomie de la table de décision X1.
+- Transfert de compte (quota 91%) effectué avec succès : 4 sessions (experiment-agent, data-agent, infra-agent, agent2) relancées en tmux --resume, communication SendMessage/ListAgents vérifiée opérationnelle. Mécanisme agent-teams testé et validé (spawn OK) mais réservé aux tâches ad hoc (ex. rôle agent2 désormais éphémère) — pas de remplacement des 3 agents nommés persistants.
