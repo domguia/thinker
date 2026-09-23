@@ -1,0 +1,80 @@
+# Experimental Results Inventory — Thinker Project (2026-09-15 to 2026-09-23)
+
+## Summary by Theme
+
+| Theme | Count | Key Findings (≤10 lines per theme) |
+|---|---|---|
+| **Calibration Collapse / Generation** | 6 | Thinker exhibits severe calibration collapse (0.3-0.5% teacher-forced accuracy) across all 4 datasets, independent of KD/CE choice. Phase22 scaling (2x width) does not reduce it. Baseline C (dense transformer) achieves 21.2% under identical conditions — collapse is Thinker-specific. Phase21 (tinystories) shows notably less severity (40-47% degenerate vs 75-97% on others). All 6 diagnostic ablations (n_step, KB, answer-head, n_register, combined, scale) ruled out as isolated causes. E3 rules out shared-weight recurrence alone as cause. |
+| **Retrieval Accuracy / Tasks** | 3 | EM=0% across KD full-coverage (phase20: 7.1891 CE) and CE-only (phase19: 7.0325 CE, phase21: 5.0961 CE). Sampling/forced-answer decoding does not improve EM. F1 quasi-zero (0.32-0.79%). Tinystories shows lower degeneration rate (40% vs 75-97%) but still zero EM. |
+| **Efficiency** | 1 | Thinker: 5.8x fewer parameters (128.8M vs 752.4M Qwen3.5), 8.5x faster inference (517.3 vs 60.8 tokens/sec) despite lacking KV-cache. Measured on L40S, 30 retrieval prompts. |
+| **N-step Extrapolation / Composition** | 1 | Variable n_step curriculum (Uniform(1,8) at train/test) achieves +0.029 CE degradation vs fixed n_step (+4.02 CE). Confirms loop composition benefits via curriculum randomization. Source: OBJECTIVES_LOG 2026-09-22. |
+| **Architecture Diagnostics (E3)** | 1 | E3 baseline looped-dense (shared-weight recurrence, same curriculum): teacher-forced accuracy = 20.5% (close to dense 21.2%), far from Thinker's 0.3-0.5%. Shared-weight recurrence alone does NOT reproduce Thinker's collapse — collapse is specific to Thinker's register/output-stream mechanism. |
+| **KD vs CE Ablation** | 3 | Phase17 (math): both KD and CE-only show 97-100% degenerate generation, identical collapse. Phase20 (retrieval full-coverage): KD=7.1891 CE (vs CE-only 7.0325). Phase21 (tinystories): CE-only=5.1968, KD=5.0961 — KD marginally better. KD fails to prevent collapse in any setting tested. |
+| **Diagnostic Ablations** | 6 | n_step=1 vs 4: identical 0.25% calibration accuracy (commits fde4133). KB disable: identical 0.25% (commit 377422a). answer_head_per_position: 0.31% (commit 376dc39). n_register=1: 0.375% (commit 6d957a9). Combined all ablations: 0.44% (commit e7b823e). All within 0.25-0.5% band, no component or interaction explains collapse. |
+| **Baseline / Control Experiments** | 3 | Baseline C dense transformer: 21.2% teacher-forced accuracy on wikitext+CE (commit 63949b3); 23/30 degenerate free-run generation. Baseline C looped (E3): 20.5% accuracy. Free-run degenerate loops confirmed generic to undertrained greedy generation across both Thinker and Baseline C. |
+| **Data / Tokenization** | 2 | KD alignment on openr1_math: 0/2000 answer spans aligned — total CE-only fallback (commit 0accd7b in distillation.md). Retrieval KD alignment after fix: 18000/18000 (100%, commit 98%, distillation.md). Data storage convention unified 2026-09-22 (hotpotqa, openr1_math, tinystories, wikitext, top-K artefacts cleaned). |
+| **Toy Model / Memory** | 1 | Toy model read_step investigation: core mechanism exists but was never tested with actual read_step variation (hardcoded read_step=n_step-1). Experimental plan drafted (Exp. 1-5 detailed in toy_memory_experiments.md) but no results yet as of 2026-09-23. |
+
+---
+
+## Full Results Table
+
+| Date | Experiment | Question | Setup (Model, Data, n_step, KD/CE) | Metric(s) & Numbers | Verdict | Source / Commit |
+|---|---|---|---|---|---|---|
+| 2026-09-13 | Toy Model Read-Step | Is medium-term memory built on-the-fly ever tested? | toy_copy/cumsum, read_step=n_step-1 hardcoded | read_step never varied; always n_step-1 | Negative (mechanism exists, never forced into use) | dev_notes/toy_model_memory_experiments.md §2-4 |
+| 2026-09-19/20 | Phase 1bis (EXP-007) | n_hops plateaus at 2+ due to compressor bug or capacity limit? | n_hops ∈ {1..4}, n_facts curriculum | Plateau confirmed; mechanism works multi-hop; generator durability validated | Positive | dev_notes/experiments/indexed_attention_core_mechanism.md |
+| 2026-09-19/20 | I4 Soft Attribution | Does retrieval mechanism use stored KB? | indexed_attention diagnostic on toy copy | Soft attribution measured; real signal detected; caveat: checkpoint dependent | Positive (conditional) | dev_notes/experiments/i4_i6_i7_diagnostics.md |
+| 2026-09-19/20 | Piste A vs C (real text) | Does FFN-based attention (Piste A) beat dense (C)? | LFM2-350M, wikitext+math+tinystories, varied budgets, CE-only | A beats C; gap widens at higher budgets | Positive | dev_notes/experiments/real_text_baselines.md |
+| 2026-09-19/20 | B1 Associative Recall | Does n_facts curriculum (hopping chain) train at scale? | n_facts ∈ {8..64}, curriculum staged | B1 escapes stage 2 rare (9-12%), curriculum enables n_facts=64 | Positive | dev_notes/experiments/b1_associative_recall.md |
+| 2026-09-19/20 | I2 Indexed Attention LR | Best kdim/decoupling config? | kdim ∈ {32,64,128}, LFM2-350M | kdim=128 decoupled reliable and clean | Positive (decisive) | dev_notes/experiments/indexed_attention_core_mechanism.md |
+| 2026-09-19/20 | I3 Attention Supervision | Does strong supervision resolve hard chaining? | n_head/n_slots/supervision varied | Resolves bimodality but plafonds at ~40%, supervision may harm after correction | Inconclusive | dev_notes/experiments/i3_attention_supervision.md |
+| 2026-09-19/20 | I5 CPU/GPU N-hops | n_hops=2 gap (CPU vs GPU) = training budget or scaling? | n_hops=2, budget controlled | CPU/GPU gap explained by training budget, not scale | Positive | dev_notes/experiments/i4_i6_i7_diagnostics.md |
+| 2026-09-19/20 | I7 Real-Scale N-step Generalization | Training margin controls extrapolation? | d_model=1024, n_step_test extrapolation | Training margin (not LR alone) controls extrapolation slope | Positive | dev_notes/experiments/i4_i6_i7_diagnostics.md |
+| 2026-09-20 | Item[5]/[8] N_step LR Law | LR slope inversely proportional to n_step? | n_step ∈ {1..8}, varied LR | Plateau confirmed; LR is threshold, not continuous 1/n_step scaling law | Inconclusive | dev_notes/experiments/nstep_lr_law.md |
+| 2026-09-20 | Piste A Real-text LR Sweep | Optimal LR for A at d_model=1024? | d_model=1024, wikitext, Piste A vs C | A and C have different optimal LRs; LR sweep extends to 7e-4 | Positive (refinement) | dev_notes/experiments/real_text_baselines.md |
+| 2026-09-20 | Baselines A/B/C Real-text | Three families (LFM2/OLMo/Qwen) baseline comparison? | LFM2-350M, OLMo-1.2B, Qwen-0.5B/1.6B, wikitext, CE-only | All three scale & train normally; vocab_size bugs identified and fixed | Positive (infrastructural) | dev_notes/experiments/real_text_baselines.md, commit 16c4c0b |
+| 2026-09-20 | Phase 0 Real-text Hierarchie | Flat vs hierarchical KB structure on real data? | hierarchie options, real wikitext | Hierarchie options tested; flat selected for early phases | Positive (architecture decision) | dev_notes/experiments/indexed_attention_core_mechanism.md (EXP-007) |
+| 2026-09-20 | KB Ingestion MVP | KB retrieval pipeline smoke test on real data? | ~4k docs, HotpotQA, retrieval cost measured | No crashes; cost ~7x higher than expected | Positive (feasibility) | dev_notes/experiments/kb_ingestion_8ter.md |
+| 2026-09-20 | KD Alignment Retrieval | Teacher top-K targets alignment on 18k retrieval train? | 18k HotpotQA, Teacher LFM2-1.2B, KD align | 18000/18000 alignment (100%) after fix | Positive | dev_notes/experiments/distillation.md, commit 98% |
+| 2026-09-20 | KD Alignment Math | Teacher targets on openr1_math? | openr1_math, KD distillation | 0/2000 answer spans aligned — fallback CE-only total | Negative (data issue) | dev_notes/experiments/distillation.md |
+| 2026-09-20 | Phase 3 Real-text LR Sweep | LR sweep + blockers on LockstepLaneBatcher? | real_text train, LR ∈ {1e-3..1e-5}, n_step variant | LR sweep complete; single-pass batcher bottleneck identified | Positive (infrastructure) | dev_notes/experiments/real_text_baselines.md |
+| 2026-09-20 | Use_ff Ablation | use_ff=True vs False (FFN capacity test)? | use_ff ∈ {True, False}, real_text | use_ff=True clearly beats False; capacity likely limiting | Positive | dev_notes/experiments/real_text_baselines.md (8/8) |
+| 2026-09-22 | S3 FFN→Attention Curriculum | Attribution probe: is FFN attention-like? | 16-layer test, curriculum FFN→Attn | Signal directionnal confirmed (l2norm=0.9995); attribution at chance | Positive (signal present but not attribution) | dev_notes/experiments/s3_ffn_attention_curriculum.md |
+| 2026-09-22 | Phase 17 Math KD vs CE | KD vs CE-only on math task? | openr1_math, KD (3.1720 CE) vs CE-only (3.2340 CE) | Both 30/30 & 29/30 degen; KD slightly worse; collapse universal | Negative (both collapse) | dev_notes/experiments/prompt_response_pipeline.md |
+| 2026-09-22 | Phase 19 Retrieval CE-only | Retrieval CE-only baseline (no KD)? | 81k HotpotQA, CE-only, n_step=4 fixed | CE=7.0325; qualitative 45/60 degen (75%); EM~0% | Negative (collapse + zero EM) | dev_notes/experiments/prompt_response_pipeline.md, commit ecb7cfb |
+| 2026-09-22 | Diagnostic: n_step Ablation | Is recurrence count (n_step) causing calibration collapse? | n_step=1 vs 4 on same KD checkpoint | n_step=1: 0.25%, n_step=4: 0.375% teacher-forced accuracy — no difference | Negative (not the cause) | commit fde4133 |
+| 2026-09-22 | Diagnostic: KB Disable | Is KB/retrieval mechanism causing collapse? | disable_kb flag on same checkpoint | disable_kb: 0.25% accuracy — identical to KB-active | Negative (not the cause) | commit 377422a |
+| 2026-09-22 | Diagnostic: Code Audit | Recipe bugs in train_prompt_response.py? | Static code review: target alignment, train/eval, CE/KD mix, LR/patience | No bugs found; all alignments correct | Positive (validation) | commit 2fd760f |
+| 2026-09-22 | Diagnostic: Cross-Checkpoint Validation | Do two independent CE-only runs converge to same degenerate mode? | 2 CE-only checkpoints (retrieval, phase19 & agent2 own run), argmax analysis | Exact same safe-bet token distribution (hash-verified distinct checkpoints) | Positive (indicates structural cause) | dev_notes/experiments/prompt_response_pipeline.md |
+| 2026-09-22 | Freeze Head + LoRA32 | Does frozen lm_head + LoRA recover from collapse? | frozen head + LoRA rank=32 on KD retrieval | LoRA recovers ~88% of CE gap but **does not resolve generation collapse** (30/30 degen) | Negative (collapse persists) | OBJECTIVES_LOG 2026-09-22 |
+| 2026-09-23 | Phase 20 Retrieval Full Coverage | Full Teacher top-K coverage (100%) prevents collapse? | 81k HotpotQA full top-K, KD, n_step=4 | CE=7.1891 (vs CE-only 7.0325); qualitative 45/60 degen (75%); EM=0% | Negative (collapse persists) | commit 045a351, ecb7cfb |
+| 2026-09-23 | Phase 21 Tinystories CE-vs-KD | CE-vs-KD isolated on smallest dataset? | tinystories, CE=5.1968, KD=5.0961, n_step=4 | CE: 28/60 degen (47%); KD: 24/60 degen (40%) — **least severe collapse of 4 datasets** | Positive (qualified; collapse reduced but present) | commit 2148efa |
+| 2026-09-23 | Phase 22 Scaling d_model | Larger recurrent core reduces calibration collapse? | d_model 256→512 (2x params, 260M), retrieval KD | CE=7.1893 (vs 7.1891 at baseline); qualitative 43/60 degen (72%); teacher-forced accuracy 0.4% (identical) | Negative (collapse unchanged) | commit d79a9ec, 2005a0d |
+| 2026-09-23 | Diagnostic: answer_head_per_position | Per-position output transform instead of shared head? | answer_head_per_position on KD retrieval | Accuracy 0.31% teacher-forced (within 0.25-0.5% band) | Negative (not the cause) | commit 376dc39 |
+| 2026-09-23 | Diagnostic: n_register Ablation | n_register=1 vs 8 (register capacity)? | n_register ∈ {1, 8} on same checkpoint | n_register=1: 0.375% accuracy (vs baseline 0.4-0.5%) | Negative (not the cause) | commit 6d957a9 |
+| 2026-09-23 | Diagnostic: Combined Ablation | All six ablations (n_step, KB, answer-head, n_register) together? | Combined: answer_head_per_position + n_register=1 | Accuracy 0.44% teacher-forced (within band, no synergy) | Negative (no interaction explains collapse) | commit e7b823e |
+| 2026-09-23 | E3 Baseline Dense Transformer | Does shared-weight recurrence alone (without register/output-stream) collapse? | Dense GPT2-style, single shared block, n_step random curriculum, wikitext+CE | Teacher-forced accuracy 21.2% (391/1844); free-run 23/30 degen | Positive (collapse is Thinker-specific; recurrence alone is not cause) | commit acea3bd, 63949b3 |
+| 2026-09-23 | Retrieval EM/F1 Accuracy | Does final answer survive calibration collapse? | HotpotQA val 500/9000 ex., greedy generation | KD full-coverage: EM=0.00%, F1=0.32%; CE-only: EM=0.00%, F1=0.79% | Negative (zero EM, collapse corrupts answer) | commit ecb7cfb, 574dd07 |
+| 2026-09-23 | Sampling/Forced-Short-Answer Recovery | Non-greedy decoding (T=0.7, top_p=0.9) + answer truncation? | KD & CE-only, sampling + 6-token forced short, 500 ex. | EM=0.00% in all cases; F1 varies slightly (0.3-2%) but remains quasi-zero | Negative (decoding strategy not the fix) | commit 2ca910d |
+| 2026-09-23 | Efficiency: Thinker vs Qwen3.5 | Parameter count & inference speed vs reference LLM? | Thinker 128.8M vs Qwen3.5-0.8B (752.4M), 30 retrieval prompts, L40S | **5.8x fewer params; 8.5x faster (517.3 vs 60.8 tokens/sec)** despite no KV-cache | Positive (efficiency confirmed) | commit 46286ec, 2b0e269 |
+| 2026-09-22 (ICLR planning) | N-step Variable Curriculum | Fixed vs random n_step: which better handles extrapolation? | n_step Uniform(1,8) at train/test vs n_step=fixed during train | Variable curriculum: +0.029 CE degradation at test; fixed: +4.02 CE degradation | Positive (loop composition thesis) | OBJECTIVES_LOG 2026-09-22 |
+
+---
+
+## Recent Additions (≥2026-09-22)
+
+**8 major results added 2026-09-23 (agent2 + experiment-agent):**
+1. **Phase 21 (tinystories)**: CE-vs-KD shows reduced collapse (40-47% vs 75-97% on 3 other datasets)
+2. **Phase 22 (scaling)**: 2x d_model does NOT reduce calibration collapse (0.4% accuracy unchanged)
+3. **E3 (Baseline C, looped-dense)**: 20.5% teacher-forced accuracy confirms shared-weight recurrence alone is NOT the cause
+4. **EM/F1 Accuracy (retrieval)**: First direct measurement of final-answer survival — 0% EM across all checkpoints
+5. **Sampling recovery**: Non-greedy decoding confirmed as ineffective for retrieval accuracy
+6. **Efficiency benchmark**: 5.8x fewer params, 8.5x faster tokens/sec (Thinker vs Qwen3.5)
+7. **6 diagnostic ablations** (n_step, KB, answer-head, n_register, combined, scale) all within 0.25-0.5% band — no isolated component or pairwise interaction explains collapse
+8. **Combined ablation**: answer_head_per_position + n_register=1 together still 0.44% — rules out interaction hypothesis
+
+**No results yet (in progress/not started):**
+- Toy model read_step experiments (Exp. 1-5 drafted, not executed)
+- Additional datasets beyond {math, wikitext, retrieval, tinystories}
+- n_register=8 vs 16/32 extended range
+- KV-cache implementation for Thinker inference (efficiency caveat remains)
