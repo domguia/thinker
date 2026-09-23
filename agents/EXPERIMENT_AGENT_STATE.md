@@ -4,15 +4,17 @@
 détail chronologique/résultats complets restent dans
 `dev_notes/experiments/prompt_response_pipeline.md`.)
 
-Dernière mise à jour : 2026-09-23 ~16:45, en cours de session (deadline papier 26/09).
+Dernière mise à jour : 2026-09-23 ~16:52, en cours de session (deadline papier 26/09).
 
 ## En cours
-- **E5** (WRITING_PLAN §4, P1) : diagnostic mécanistique par itération (norme/rang effectif
-  de R, similarité cosinus, logit-lens via sm_k/sm_v) -- script écrit
-  (`learn/indexed_attention/diagnose_iteration_dynamics.py`), en cours de transfert/lancement
-  sur Rennes, checkpoint cible `retrieval_kd_fullcov_best.pt`.
+- Rien -- E5 terminé et rapporté (voir ci-dessous). En attente de nouvelle priorité supervisor-agent.
 
 ## Terminé et rapporté cette session (résumé, voir journal pour détails)
+- **E5** : diagnostic mécanistique par itération -- R converge vers une DIRECTION fixe
+  (cos->1.0000) mais sa norme croît SANS BORNE (linéaire, 63->1070 sur 32 steps), rang
+  effectif s'effondre vers ~1. Entropie du logit-lens minimale vers n_step=4 (zone
+  d'entraînement) puis redescend (confiance croissante et FAUSSE) en extrapolation.
+  Corrobore l'ablation outer_norm (E13) en cours par agent2 comme fix candidat.
 - Baseline C (dense transformer non-récurrent, wikitext) : calibration 21.2% vs Thinker ~0.3-0.5%.
 - Phase17-21 : CE-vs-KD sur 4 datasets (wikitext/retrieval/math/tinystories), collapse universel confirmé.
 - Phase20 : retrieval KD couverture top-K full -- collapse persiste (couverture pas la cause).
