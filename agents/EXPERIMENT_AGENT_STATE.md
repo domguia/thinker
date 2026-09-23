@@ -4,6 +4,23 @@
 détail chronologique/résultats complets restent dans
 `dev_notes/experiments/prompt_response_pipeline.md`.)
 
+## REPRISE RAPIDE (préparé pour interruption transfert de compte, 21:20)
+1. Lire ce fichier en entier (état complet ci-dessous), puis vérifier
+   `git log --oneline -10` pour confirmer aucun commit perdu.
+2. Vérifier le run en cours : `ssh nancy.g5k 'OAR_JOB_ID=6938205 oarsh
+   graffiti-3 "tail -8 ~/thinker/logs/x1_m3_addition_seed2_retry.log"'`
+   (M3/T1 seed2, ETA ~21:47, devrait être FINAL ou proche à la reprise).
+3. Si FINAL >=95% : grille T1 M1-M4 (3 seeds chacun) COMPLÈTE. Consolider
+   dans `dev_notes/experiments/X1/results.csv` (même format que data-agent
+   pour T3), MAJ `results_inventory.md` + `OBJECTIVES_LOG.md`, commit,
+   informer data-agent + supervisor-agent que T1 est clos.
+4. Ensuite : T4 (p-hop induction, data-agent) en attente d'arbitrage GPU --
+   voir si T1+T3 sont bien tous deux clos avant d'investir dessus. T5/T2
+   pas commencés (prochains dans l'ordre du dispatch après T4).
+5. Les GPU jobs Grid'5000 continuent de tourner indépendamment d'une
+   interruption de session Claude -- rien à relancer sauf si un job a
+   effectivement crashé (vérifier `oarstat -j <id> -f`).
+
 Dernière mise à jour : 2026-09-23 ~20:05. Les monitors précédents sont tombés
 (session fermée/rouverte entre-temps) -- vérifié directement, les 4 jobs GPU
 tournent toujours sains (Nancy graffiti-4, job group 6938131-6938134), aucune
