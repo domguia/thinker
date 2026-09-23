@@ -386,6 +386,14 @@ def main() -> None:
                          "random init if --answer_head_init is unset, though that combination is unlikely "
                          "to work well -- a random, never-adapted projection has no reason to be decodable). "
                          "--embed stays trainable regardless -- this only isolates the head specifically.")
+    p.add_argument("--answer_head_per_position", action="store_true",
+                    help="2026-09-23, supervisor-agent request, generation-collapse investigation: "
+                         "adds a per-position (d_model,d_model) linear transform right before the "
+                         "'answer' stream's (still-shared) vocab head, instead of every position going "
+                         "through one identical transform -- a tractable proxy for a literal unshared "
+                         "per-position head (which would multiply the head's ~63.7M params by "
+                         "max_answer_len, infeasible). See OutputStream.__init__'s per_position_head "
+                         "docstring (core/indexed_thinker_model.py) for the full rationale.")
     p.add_argument("--answer_head_lora_rank", type=int, default=0,
                     help="requires --freeze_answer_head. Adds a trainable low-rank additive correction "
                          "(x @ A) @ B on top of the frozen head (B zero-init, starts as a no-op -- "
@@ -684,6 +692,7 @@ def main() -> None:
         stream_n_layers=stream_n_layers, use_ingest_token=args.ingest_kb,
         stream_head_init=({"answer": _load_answer_head_init(args.answer_head_init, vocab_size)}
                            if args.answer_head_init else None),
+        stream_head_per_position=({"answer": True} if args.answer_head_per_position else None),
     ).to(device)
     if args.freeze_answer_head:
         head = model.streams["answer"].head

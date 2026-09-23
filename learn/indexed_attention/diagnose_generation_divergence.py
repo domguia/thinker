@@ -52,6 +52,7 @@ def main() -> None:
     ap.add_argument("--block_size", type=int, default=16)
     ap.add_argument("--n_docs_max", type=int, default=10)
     ap.add_argument("--answer_head_lora_rank", type=int, default=0)
+    ap.add_argument("--answer_head_per_position", action="store_true")
     ap.add_argument("--max_answer_len", type=int, default=64)
     ap.add_argument("--n_register", type=int, default=8)
     ap.add_argument("--d_model", type=int, default=256)
@@ -91,6 +92,7 @@ def main() -> None:
         use_ff=args.use_ff, ff_hidden_mult=args.ff_hidden_mult,
         stream_dims=stream_dims, stream_sequence=stream_sequence, max_target_len=args.max_answer_len,
         stream_n_layers=stream_n_layers,
+        stream_head_per_position=({"answer": True} if args.answer_head_per_position else None),
     ).to(device)
     if args.answer_head_lora_rank > 0:
         from learn.indexed_attention.train_prompt_response import LoRAHead

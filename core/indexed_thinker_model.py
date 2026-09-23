@@ -125,10 +125,26 @@ class OutputStream(nn.Module):
     """
 
     def __init__(self, d_model: int, out_dim: int, n_layers: int = 1,
-                 sequence_mode: bool = False, max_seq_len: int = None):
+                 sequence_mode: bool = False, max_seq_len: int = None,
+                 per_position_head: bool = False):
+        """
+        per_position_head (2026-09-23, supervisor-agent request, generation-collapse
+        investigation): the single shared `self.head` nn.Linear is applied identically
+        at every output position -- a literal per-position UNSHARED head (a separate
+        (d_model, vocab) matrix per position) would multiply the head's ~63.7M params
+        (at this project's 248k vocab) by max_seq_len (e.g. 64x -> ~4B), infeasible for
+        a diagnostic run. Cheaper proxy tested instead: a per-position (d_model,
+        d_model) linear transform applied to the hidden state right before the
+        (still-shared) vocab head -- adds position-specific capacity without touching
+        the vocab-sized parameter block. Tests the same qualitative hypothesis
+        ("does forcing every position through one identical transform limit
+        calibration") at a tractable parameter cost (max_seq_len * d_model^2, a few
+        million params, not billions).
+        """
         super().__init__()
         assert 1 <= n_layers <= 3, "output streams are meant to stay lightweight (1-3 layers)"
         self.sequence_mode = sequence_mode
+        self.per_position_head = per_position_head
         if sequence_mode:
             assert max_seq_len is not None and max_seq_len > 0, (
                 "sequence_mode requires max_seq_len (spec §14.3, an upper bound on T_tgt "
@@ -137,6 +153,9 @@ class OutputStream(nn.Module):
             self.pos_embed = nn.Embedding(max_seq_len, d_model)
         else:
             self.query_seed = nn.Parameter(torch.randn(1, d_model) * d_model ** -0.5)
+        if per_position_head:
+            assert sequence_mode, "per_position_head only makes sense in sequence_mode"
+            self.pos_head_proj = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(max_seq_len)])
         self.layers = nn.ModuleList([OutputStreamLayer(d_model) for _ in range(n_layers)])
         self.head = nn.Linear(d_model, out_dim)
 
@@ -165,6 +184,9 @@ class OutputStream(nn.Module):
             x = self.query_seed.unsqueeze(0).expand(B, -1, -1)
         for layer in self.layers:
             x = layer(x, sm_k, sm_v)
+        if self.per_position_head:
+            T = x.shape[1]
+            x = torch.stack([self.pos_head_proj[t](x[:, t, :]) for t in range(T)], dim=1)
         return x if return_hidden else self.head(x)
 
 
@@ -178,6 +200,7 @@ class Thinker(nn.Module):
                  disable_kb: bool = False, disable_sm: bool = False,
                  stream_sequence: dict = None, max_target_len: int = None,
                  stream_vocab_sizes: dict = None, use_ingest_token: bool = False,
+                 stream_head_per_position: dict = None,
                  tie_stream_embed: set = None, embed_init: torch.Tensor = None,
                  freeze_embed: bool = False, stream_embed_init: dict = None,
                  freeze_stream_embed: set = None, stream_head_init: dict = None):
@@ -265,11 +288,13 @@ class Thinker(nn.Module):
         # default so every existing single-query/single-answer usage
         # (data/kb_retrieval.py, data/kb_chain_retrieval.py) is unaffected.
         stream_sequence = stream_sequence or {}
+        stream_head_per_position = stream_head_per_position or {}
         self.streams = nn.ModuleDict({
             name: OutputStream(
                 d_model, dim, n_layers=stream_n_layers.get(name, 1),
                 sequence_mode=stream_sequence.get(name, False),
                 max_seq_len=max_target_len if stream_sequence.get(name, False) else None,
+                per_position_head=stream_head_per_position.get(name, False),
             )
             for name, dim in stream_dims.items()
         })
