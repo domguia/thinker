@@ -56,15 +56,27 @@ le 4e -- relancés immédiatement, sans attendre G2/T1 :
   le besoin d'un remède plus poussé.
 - Les 4 GPU graffiti-4 sont maintenant tous actifs (aucun idle).
 
-## G2/T1 v3 -- quasi-VALIDÉE (20:34)
-n_step_train_max=16 (au lieu de 8) a résolu le problème de seuil : EM
-in-dist stable >=98% depuis step 14000 (n_step_test=16) : 98.5/99/98.5/98.5/
-98/99.5%. Run pas encore fini (25860/30000 steps à 20:34, ~4min restantes).
-Cause confirmée a posteriori : n_step_test=8 était insuffisant pour la
-propagation de retenue sur addition 1-20 chiffres (pas un bug -- besoin de
-capacité récurrente, cohérent avec l'hypothèse notée précédemment).
-Prochain check : lire la ligne FINAL, si >=95% (quasi certain vu la
-stabilité), clore G2/T1 formellement dans le journal + ici, committer.
+## G2/T1 VALIDÉE (20:44) -- n_step_train_max=16
+FINAL in-distribution EM=0.9950 (n_step_test=16), OOD=0.50% (attendu, c'est
+H2). Détail complet dans le journal (prompt_response_pipeline.md).
+
+## G3/T1 -- défaut H8 confirmé sur addition aussi, X2(a) inefficace (20:44)
+M1 Thinker (seed0+seed1) : loss plafonne ~2.2, EM=0.0000 -- même défaut que
+G3/T3 de data-agent (mean-pooling casse l'ordre place-value). X2(a)
+outer_norm testé en parallèle : ne corrige pas (EM≈0.5%). Détail dans le
+journal. X2(b)/(c)/(d) pas implémentés -- besoin de dev avant de tester.
+
+## Prochaines actions (20:44)
+- G1+G2/T1 validées, G3/T1 négatif (résultat valide, classe H8) -- T1 peut
+  passer à la grille complète (M1-M4 x n_step_test sweep x 3 seeds) sur les
+  GPU libres, en parallèle de T4 (prochaine tâche selon l'ordre §2).
+- Les 2 runs G3/T1 (M1 seed0+seed1) et X2a/T1 continuent jusqu'à leur fin
+  naturelle (30k steps) -- pas besoin de les tuer, ils fournissent le sweep
+  n_step_test complet (1..32) en fin de run pour la grille finale.
+- GPU graffiti-4 : 1 GPU (ex-G2/T1 v3, job 6938131) redevenu libre --
+  prochaine tâche à y lancer : soit grille T1 M3/M4 pour sweep n_step_test +
+  seeds supplémentaires, soit démarrer T4 (p-hop induction, tasks.py à
+  étendre, pas encore de générateur pour cette tâche).
 
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :

@@ -1133,3 +1133,40 @@ Fixé, runs relancés (G2/T1 seed0 + M3/T1 seed1) sur graffiti-4.
 Parallélisation X1 en cours (consigne supervisor-agent) : 4 GPU Nancy
 graffiti-4 utilisés (G2/T1 + M4/T1 seed1+2 + M3/T1 seed1), coordination avec
 data-agent pour graffiti-11 (Nancy) + abacus27-1/abacus22-1 (Rennes).
+
+## X1 — Gate G2 (M3 looped-dense, T1 addition) VALIDÉE (v3, n_step_train_max=16) — 2026-09-23
+
+Le 1er essai à `n_step_train_max=8` (mécanisme use_cache déjà corrigé) échouait le
+seuil : seed0=17.5%, seed1=70% EM in-dist (n_step_test=8), loss basse mais EM
+insuffisante -- pas un bug (contraste net avec le bug attention_mask de G1, qui
+donnait EM=0.0000 strict). Hypothèse : capacité récurrente insuffisante pour la
+propagation de retenue sur addition multi-chiffres (1-20 chiffres), tâche plus
+exigeante en ce sens que le prefix_sum/parité de T3 (où data-agent a eu EM=1.0
+avec le même mécanisme).
+
+**Relancé avec `n_step_train_max=16` (30000 steps, sinon config identique)** :
+EM in-dist stable ≥98% dès step 14000, **FINAL in-distribution EM=0.9950**
+(n_step_test=16), OOD=0.50% (attendu, c'est la question H2 elle-même).
+
+**G2/T1 VALIDÉE.** Cause confirmée a posteriori : besoin de plus d'itérations
+récurrentes pour cette tâche, pas un bug d'implémentation.
+
+## X1 — Gate G3 (M1 Thinker, T1 addition) — même défaut H8 que T3, X2(a) inefficace — 2026-09-23
+
+`learn/x1/train_thinker.py` (harnais data-agent, générique) lancé sur T1 addition,
+`n_step_train_max=16`, 30000 steps, seed0+seed1 : loss plafonne à ~2.2 dès les
+premiers milliers de pas (jamais franchie), EM in-dist = 0.0000 (steps
+26000/28000, n_step_test=16) sur les deux seeds -- **identique au résultat G3/T3
+de data-agent** (EM=0 stable, cause : mean-pooling du register détruit
+l'information nécessaire, ici l'ordre place-value des chiffres pour la retenue).
+
+**X2(a) testé en parallèle** (M2, `--outer_norm`, remède déjà implémenté dans
+`core/indexed_thinker_model.py`) : même plafond de loss (~2.2), EM≈0.5% à step
+24000 -- **outer_norm seul ne corrige pas le défaut sur T1 non plus**.
+
+Conforme à la table de décision X1_DISPATCH §3/§5 (G3<50% alors que G2≥95% =
+défaut H8, continuer la grille, résultat valide) -- généralise le résultat de
+data-agent à une 2e tâche (addition, pas seulement prefix_sum). X2(b)/(c)/(d)
+(recall input, lecture multi-latents, tête d'arrêt) pas encore implémentés dans
+le code -- nécessiteraient du développement avant de pouvoir tester s'ils
+corrigent mieux que outer_norm seul.
