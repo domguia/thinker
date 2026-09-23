@@ -312,3 +312,7 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
   attente de confirmation.
 - G1/T2 seed0 (graffiti-6) : step 50780/100000 (~52%), loss ~0.35, RAS.
 - G1/T2 seed1 (abacus18-1) : à vérifier au prochain point.
+
+## Run CPU recalibré -- 01:03
+- G1/T2 seed2 relancé sur grdix-5 (job 6938304, walltime 4h,
+  --max_time_minutes 230 --eval_every 5000). Confirmé actif (step 120).
