@@ -71,3 +71,21 @@ Utilisateur irrité (GPU idle alors que X2-X6 sont prêtes à lancer) : demande 
 - Toulouse : seul cluster GPU (estats) en ARM64, même famille que Hydra/GH200 déjà rencontré ; contournement documenté existant appliqué mais abandonné après budget de temps limité.
 - Les deux restent "code+env prêts, GPU non validé", documenté dans agents/INFRA_AGENT.md pour éviter de re-creuser sans raison.
 - Focus reconfirmé sur Rennes+Nancy (14 GPU opérationnels) + T3 grille complète (data-agent, M1/M2 EM=0 confirmé, outer_norm négatif sur 2 tâches) + X2(a)/X2(b) en cours.
+
+## 2026-09-23 (suite) — X2(a) et X2(b) toutes deux négatives
+- X2(a) outer_norm (T1, experiment-agent) et X2(b) enable_kb/recall-input (T3, data-agent) : EM=0.0000 in-dist/OOD, même plateau plat que le défaut G3/H8 initial — ni l'un ni l'autre ne corrige.
+- data-agent enchaîne sur X2(c) (lecture depuis tous les latents) selon table de décision X1_DISPATCH §5, sans attendre validation. Commit 96911fc.
+- Le défaut H8 (EM=0/collapse calibration) résiste maintenant à : n_step, KB/retrieval, answer-head, n_register, scale, E3(recurrence pure - négatif, c'est-à-dire E3 réussit donc recurrence seule pas la cause), E13 outer-norm (LayerNorm), X2(a) outer_norm sur tâche synthétique, X2(b) enable_kb. Cause toujours non identifiée.
+
+## 2026-09-23 21h — E13 définitivement rejeté, préparation transfert de compte (quota 91%)
+- E13 RMSNorm et LayerNorm : teacher_forced_argmax_accuracy=0.375% (vs Baseline C 21.2%, vs pré-E13 ~0.25-0.5%), EM=0.00% les deux — **aucune récupération, E13 rejeté**. Corrobore indépendamment X1/X2(a) (même flag outer_norm, tâche T1 addition, même verdict négatif). Commit cbd2b2b.
+- E7 (depth sweep) bloqué par mismatch archi checkpoint/eval (`memory.level_norms.1.weight`), non résolu, pas de résultat.
+- Défaut H8 : outer normalization (2 variantes × 2 tâches/contextes différents = 4 tests indépendants) définitivement écartée comme remède. Cause toujours non identifiée.
+- Quota 91% sur fenêtre 18-23h (21h17) → transfert de compte imminent, tous les agents alertés, état sauvegardé/committé par chacun avant interruption ~10min (jobs GPU cluster continuent, suivi session coupe).
+
+## 2026-09-23 23h20 — X1 T1 (addition) CLOS : grille M1-M4 complète, G1/G2 validées, G3/X2a confirment H8
+- M3/T1 seed2 retry (job 6938205, graffiti-3) terminé : FINAL in-dist EM=0.9800, OOD=0.0600, juste avant expiration du walltime (état `Error` post-walltime normal, pas un échec).
+- Grille T1 complète (3 seeds chacun) : **G1/M4 VALIDÉE** (EM≈0.99), **G2/M3 VALIDÉE** (EM 0.98-0.995, après fix n_step_train_max 8→16), **G3/M1 NÉGATIF** (EM=0.0000 sur tout le sweep n_step_test, 3 seeds), **X2a/M2 outer_norm NÉGATIF** (EM≈0-0.005, ne corrige rien).
+- **Conclusion cross-task (T1 addition + T3 prefix_sum, deux tâches indépendantes) : le défaut H8 est confirmé général, pas un artefact d'une seule tâche.** outer_norm (X2a, testé sur T1+T3+E13) et enable_kb (X2b, T3) tous deux inefficaces isolément.
+- Résultats consolidés : `dev_notes/experiments/X1/results.csv`, `thesis/research/results_inventory.md`, commit 65d55b9.
+- Prochaine étape à arbitrer avec data-agent : T4 (p-hop, encore <50% EM, sous-échelle) vs lancement T5/T2 maintenant que T1+T3 sont formellement clos des deux côtés.
