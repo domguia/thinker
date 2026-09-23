@@ -217,3 +217,17 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
 - Prochaine étape : si G1/T2 passe, enchaîner G2 (M3 looped-dense) puis
   G3 (M1 Thinker) sur T2 ; T5 (labyrinthes) nécessite un nouveau générateur
   plus complexe (pas encore écrit), à coordonner avec data-agent.
+
+## G1/T2 (multiplication) -- premier essai ÉCHEC seuil, pas un bug -- 23:56
+- G1/T2 v1 (M4 dense, seed0, 5000 steps) : FINAL in-dist EM=0.1750, OOD=0.0000,
+  loss plafonne ~1.19-1.20 sans converger. Diagnostic : pas le signature bug
+  (loss haute ET stable, pas type "EM=0 strict avec loss saine" comme le bug
+  attention_mask de G1/T1) -- plutôt sous-entraînement, cohérent avec la
+  littérature (McLeish 2024 : multiplication O(n²) partiels, bien plus dure
+  que l'addition à budget égal).
+- Retry v2 lancé sur le même GPU (abacus21-1, job 4140312) : max_steps 20000
+  (x4), max_time_minutes 20, eval_every 500. Log
+  `logs/x1_g1_m4_multiplication_v2.log`, save_dir `runs/x1_g1_m4_multiplication_v2`.
+- Pas de nouvelle réponse de data-agent sur l'avancement T5 (labyrinthes) --
+  aucun générateur `gen_labyrinth`/maze écrit encore côté aucun agent, à
+  vérifier/coordonner pour éviter le double travail avant de s'y attaquer.
