@@ -1072,4 +1072,15 @@ Répétition de phase13/14 (extrapolation n_step à l'inférence, gap fixe-vs-al
 
 **Confirme le résultat original (gap ~0.03 vs ~4.0) sur 2 seeds indépendantes par condition** : le training à n_step fixe produit systématiquement une explosion en U à l'extrapolation (+5.9 à +7.9 sur ce sweep élargi jusqu'à 32), tandis que le training à n_step aléatoire reste quasi plat (+0.09 à +0.44) -- écart d'un ordre de grandeur, robuste au bruit de seed.
 
-**5/6 -- fixed_seed2 terminé (H100)** : n_step_test=1 -> 9.34, =4 (train) -> 7.84, =32 -> 20.47. **Gap = +12.63**, encore plus marqué que seed0/1 -- confirme la tendance sur 3/3 seeds fixed. Seul `random_seed2` reste en attente de GPU pour clôturer les 3 seeds des deux conditions.
+**5/6 -- fixed_seed2 terminé (H100)** : n_step_test=1 -> 9.34, =4 (train) -> 7.84, =32 -> 20.47. **Gap = +12.63**, encore plus marqué que seed0/1 -- confirme la tendance sur 3/3 seeds fixed.
+
+**6/6 -- TOUS LES RUNS TERMINÉS. `random_seed2`** (H100, GPU réutilisé après fixed_seed2) : n_step_test=1 -> 7.89, =4 (train) -> 7.87, =32 -> 8.03. **Gap = +0.15**.
+
+### Résumé final (3 seeds x 2 conditions, gap = answer_ce(n_step_test=32) - answer_ce(n_step_test=4, valeur d'entraînement))
+
+| Condition | seed0 | seed1 | seed2 | Moyenne |
+|---|---|---|---|---|
+| n_step FIXE (training) | +7.90 | +5.93 | +12.63 | **+8.82** |
+| n_step ALÉATOIRE U(1,8) | +0.09 | +0.44 | +0.15 | **+0.23** |
+
+**Robustesse confirmée sur 3 seeds indépendantes par condition, ratio ~38x entre les deux moyennes.** Le training à n_step fixe produit systématiquement une explosion à l'extrapolation (jamais en dessous de +5.9 sur 3 essais), le training à n_step aléatoire reste systématiquement quasi plat (jamais au dessus de +0.44 sur 3 essais) -- aucun chevauchement entre les deux distributions de gap sur cet échantillon. Confirme solidement le résultat central phase13/14 pour le papier, pas un artefact de seed unique. Fichiers : `checkpoints/e1_{fixed,random}_seed{0,1,2}_best.pt`, `logs/e1_{fixed,random}_seed{0,1,2}_{train,fullval}.log`.
