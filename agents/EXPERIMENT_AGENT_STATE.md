@@ -302,3 +302,13 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
   actuellement, pas bloqué. Fallback CPU identifié si besoin : consolidation
   synthèse X1 T1+T3, préparation commandes G2/G3/T2, vérif cohérence
   results.csv.
+
+## Run CPU (grdix) mal calibré au premier essai, correction demandée -- 01:00
+- infra-agent a lancé G1/T2 seed2 sur grdix-15 (256 cœurs, job 6938303),
+  mais à ~400 steps/min, `--max_time_minutes 40` n'aurait donné que ~16000
+  steps -- déjà su que ça donne EM~48% (v2), insuffisant. Demandé de tuer
+  et relancer soit avec walltime 4-6h + max_time_minutes~230 (préféré, CPU
+  abondant cette nuit), soit repli max_time_minutes 55 si pas dispo. En
+  attente de confirmation.
+- G1/T2 seed0 (graffiti-6) : step 50780/100000 (~52%), loss ~0.35, RAS.
+- G1/T2 seed1 (abacus18-1) : à vérifier au prochain point.
