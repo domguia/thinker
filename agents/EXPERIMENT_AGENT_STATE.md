@@ -7,11 +7,11 @@ détail chronologique/résultats complets restent dans
 Dernière mise à jour : 2026-09-23 ~16:52, en cours de session (deadline papier 26/09).
 
 ## En cours
-- **E8** (filler P1) : ablation distribution n_step training, U(1,4) vs U(1,8) vs U(1,16).
-  nmax=8 déjà couvert par E1's random_seed0/1/2 (pas de relance). nmax=4 lancé sur graffiti-1
-  (Nancy), nmax=16 lancé sur abacus27-1 (Rennes, H100). En attente aussi de la réponse
-  d'agent2 sur E13 (outer_norm) -- si confirmé, je prendrai le relai pour un training complet
-  + éval EM/F1 dessus.
+- **E8** (filler P1) : nmax=4 en cours sur graffiti-1 (Nancy, step~2000/6000, sain).
+  nmax=16 préempté sur abacus27-1 (step2120/6000, checkpoint préservé), en attente d'un GPU
+  pour reprendre via --init_from_checkpoint (pas urgent). nmax=8 déjà couvert par E1.
+- Toujours en attente de la réponse d'agent2 sur E13 (outer_norm) pour prendre le relai
+  training complet + éval EM/F1.
 
 ## Terminé et rapporté cette session (résumé, voir journal pour détails)
 - **E5** : diagnostic mécanistique par itération -- R converge vers une DIRECTION fixe
