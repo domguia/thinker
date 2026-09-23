@@ -101,6 +101,15 @@ def main() -> None:
                          "not the whole output distribution, is what's broken).")
     ap.add_argument("--top_p", type=float, default=1.0, help="nucleus sampling cutoff, only used with --temperature > 0")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--truncate_pred_tokens", type=int, default=None,
+                    help="2026-09-23, supervisor-agent recovery-path test (length/format constraint on "
+                         "generation): truncates the GENERATED answer to this many subword tokens before "
+                         "scoring, simulating a forced-short-answer format WITHOUT changing --max_answer_len "
+                         "(which also sizes the model's pos_embed table at construction time -- reducing it "
+                         "there breaks loading an existing checkpoint trained at a different --max_answer_len). "
+                         "Applied by re-tokenizing the decoded text and truncating, not by stopping generation "
+                         "early -- simplest way to test the hypothesis with an existing checkpoint, at the cost "
+                         "of not saving the later steps' compute.")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -145,6 +154,9 @@ def main() -> None:
                                      args.max_answer_len, tok, temperature=args.temperature,
                                      top_p=args.top_p, seed=args.seed)
         for i, pred in zip(batch_idx, texts):
+            if args.truncate_pred_tokens:
+                pred_ids = tok(pred, add_special_tokens=False)["input_ids"][:args.truncate_pred_tokens]
+                pred = tok.decode(pred_ids, skip_special_tokens=True).strip()
             gold = val_ds.examples[i]["answer"]
             em = exact_match(pred, gold)
             f1 = f1_score(pred, gold)
