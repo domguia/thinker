@@ -6,6 +6,12 @@ learn/x1/ <site>:~/thinker/learn/x1/` depuis le dépôt local avant de lancer
 si le site n'a pas déjà `gen_multiplication`/`gen_labyrinth` à jour
 (vérifier `grep -c gen_multiplication ~/thinker/learn/x1/tasks.py`).)
 
+**Nos modèles X1 sont petits (5-20M params) -- tourner en `--device cpu` sur
+un gros nœud CPU (grdix Nancy 256 cœurs, paradoxe Rennes, montcalm Toulouse)
+est une option valide quand tout GPU CC>=7.5 est saturé.** Remplacer
+`--device cuda` par `--device cpu` dans n'importe quelle commande ci-dessous,
+plus lent mais gratuit/toujours disponible.
+
 ## 1. T2 (multiplication) -- PRIORITÉ HAUTE, grille en cours
 - G1/T2 seed0 (graffiti-6, Nancy, job 6938285) et seed1 (abacus18-1, Rennes,
   job 4142742) tournent déjà, 100000 steps chacun, ~10-13min pour finir.
