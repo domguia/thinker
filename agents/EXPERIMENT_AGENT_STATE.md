@@ -10,10 +10,32 @@ tournent toujours sains (Nancy graffiti-4, job group 6938131-6938134), aucune
 perte. Contexte plus court désormais -- je log plus fréquemment dans ce fichier
 à chaque check, pas seulement en fin de gate.
 
-État à 20:05 : x1_g2_m3_addition_v2 step=14740/20000 loss~0.09-0.11 ;
-x1_m4_addition_seed1 step=16720/20000 loss~0.01-0.03 ; x1_m4_addition_seed2
-step=16000/20000 loss~0.01-0.03 ; x1_m3_addition_seed1_v2 step=14360/20000
-loss~0.11-0.20. Tous devraient FINAL dans ~5-10min (20000 steps proche).
+Résultats FINAL à 20:15 :
+- M4/T1 seed1 : 99.00% in-dist EM, OOD 6.00% -- **G1 reconfirmé** sur seed
+  supplémentaire (déjà VALIDÉE avec seed0 à 99%).
+- M4/T1 seed2 : 99.00% in-dist EM, OOD 6.50% -- **G1 reconfirmé** (3e seed).
+- G2/T1 (M3 addition) seed0 (n_step_test=8, n_step_train_max=8) : **ÉCHEC DE
+  SEUIL** 17.50% in-dist EM (pas un crash -- loss basse ~0.085 mais EM basse,
+  différent du bug attention_mask de G1 qui donnait EM=0.0000 strict).
+- M3/T1 seed1 (même config) : 70.00% in-dist EM -- variance seed→seed forte,
+  suggère sous-capacité/sous-entraînement plutôt qu'un bug structurel.
+- Hypothèse : n_step_test=8 insuffisant pour la propagation de retenue sur
+  addition multi-chiffres (1-20 chiffres) -- tâche différente de T3
+  (prefix_sum/parité) où data-agent a eu EM=1.0 avec la même mécanique.
+- **Relancé** : x1_g2_m3_addition_v3.log, job en cours sur graffiti-4,
+  n_step_train_max=16 (au lieu de 8), max_steps=30000 (au lieu de 20000),
+  seed=0, save_dir runs/x1_g2_m3_addition_v3. Démarré 20:16, ~13min pour
+  20k steps précédemment donc ETA ~20min pour 30k. Si toujours <95% après
+  ce relancement, ce sera la 2e tentative de gate -- envisager escalade
+  selon X1_DISPATCH.md §6 ou accepter comme résultat négatif si loss
+  plafonne clairement (pattern G3/T3 de data-agent : EM=0 stable = résultat
+  valide, pas un bug).
+- data-agent : G3/T3 (Thinker/M1, prefix_sum) terminé, EM=0.0000 in-dist et
+  OOD -- cause identifiée (mean-pooling du register détruit l'ordre des bits,
+  incompatible avec la dépendance à l'ordre du prefix-sum/parité). Résultat
+  négatif valide (classe H8), pas un blocage, committé (f23cf8d). Harnais
+  `learn/x1/train_thinker.py` générique, réutilisable pour G3/T1 une fois
+  G2/T1 clos. data-agent passe à la grille complète T3 sur graffiti-11.
 
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
