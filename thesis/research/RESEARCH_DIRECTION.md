@@ -49,6 +49,6 @@ Mode « auto-research » : l'utilisateur dispose d'agents d'expérimentation et 
 
 ## 4. Questions ouvertes pour l'utilisateur
 1. ~~Cadrage~~ validé (2026-09-23).
-2. X1 en CE-only (tâches synthétiques sans Teacher) : OK ? — ouvert.
+2. ~~X1 CE-only~~ validé 2026-09-23 → plan détaillé : `X1_DISPATCH.md`.
 3. Relecture réciproque : l'utilisateur est le seul inscrit, sans publication éligible (un workshop ICLR 2023 ne compte pas a priori) ; un co-auteur a peut-être une publication éligible → contacter les program chairs / vérifier la console OpenReview **immédiatement** (affectations de relecture annoncées au plus tard le 27/09).
 4. Revue de littérature par graphe de citations : outillage en cours d'évaluation → `lit_review_tooling.md`.

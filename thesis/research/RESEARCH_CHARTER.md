@@ -16,6 +16,16 @@
 - **I2 — Le compute est mal condensé.** Des modèles de quelques milliards de paramètres dépassent GPT-3 (175B), et un petit modèle fine-tuné bat souvent un gros modèle généraliste sur sa tâche. La connaissance diffuse est du bruit pour une tâche donnée.
 - **I3 — La connaissance doit être externe et organisée.** Si un index hiérarchique groupe la connaissance (par domaine : code, médecine…), le modèle peut charger le bon sous-ensemble dans ses premières itérations, le garder, puis ne plus faire que calculer.
 
+## 2bis. Portée à long terme (vision de l'utilisateur, 2026-09-23) — pourquoi c'est important
+- **Toute** la connaissance est externe, pas seulement les faits : aussi la connaissance procédurale et algorithmique (« savoir-faire »). Le cœur ne fait que penser ; face à une tâche, il va chercher ce qu'il lui faut.
+- Trois niveaux de mémoire : de travail (latents = registres), à court et moyen terme, et long terme (une base de connaissances enrichie avec le temps). Le cœur apprend à **raisonner ET à gérer ses mémoires**, avec des accès itératifs synchronisés sur les itérations du thinking.
+- Résout d'un coup les trois manques des LLM actuels : **efficience, profondeur de raisonnement, contexte**.
+- Déploiement : un petit cœur sur l'appareil, avec la mémoire répartie entre le téléphone, le cloud personnel et un « internet de connaissances ». Personnalisation et fine-tuning se font par la mémoire, pas par les poids.
+- Explicabilité : la connaissance n'est plus diluée dans les poids. Les accès mémoire et des flux de sortie auxiliaires rendent le flux d'information observable.
+- Généricité : le processus n'est pas propre au texte (images, génération).
+- **Méthode** : la distillation depuis des LLM existants sert à *valider l'architecture vite*, sans pré-entraînement from scratch. La hiérarchie de mémoire et l'auto-organisation sont des ajouts ; le noyau est (1) connaissance découplée du thinking, (2) thinking itératif léger, (3) accès mémoire itératif appris.
+- Pour le papier : cette vision nourrit la motivation et le §Agenda ; les *claims* restent limités à ce qui est mesuré (§4).
+
 ## 3. Hypothèses testables
 
 | id | Hypothèse | Test minimal | Statut (2026-09-23) |
@@ -44,3 +54,4 @@ KD par défaut ; Teacher de même famille (skill `model-families`) ; `--hidden_l
 
 ## Historique des décisions
 - 2026-09-23 : création à partir de la vision exprimée par l'utilisateur (session writing-lead-agent).
+- 2026-09-23 : X1 en CE-only validé par l'utilisateur (tâches synthétiques uniquement) → `X1_DISPATCH.md`. Ajout du §2bis (vision long terme).
