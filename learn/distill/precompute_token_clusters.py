@@ -35,10 +35,14 @@ loss, and higher-quality representations), used via its raw HF AutoModel
 (NOT the sentence-transformers wrapper, which would pool) to keep
 `last_hidden_state` token-by-token. This is deliberately NOT one of this
 project's own causal Teacher families (core/model_families.py's lfm2/olmo/
-qwen) -- those are decoder-only, so a token's hidden state never sees the
-tokens after it (causal masking); a bidirectional encoder gives every token
-a representation informed by the WHOLE document, which is what a
-topic/density measure needs.
+qwen) by default -- those are decoder-only, so a token's hidden state never
+sees the tokens after it (causal masking); a bidirectional encoder gives
+every token a representation informed by the WHOLE document, which is what
+a topic/density measure needs. --embedding_backend causal is available to
+test the user's counter-hypothesis that these models' own representations
+are richer for this project's data than a generic embedding model --
+unverified, see embed_tokens' docstring for the mechanical caveats that
+still apply (position-asymmetric representations, last-layer anisotropy).
 
 Datasets: pass one or more --data DATASET_TYPE:path triples (dataset_type
 in retrieval/reasoning/general), each read by its own field convention:
@@ -99,17 +103,49 @@ def load_documents(spec: str):
     return out
 
 
-def embed_tokens(texts: list, model_name: str, device: str, max_length: int, batch_size: int = 16):
+def embed_tokens(texts: list, model_name: str, device: str, max_length: int, batch_size: int = 16,
+                  backend: str = "bidirectional", layer: int = -1):
     """
     Returns (embeddings: (N_tokens, hidden_dim) float32, doc_id_of_token: (N_tokens,) int64,
-    n_tokens_per_doc: (len(texts),) int64) -- raw AutoModel forward, last_hidden_state,
-    NO pooling layer applied (unlike SentenceTransformer's default pipeline). Special/padding
-    tokens are dropped via attention_mask before storing -- only real content tokens are kept.
-    """
-    from transformers import AutoModel, AutoTokenizer
+    n_tokens_per_doc: (len(texts),) int64). NO pooling layer applied in either backend.
+    Special/padding tokens are dropped via attention_mask before storing -- only real content
+    tokens are kept.
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name).to(device).eval()
+    backend="bidirectional" (default): raw AutoModel forward, last_hidden_state -- the
+    project's original choice (BAAI/bge-large-en-v1.5), see module docstring for why a
+    bidirectional encoder was preferred over the project's own causal Teachers.
+
+    backend="causal": AutoModelForCausalLM on one of this project's own downloaded families
+    (core/model_families.py -- lfm2/olmo/qwen), output_hidden_states=True, reading
+    hidden_states[layer] (default -1 = last). Added on the user's request (2026-09-20) to
+    test their hypothesis that these models' representations are richer/more capable than a
+    dedicated embedding model for this project's own data distribution -- an empirical
+    question, not settled by the argument above. The caveat that argument raised still
+    applies mechanically: causal masking means an early token's hidden state never sees the
+    tokens after it (representation asymmetric by position within a document, unlike
+    bidirectional), and a decoder's LAST layer is trained purely for next-token prediction,
+    a known source of anisotropic/degenerate similarity geometry in the literature -- which
+    is why `layer` defaults to -1 but is exposed so a middle layer (often more linearly
+    semantic in decoder-only models) can be tried instead, e.g. --embedding_layer 12.
+    """
+    from transformers import AutoTokenizer
+
+    if backend == "causal":
+        from bench_teacher import load_model_and_tokenizer
+        from core.model_families import resolve_model_name
+        model_name = resolve_model_name(model_name)
+        # reuses precompute_teacher_targets.py's own loader (device_map/max_memory/quantization,
+        # flash_attention_2->sdpa fallback) instead of a naive from_pretrained -- needed for
+        # multi-GPU/FP8 Teachers (e.g. qwen_big), not just the small lfm2/olmo checkpoints.
+        model, tokenizer = load_model_and_tokenizer(model_name, dtype=torch.bfloat16)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        model.eval()
+        device = next(model.parameters()).device  # device_map="auto" decides placement, not `device`
+    else:
+        from transformers import AutoModel
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModel.from_pretrained(model_name).to(device).eval()
 
     all_embeds = []
     doc_id_of_token = []
@@ -120,7 +156,10 @@ def embed_tokens(texts: list, model_name: str, device: str, max_length: int, bat
             batch_texts = texts[start:start + batch_size]
             enc = tokenizer(batch_texts, padding=True, truncation=True, max_length=max_length,
                              return_tensors="pt").to(device)
-            out = model(**enc).last_hidden_state  # (B, T, H) -- no pooling
+            if backend == "causal":
+                out = model(**enc, output_hidden_states=True).hidden_states[layer]  # (B, T, H), no pooling
+            else:
+                out = model(**enc).last_hidden_state  # (B, T, H) -- no pooling
             mask = enc["attention_mask"].bool()
             for i in range(len(batch_texts)):
                 doc_idx_global = start + i
@@ -169,7 +208,12 @@ def main() -> None:
     p.add_argument("--data", action="append", required=True,
                     help="dataset_type:path, repeatable (dataset_type in retrieval/reasoning/general)")
     p.add_argument("--out", required=True)
-    p.add_argument("--embedding_model", default="BAAI/bge-large-en-v1.5")
+    p.add_argument("--embedding_model", default="BAAI/bge-large-en-v1.5",
+                    help="HF model id, or lfm2/olmo/qwen when --embedding_backend causal")
+    p.add_argument("--embedding_backend", choices=["bidirectional", "causal"], default="bidirectional")
+    p.add_argument("--embedding_layer", type=int, default=-1,
+                    help="hidden_states index to read, causal backend only (-1=last; try a middle "
+                         "layer, e.g. 12, if last-layer geometry looks degenerate)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--max_length", type=int, default=512, help="tokenizer truncation length per document")
     p.add_argument("--max_docs_per_dataset", type=int, default=None,
@@ -196,7 +240,8 @@ def main() -> None:
     print(f"total: {len(texts)} documents across {len(args.data)} dataset(s)", flush=True)
 
     embeddings, token_doc_id, n_tokens_per_doc = embed_tokens(
-        texts, args.embedding_model, args.device, args.max_length, batch_size=args.batch_size)
+        texts, args.embedding_model, args.device, args.max_length, batch_size=args.batch_size,
+        backend=args.embedding_backend, layer=args.embedding_layer)
     print(f"embedded {embeddings.shape[0]} tokens (dim={embeddings.shape[1]}) "
           f"in {time.time() - t0:.1f}s, device={args.device}", flush=True)
 

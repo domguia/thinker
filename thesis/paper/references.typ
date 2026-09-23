@@ -34,4 +34,16 @@
 [33] Liu, S., et al. (2025). Goedel-Prover: Frontier Open-Source Automated Theorem Proving. COLM. \
 [34] Yuan, J., Gao, H., Dai, D., Luo, J., Zhao, L., Zhang, Z., Xie, Z., Wei, Y. X., Wang, L., Xiao, Z., Wang, Y., Ruan, C., Zhang, M., Liang, W., & Zeng, W. (2025). Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention. arXiv:2502.11089. \
 [35] DeepSeek-AI. (2025). DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models (DeepSeek Sparse Attention / Lightning Indexer). arXiv:2512.02556. \
-[36] Qiu, Z., Wang, Z., Li, X., et al. (2026). On the Design of Qwen3.8-Next Architecture: Evaluation, Efficiency, and Training Stability (Qwen Sparse Attention). arXiv:2608.30320.
+[36] Qiu, Z., Wang, Z., Li, X., et al. (2026). On the Design of Qwen3.8-Next Architecture: Evaluation, Efficiency, and Training Stability (Qwen Sparse Attention). arXiv:2608.30320. \
+[37] Geiping, J., et al. (2025). Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach. NeurIPS 2025 (Spotlight). arXiv:2502.05171. \
+[38] Saunshi, N., Dikkala, N., Li, Z., Kumar, S., & Reddi, S. J. (2025). Reasoning with Latent Thoughts: On the Power of Looped Transformers. ICLR 2025. arXiv:2502.17416. \
+[39] Fan, Y., Svete, A., & Lee, K. (2026). Bridging the Gap Between Latent and Explicit Reasoning with Looped Transformers (LOTUS). arXiv:2606.31779. \
+[40] Fan, Y., Du, Y., Ramchandran, K., & Lee, K. (2025). Looped Transformers for Length Generalization. ICLR 2025. arXiv:2409.15647. \
+[41] Jeddi, A., et al. (2026). LoopFormer: Elastic-Depth Looped Transformers. ICLR 2026. arXiv:2602.11451. \
+[42] Fu, Y., et al. (2025). Think-at-Hard: Dynamic Looped Transformers with Adaptive Latent Reasoning. arXiv:2511.08577. \
+[43] Hao, S., Sukhbaatar, S., Su, D., Li, X., Hu, Z., Weston, J., & Chen, X. (2024). Training Large Language Models to Reason in a Continuous Latent Space (Coconut). arXiv:2412.06769. \
+[44] Berges, V.-P., Oğuz, B., Haziza, D., Yih, W.-T., Zettlemoyer, L., & Ghosh, G. (2024). Memory Layers at Scale. Meta FAIR. arXiv:2412.09764. \
+[45] He, Z., Zeng, Y., Dong, L., Wei, F., & Huang, M. (2024). PEER: A Million Tiny Experts. arXiv:2407.04153. \
+[46] Sakana AI. (2026). Augmented Lagrangian Predictive Coding: Training 1000-Layer Networks Without Backpropagation (PC-ALM). https://pub.sakana.ai/pc-alm/ \
+[47] Geva, M., Schuster, R., Berant, J., & Gkatzia, D. (2021). Transformer Feed-Forward Layers Are Key-Value Memories. EMNLP 2021. \
+[48] Meng, K., Bau, D., Andonian, A., & Belinkov, Y. (2022). Locating and Editing Factual Associations in GPT (ROME). NeurIPS 2022.

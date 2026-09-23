@@ -11,6 +11,12 @@
 #align(center)[
   #text(size: 18pt, weight: "bold")[Thinker: A Recurrent Cross-Attention Transformer for Algorithmic Reasoning] \
   #v(1em)
+  #text(size: 12pt)[Domguia \
+  #text(size: 10pt)[Author]] \
+  #v(0.3em)
+  #text(size: 12pt)[Kouamou \
+  #text(size: 10pt)[Supervisor]] \
+  #v(1em)
   #text(size: 10pt)[March 26, 2026]
 ]
 

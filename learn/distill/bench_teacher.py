@@ -21,10 +21,45 @@ each default.
 """
 import argparse
 import json
+import os
+import subprocess
 import time
 
 import torch
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer, BitsAndBytesConfig
+
+LOCAL_STAGING_ROOT = "/tmp/teacher_cache"
+
+
+def stage_model_locally(model_dir, local_staging_root=LOCAL_STAGING_ROOT):
+    """Copy a Teacher snapshot from Grid'5000 shared storage (Group Storage
+    NFS mounts, e.g. .../<name>@storageN.<site>.grid5000.fr/...) to the
+    node's local disk once, and load from there on every run.
+
+    Why: loading a 52GB bf16 checkpoint straight off the killerdroid NFS
+    mount took ~40-45min (contended, jittery I/O) vs. ~15s once staged to
+    local /tmp -- measured directly, 2026-09-22, tinystories_sample5k run.
+    Idempotent across runs/processes: skips the copy (just returns the local
+    path) if a previous run already staged this exact model_dir, marked by a
+    ".stage_complete" sentinel written only after the rsync finishes, so a
+    run that dies mid-copy doesn't leave a false "ready" cache behind.
+
+    A local snapshot dir (not on shared storage) is returned unchanged --
+    this only kicks in for the known-slow shared-storage path shape.
+    """
+    if "@storage" not in model_dir and not model_dir.startswith("/srv/storage"):
+        return model_dir
+    local_dir = os.path.join(local_staging_root, os.path.basename(model_dir.rstrip("/")))
+    sentinel = os.path.join(local_dir, ".stage_complete")
+    if os.path.exists(sentinel):
+        print(f"Using already-staged local copy of {model_dir} at {local_dir}", flush=True)
+        return local_dir
+    print(f"Staging {model_dir} -> {local_dir} (local disk, much faster than NFS for repeated loads) ...", flush=True)
+    os.makedirs(local_dir, exist_ok=True)
+    subprocess.run(["rsync", "-a", "--exclude=.stage_complete", f"{model_dir.rstrip('/')}/", f"{local_dir}/"], check=True)
+    open(sentinel, "w").close()
+    print(f"Staged {model_dir} to {local_dir}", flush=True)
+    return local_dir
 
 SAMPLE_PROMPTS = [
     "What is 12 + 7? Explain your reasoning step by step.",
@@ -103,6 +138,7 @@ def load_model_and_tokenizer(model_dir, dtype, num_gpus=None, attn_implementatio
     quantization -- use with a bf16 repo (vendor or Unsloth), not with the
     already-quantized FP8 checkpoint.
     """
+    model_dir = stage_model_locally(model_dir)
     max_memory = build_max_memory(num_gpus)
     quantization_config = build_quantization_config(quantization, dtype)
     attn_candidates = ["flash_attention_2", "sdpa"] if attn_implementation == "auto" else [attn_implementation]

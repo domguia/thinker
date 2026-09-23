@@ -198,6 +198,7 @@ class Thinker(nn.Module):
                  detach_sm_keys: bool = False, use_ff: bool = False, ff_hidden_mult: int = 4,
                  decouple_kv: bool = True, pool_n_head: int = 1, k_dim: int = None,
                  disable_kb: bool = False, disable_sm: bool = False, outer_norm: bool = False,
+                 outer_norm_type: str = "rmsnorm",
                  stream_sequence: dict = None, max_target_len: int = None,
                  stream_vocab_sizes: dict = None, use_ingest_token: bool = False,
                  stream_head_per_position: dict = None,
@@ -264,7 +265,17 @@ class Thinker(nn.Module):
         # 2026-09-23, supervisor-agent request (thesis/paper/WRITING_PLAN.md §9 E13) --
         # see _step's docstring for the full rationale. None (default) = old behavior,
         # unchanged for every existing checkpoint.
-        self.outer_norm = RMSNorm(d_model) if outer_norm else None
+        # outer_norm_type (2026-09-23, supervisor-agent, 2nd variant in parallel with
+        # the RMSNorm default): "layernorm" tests whether mean-centering (not just
+        # rescaling) matters for stabilizing R across iterations, vs RMSNorm which
+        # only rescales.
+        if not outer_norm:
+            self.outer_norm = None
+        elif outer_norm_type == "layernorm":
+            self.outer_norm = nn.LayerNorm(d_model)
+        else:
+            assert outer_norm_type == "rmsnorm", f"unknown outer_norm_type {outer_norm_type!r}"
+            self.outer_norm = RMSNorm(d_model)
         if use_ff:
             ff_hidden = d_model * ff_hidden_mult
             self.fuse_in = nn.Linear(3 * d_model, ff_hidden)

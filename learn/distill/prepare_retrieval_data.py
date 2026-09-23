@@ -18,7 +18,7 @@ from transformers import AutoTokenizer
 
 from core.model_families import resolve_model_name
 
-CHATML_TEMPLATE = "<|im_start|>user\nContext:\n{context}\n\nQuestion: {question}<|im_end|>\n<|im_start|>assistant\n{answer}<|im_end|>"
+CHATML_TEMPLATE = "<|im_start|>user\nContext:\n{context}\n\nQuestion: {question}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{answer}<|im_end|>"
 
 
 def format_context(ctx):
