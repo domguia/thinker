@@ -109,6 +109,17 @@ panne matérielle/nœud). Signalé à infra-agent.
 (loss ~0.05-0.09, sur la bonne trajectoire vu G2/T1 v3). Nouveau GPU réservé
 (job 6938205, besteffort, en attente de démarrage) pour relancer.
 
+infra-agent confirme (21:16) : graffiti-4 juste "Absent (standby)"
+(comment=OK, maintenance=NO), pas de panne matérielle réelle signalée --
+probable reboot/coupure réseau transitoire, pas à éviter à l'avenir.
+
+Job 6938205 démarré sur graffiti-3 (pas graffiti-4) -- relancé M3/T1 seed2 :
+`x1_m3_addition_seed2_retry.log`, save_dir `runs/x1_g2_m3_addition_seed2_retry`,
+même config (n_step_train_max=16, n_step_test=16, 30k steps). ETA ~25-30min.
+Une fois FINAL >=95% (quasi certain), grille T1 M1/M2/M3/M4 (3 seeds chacun)
+sera complète -- consolider dans dev_notes/experiments/X1/results.csv comme
+data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.md.
+
 ## En cours -- X1 (H2, extrapolation algorithmique OOD)
 - Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
   rapports courts, batchés, escalade uniquement selon X1_DISPATCH.md §6.
