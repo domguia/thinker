@@ -4,50 +4,45 @@
 détail chronologique/résultats complets restent dans
 `dev_notes/experiments/prompt_response_pipeline.md`.)
 
-Dernière mise à jour : 2026-09-23 ~16:52, en cours de session (deadline papier 26/09).
+Dernière mise à jour : 2026-09-23 ~19:14, en cours de session (deadline X1 25/09 12h00).
 
-## En cours
-- **BASCULE PRIORITAIRE : X1** (supervisor-agent, 18h20) -- dispatch autonome 48h, teste H2
-  (extrapolation algorithmique OOD), lire `thesis/research/RESEARCH_CHARTER.md` +
-  `thesis/research/X1_DISPATCH.md` en premier si reprise. Échéance 25/09 12h00.
-  - Générateurs T1 (addition) + T3 (prefix-sum/parité) écrits et validés mathématiquement
-    (`learn/x1/tasks.py`, committé) -- avec offset de position aléatoire (mécanisme Abacus
-    McLeish 2024, nécessaire pour que la généralisation OOD de position fonctionne).
-  - Harnais M4 (dense baseline) écrit (`learn/x1/train_dense.py`), test CPU jouet en cours
-    (0 params quasi nuls, juste pour vérifier l'absence de crash avant déploiement GPU réel).
-  - Porte G1 (M4 >=95% EM en distribution) PAS ENCORE VALIDÉE -- prochaine étape : lancer un
-    vrai training M4 sur GPU (taille normale ~5-20M params) pour T1 et T3.
-  - E8 (nmax=4 Nancy graffiti-1 step~2000/6000 sain, nmax=16 préempté Rennes checkpoint
-    préservé) est EN PAUSE, plus prioritaire que X1 pour l'instant -- reprendre après X1 ou
-    si supervisor redonne la priorité.
-- Toujours en attente de la réponse d'agent2 sur E13 (outer_norm) -- sujet distinct de X1,
-  gardé en fond.
+## En cours -- X1 (H2, extrapolation algorithmique OOD)
+- Discipline "économie de tokens" active (consigne permanente supervisor-agent) :
+  rapports courts, batchés, escalade uniquement selon X1_DISPATCH.md §6.
+- **T1 (addition) : G1 VALIDÉE** (99% EM in-dist, 20000 steps, ~16min sur H100/GPU
+  Nancy graffiti-3, job 6938128). Bug trouvé+fixé : `attention_mask` manquant dans
+  `greedy_generate()` (learn/x1/train_dense.py) cassait toute génération malgré
+  loss d'entraînement saine (commit 2aaea79). OOD=6.5% -- normal, c'est la question
+  H2 elle-même, pas un échec de gate.
+  - Prochaine étape : G2/T1 (M3 looped-dense) -- réutiliser
+    `learn/x1/train_looped_dense.py` (générique, déjà validé par data-agent sur T3).
+- **T3 (prefix_sum) : G1 + G2 VALIDÉES par data-agent** (EM=1.0 in-dist les deux).
+  data-agent construit maintenant le harnais Thinker (M1) pour le vocab synthétique
+  X1 -- plan : disable_kb=True (Baseline B, pas de KB externe pour ces tâches),
+  kb_tokens=prompt complet, génération autorégressive avec position_ids place-value.
+  Je ne duplique pas ce travail (accordé par message).
+- G3 (M1 Thinker) pas encore commencé sur aucune tâche -- bloqué sur le harnais
+  Thinker en cours de construction par data-agent.
+- Grille complète (5 tâches x 4 modèles x 3 seeds = 60 runs) pas commencée au-delà
+  des gates.
 
-## Terminé et rapporté cette session (résumé, voir journal pour détails)
-- **E5** : diagnostic mécanistique par itération -- R converge vers une DIRECTION fixe
-  (cos->1.0000) mais sa norme croît SANS BORNE (linéaire, 63->1070 sur 32 steps), rang
-  effectif s'effondre vers ~1. Entropie du logit-lens minimale vers n_step=4 (zone
-  d'entraînement) puis redescend (confiance croissante et FAUSSE) en extrapolation.
-  Corrobore l'ablation outer_norm (E13) en cours par agent2 comme fix candidat.
-- Baseline C (dense transformer non-récurrent, wikitext) : calibration 21.2% vs Thinker ~0.3-0.5%.
-- Phase17-21 : CE-vs-KD sur 4 datasets (wikitext/retrieval/math/tinystories), collapse universel confirmé.
-- Phase20 : retrieval KD couverture top-K full -- collapse persiste (couverture pas la cause).
-- Phase22/E3 : scaling (d_model 256->512) ET récurrence poids-partagés seule (transformer dense en boucle)
-  -- NI L'UN NI L'AUTRE ne reproduit le collapse Thinker. Cause reste spécifique à l'architecture Thinker.
-- Benchmark efficience : Thinker 5.8x moins de params, 8.5x plus rapide que Qwen3.5-0.8B.
-- E1 (6/6 seeds, fixed vs random n_step) : gap extrapolation +8.82 (fixe) vs +0.23 (aléatoire), robuste,
-  aucun chevauchement sur 3 seeds.
-
-## En attente de décision supervisor-agent
-- Rien pour l'instant (E5 en cours d'exécution autonome, "enchaîne" déjà donné).
-
-## GPUs actifs connus (peut être obsolète -- vérifier oarstat avant de supposer)
-- abacus27-1 (Rennes, H100) : libre après random_seed2, candidat pour E5.
-- graffiti-1/graffiti-11 (Nancy) : libres après complétion des runs E1.
+## Terminé et rapporté avant X1 (résumé, voir journal pour détails)
+- E5 (diagnostic mécanistique) : R converge en direction mais diverge en norme
+  (sans borne), corrobore l'ablation outer_norm (E13, agent2) comme fix candidat.
+- Baseline C, phase17-22/E3 (récurrence poids-partagés seule ne reproduit PAS le
+  collapse Thinker), benchmark efficience (5.8x moins de params, 8.5x plus rapide),
+  E1 (gap extrapolation +8.82 fixe vs +0.23 aléatoire, 6/6 seeds).
+- E8 (nmax=4/16 filler priority) EN PAUSE, moins prioritaire que X1.
 
 ## Notes pour la prochaine reprise (moi-même ou un autre agent)
 - Toujours vérifier `git log --oneline -20` et la fin de
-  `dev_notes/experiments/prompt_response_pipeline.md` en complément de ce fichier --
-  ce fichier donne le "quoi", le journal donne le "pourquoi/comment/chiffres".
-- Convention chemins : Nancy home != Rennes home != storage3 partagé -- toujours vérifier avant de lancer
-  un script sur un nouveau site/node (voir leçons `.claude/skills/grid5000/SKILL.md`).
+  `dev_notes/experiments/prompt_response_pipeline.md` en complément de ce fichier.
+- Lire `thesis/research/RESEARCH_CHARTER.md` + `thesis/research/X1_DISPATCH.md`
+  en premier si reprise sur X1 -- table de décision §6 pour enchaîner sans
+  repasser par supervisor sauf conditions d'escalade explicites.
+- Split de travail avec data-agent : je fais T1, data-agent fait T3 (+ harnais
+  Thinker générique, réutilisable pour T1 une fois prêt) -- se coordonner avant
+  de prendre une tâche/modèle pour éviter collision.
+- GPU actif : Nancy graffiti-3, job 6938128 (besteffort, peut être préempté --
+  checkpoints via --save_dir survivent, mais train_dense.py n'a pas encore de
+  `--init_from_checkpoint`, à ajouter si une préemption survient en plein run long).
