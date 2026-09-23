@@ -94,6 +94,13 @@ def main() -> None:
     ap.add_argument("--answer_head_lora_rank", type=int, default=0)
     ap.add_argument("--n_samples", type=int, default=500, help="0 = full val set")
     ap.add_argument("--batch_size", type=int, default=32)
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="2026-09-23, supervisor-agent recovery-path test: 0.0 (default) = greedy, "
+                         ">0 = sampled generation via generate_thinker's own _sample_next (moderate "
+                         "temperature, e.g. 0.7-0.8, tests whether the argmax 'safe bet' specifically, "
+                         "not the whole output distribution, is what's broken).")
+    ap.add_argument("--top_p", type=float, default=1.0, help="nucleus sampling cutoff, only used with --temperature > 0")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -135,7 +142,8 @@ def main() -> None:
     for start in range(0, n, args.batch_size):
         batch_idx = indices[start:start + args.batch_size]
         texts, _ = generate_thinker(model, val_ds, batch_idx, device, args.n_step, args.block_size,
-                                     args.max_answer_len, tok, temperature=0.0)
+                                     args.max_answer_len, tok, temperature=args.temperature,
+                                     top_p=args.top_p, seed=args.seed)
         for i, pred in zip(batch_idx, texts):
             gold = val_ds.examples[i]["answer"]
             em = exact_match(pred, gold)
