@@ -201,3 +201,19 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
 - GPU actif : Nancy graffiti-3, job 6938128 (besteffort, peut être préempté --
   checkpoints via --save_dir survivent, mais train_dense.py n'a pas encore de
   `--init_from_checkpoint`, à ajouter si une préemption survient en plein run long).
+
+## T2 (multiplication) lancé -- 23:40
+- `gen_multiplication` ajouté à `learn/x1/tasks.py` (commit 8f7ff39), même
+  schéma place-value/reversed-digits que gen_addition.
+- G1/T2 (M4 dense, seed0) lancé sur abacus21-1 (Rennes, job 4140312, GPU A100
+  libre réutilisé depuis un slot standby), digit_range train 1-5 / test 6-10,
+  5000 steps. Log `logs/x1_g1_m4_multiplication.log`. À 3300/5000 : loss~1.28,
+  EM=12% à step 3250 -- encore en apprentissage, pas encore de conclusion.
+- learn/x1/ synchronisé sur Rennes via rsync (pas de clone git là-bas,
+  cf. piège infra-agent : repo cluster = rsync, pas git clone).
+- data-agent d'accord pour passer à T5/T2 (msg reçu), X2(c) aussi négatif
+  de leur côté (commit a49dc83) -- les 3 remèdes isolés (X2a/b/c) sont
+  désormais tous écartés, documenté comme limite ouverte.
+- Prochaine étape : si G1/T2 passe, enchaîner G2 (M3 looped-dense) puis
+  G3 (M1 Thinker) sur T2 ; T5 (labyrinthes) nécessite un nouveau générateur
+  plus complexe (pas encore écrit), à coordonner avec data-agent.
