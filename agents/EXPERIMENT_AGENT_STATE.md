@@ -291,3 +291,14 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
   permissions "Interfere With Workloads" sur `oardel` d'un job actif.
   Laissé tel quel (besteffort, n'empêche rien), à signaler à l'utilisateur
   s'il repasse.
+
+## 2e GPU T2 (seed1) lancé en parallèle -- 00:45
+- G1/T2 seed1 lancé sur abacus18-1 (Rennes, job 4142742), 100000 steps,
+  même config que v4 (graffiti-6). Log
+  `logs/x1_g1_m4_multiplication_seed1.log`, save_dir
+  `runs/x1_g1_m4_multiplication_seed1`. Anticipe la grille 3-seeds une fois
+  G1 validé sur seed0.
+- supervisor-agent signale GPU rares cette nuit ailleurs -- j'ai 2 GPU actifs
+  actuellement, pas bloqué. Fallback CPU identifié si besoin : consolidation
+  synthèse X1 T1+T3, préparation commandes G2/G3/T2, vérif cohérence
+  results.csv.
