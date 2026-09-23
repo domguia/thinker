@@ -812,6 +812,16 @@ Dataset repéré proactivement (couverture top-K déjà full, 4503/4503 train + 
 
 Fichiers : `checkpoints/tinystories_{ceonly,kd}_best.pt`, `checkpoints/tinystories_{ceonly,kd}_best_qualitative.md`, `logs/eval_thinker_tinystories_{ceonly,kd}_fullval.json`.
 
+## phase22 -- scaling test : d_model 256 -> 512, calibration collapse quasi inchangé (2026-09-23)
+
+Piste utilisateur (via supervisor-agent) : le cœur récurrent de Thinker, plus large, réduirait-il le collapse de calibration teacher-forcée (agent2, ~0.4-0.6% argmax accuracy) ? Plan validé avant lancement : `d_model=256 -> 512` (2x, `n_head 4->8`), retrieval KD (couverture full), même n_step=4, même recette que phase20. GPU A40/L40S (46-48GB requis vu la mémoire du head vocab-driven, cf. leçons vocab qwen35). Une première tentative a été tuée par préemption besteffort avant même d'écrire une ligne de log (rien perdu, relancée sur un autre GPU).
+
+**Résultat** : `260.36M params` (2x vs `128.80M` à d_model=256, cohérent avec un head qui domine linéairement en d_model). `answer_ce` (full val, 9000 ex.) = **7.1893** -- QUASI IDENTIQUE à phase20 (7.1891 à d_model=256, écart négligeable). Qualitatif (greedy, 60 ex.) : **43/60 dégénéré (72%)**, proche des 45/60 (75%) à taille normale.
+
+**Diagnostic de calibration (agent2, `diagnose_generation_divergence.py`, mêmes heuristiques argmax teacher-forcé)** : en cours, résultat à suivre pour confirmation directe (comparaison au ~0.4-0.6% mesuré à d_model=256).
+
+**Conclusion préliminaire (avant le chiffre exact de calibration)** : doubler la largeur du cœur récurrent ne change quasiment rien à la CE ni au taux de dégénérescence qualitative -- cohérent avec l'hypothèse que le collapse n'est pas un problème de capacité/taille, mais structurel au mécanisme lui-même (poids partagés à travers les `n_step` itérations).
+
 **Note opérationnelle sur `qualitative_eval_math_kd_manual.py`** : `generate_thinker_reasoning` batch tous les exemples ensemble par défaut -- avec `max_thinking_len=1024` (math, contrairement à wikitext's `max_thinking_len=8`), batcher 30 exemples produit un tenseur logits `(30, 1024, vocab=248320)` ≈ 28GB, OOM même sur un L40S 48GB. Fix : boucler un exemple à la fois (`indices=[i]` par appel + `torch.cuda.empty_cache()`), coût en temps négligeable vs le gain de mémoire.
 
 **Phase19 terminé (retrieval, palier top-K 57%, `thinkfix_p46250`)** :
