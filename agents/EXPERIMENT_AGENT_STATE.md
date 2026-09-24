@@ -316,3 +316,26 @@ data-agent l'a fait pour T3, mettre à jour results_inventory.md/OBJECTIVES_LOG.
 ## Run CPU recalibré -- 01:03
 - G1/T2 seed2 relancé sur grdix-5 (job 6938304, walltime 4h,
   --max_time_minutes 230 --eval_every 5000). Confirmé actif (step 120).
+
+## G1/T2 -- FINAL seed0, LR sweep lancé -- 09:15
+- seed0 (graffiti-6, job 6938285) FINAL : in-dist EM=0.8200 (1,5), OOD EM=0.0000 (6,10).
+  Sous le seuil 95%, malgré 4 tentatives croissantes (17.5%→48.5%→~78%→82%).
+- seed1 (abacus18-1, job 4142742) : en cours, step 82000/100000, pas encore FINAL.
+- seed2 CPU (grdix-5, job 6938304) : confirmé actif (recalibré 4h walltime, step 120 au dernier point).
+- `train_dense.py` n'a AUCUN scheduler LR (grep vide). Diagnostic budget→LR→config :
+  budget déjà épuisé (4 extensions), donc on teste maintenant l'axe LR avant de conclure à un mur.
+- Lancé v5 (graffiti-6, même GPU libéré) : lr=1e-4 (au lieu de 3e-4), max_steps=150000,
+  max_time_minutes=50, seed=0, save_dir runs/x1_g1_m4_multiplication_v5.
+- G1/T2 PAS ENCORE VALIDÉE -- ne pas déclencher G2/T2 dans la ready queue.
+
+## Coordination -- 09:15
+- data-agent : G1/T5 (labyrinthes) PASSÉ (EM=0.98, 20000 steps, commit 2e42246).
+  Pattern sous-entraînement identique à T4 (v1@3000 steps = plateau apparent mais loss
+  en baisse, pas mort). G2/T5 en cours sur abacus17-1.
+- supervisor-agent : demande (1) enquête proactive sur sous-utilisation GPU (ex. graffiti-6
+  43% sur T2 seed0 -- probablement bottleneck data-loading CPU sur ces petits modèles) et
+  (2) checkpointing régulier systématique sur tout run de training (résumabilité), pas
+  seulement pour cette nuit.
+- infra-agent : paradoxe (Rennes, 52 cœurs) et montcalm (Toulouse, 32 cœurs) confirmés
+  libres -- tâche CPU supplémentaire fournie (voir message infra-agent) : sweep LR
+  complémentaire (lr=5e-4 et lr=1e-4 seeds différents) en parallèle du GPU v5.
