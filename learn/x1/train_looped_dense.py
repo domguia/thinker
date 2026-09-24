@@ -56,6 +56,10 @@ def main() -> None:
     ap.add_argument("--n_eval", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save_dir", default=None)
+    ap.add_argument("--resume_from", default=None, help="path to a resume.pt saved by this script "
+                     "(model+optimizer+step+best_id_em) -- continues training from that step")
+    ap.add_argument("--checkpoint_every", type=int, default=1000, help="periodic FULL resumable "
+                     "checkpoint (model+optimizer+step), independent of the best-EM-only checkpoint.pt")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
     n_step_test = args.n_step_test or args.n_step_train_max
@@ -100,11 +104,20 @@ def main() -> None:
         return em
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    model.train()
 
-    start = time.time()
     step = 0
     best_id_em = 0.0
+    if args.resume_from:
+        ckpt = torch.load(args.resume_from, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        step = ckpt["step"]
+        best_id_em = ckpt["best_id_em"]
+        full_h = model.transformer.h
+        print(f"Resumed from {args.resume_from} at step={step} best_id_em={best_id_em:.4f}", flush=True)
+
+    model.train()
+    start = time.time()
     while step < args.max_steps and (time.time() - start) / 60 < args.max_time_minutes:
         batch_examples = gen_fn(args.batch_size, (train_lo, train_hi), seed=args.seed * 1_000_003 + step,
                                  position_offset_max=args.position_offset_max)
@@ -140,6 +153,17 @@ def main() -> None:
                     import os
                     os.makedirs(args.save_dir, exist_ok=True)
                     torch.save(model.state_dict(), f"{args.save_dir}/checkpoint.pt")
+        if args.save_dir and step % args.checkpoint_every == 0:
+            import os
+            os.makedirs(args.save_dir, exist_ok=True)
+            torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                        "step": step, "best_id_em": best_id_em}, f"{args.save_dir}/resume.pt")
+
+    if args.save_dir:
+        import os
+        os.makedirs(args.save_dir, exist_ok=True)
+        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                    "step": step, "best_id_em": best_id_em}, f"{args.save_dir}/resume.pt")
 
     model.eval()
     with torch.no_grad():
